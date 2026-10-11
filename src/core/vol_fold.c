@@ -428,6 +428,10 @@ int vol_fold(invfs_volume *v)
     if (vol_delta_count(v) == 0)
         return 0;                        /* empty delta: a no-op */
 
+    /* WP607: neutralize doomed spans before either barrier below flushes
+     * them raw (same rule as every fence: heal first, barrier second). */
+    vol_delta_heal(v);
+
     if (!fold_space_ok(v))
         return -1;
 

@@ -2,6 +2,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP607 retire API */
 
 typedef struct invfs_wsession invfs_wsession;
 
@@ -805,7 +806,7 @@ static int vol_write_commit_v3(invfs_wsession *s)
     uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     invfs_inode in;
     uint64_t id, now = (uint64_t)time(NULL);
-    uint32_t i, k;
+    uint32_t i;
     int rc;
 
     if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
@@ -874,35 +875,30 @@ static int vol_write_commit_v3(invfs_wsession *s)
             return -1;
     }
 
-    /* Free old data segments the new recipe no longer names. A segment
-     * the session re-wrote has a fresh pba; its OLD pba still belongs to
-     * the retired recipe and was never freed by wsession_write_seg_n (that
-     * only frees the session's own superseded writes), so it must be freed
-     * here whenever the new entry table does not keep it. The superseded
-     * recipe blob page itself is left for WP-M15. */
+    /* WP607: free old data segments the new recipe no longer names --
+     * RETIRED, not freed. A segment the session re-wrote has a fresh pba;
+     * its OLD pba still belongs to the retired recipe and was never freed
+     * by wsession_write_seg_n (that only frees the session's own
+     * superseded writes). Freeing here would hand live-again rows reused
+     * blocks if this commit's row is later doomed and unwound (the s35/s23
+     * use-after-free: the row is staged, not durable). The retire entry
+     * carries copies of the old set and the new keep-set; the drain
+     * replays the WP78 share-aware loop against the live map, sparing
+     * dedupe shares and sibling batch members, and only while this row is
+     * still the live one. The superseded recipe blob page itself is left
+     * for WP-M15. */
     if (s->old_pbas) {
-        /* WP78: the new recipe is already published, so a fresh ref map
-         * (TEXT batch pbas are excluded by the v3 walker) tells us whether
-         * any other live file still names each dropped pba -- a dedupe
-         * share or a sibling batch member must survive one file's rewrite. */
-        pba_ref_reset(v);
-        pba_ref_ensure(v);
-        for (i = 0; i < s->old_n_ents; i++) {
-            uint64_t pba = s->old_pbas[i];
-            int keep = 0;
-            if (!pba)
-                continue;
-            for (k = 0; k < i; k++)
-                if (s->old_pbas[k] == pba) { keep = 1; break; }
-            if (!keep)
-                for (k = 0; k < s->n_ents; k++)
-                    if (s->ents[k].pba == pba) { keep = 1; break; }
-            if (!keep && pba_ref_count(v, pba) == 0) {
-                uint64_t plen = 0;
-                if (seg_extent_checked(v, pba, &plen) == 0)
-                    vol_free_blocks(v, pba, plen);
+        uint64_t *keep = NULL;
+        if (s->n_ents > 0) {
+            keep = (uint64_t *)malloc(s->n_ents * sizeof *keep);
+            if (keep) {
+                for (i = 0; i < s->n_ents; i++)
+                    keep[i] = s->ents[i].pba;
             }
         }
+        vol_retire_pbas(v, id, s->old_pbas, s->old_n_ents,
+                        keep, keep ? s->n_ents : 0);
+        free(keep);
     }
     free(s->old_pbas);
     s->old_pbas = NULL;

@@ -165,10 +165,16 @@ int main(int argc, char **argv)
         }
     }
 
-    /* 7. Unlink and data block reclamation */
+    /* 7. Unlink and data block reclamation. WP607: unlink retires the
+     * freed blocks instead of freeing them synchronously (a fenced row
+     * may still be doomed and unwound -- freeing under it is the s35/s23
+     * use-after-free). The retire entry drains at the first successful
+     * fence while the row is still absent, so sync between unlink and the
+     * check: the space is back after the fence, not before it. */
     {
         uint64_t free_before = v->free_blocks;
         ok(vol_unlink(v, "large_16m.bin") == 0, "unlink 16 MiB file");
+        ok(vol_sync(v) == 0, "sync fences the unlink (retire drains)");
         ok(v->free_blocks > free_before, "free blocks increased after unlinking 16 MiB file");
     }
 

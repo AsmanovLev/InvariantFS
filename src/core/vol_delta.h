@@ -115,10 +115,35 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
  * inline under the lock they already hold. */
 void vol_delta_doom(invfs_volume *v);
 
+/* WP607: defer content frees to fence time. The caller just staged a row
+ * mutation (supersede or delete) that retires content; the blocks are
+ * freed at the first successful fence covering the mutation, and only
+ * while the mutation is still live (span/seq match for supersedes, DELETE
+ * tombstone still up for deletes). An unwound mutation drops its entry and
+ * the blocks
+ * stay allocated -- the s35/s23 use-after-free class cannot form. The
+ * recipe form covers row-supersede sites (create/rename-victim/unlink);
+ * the pba form covers the commit path (copies its pba/keep sets).
+ * Best-effort: over-cap entries leak to the sweep orphan collector.
+ * Callers must NOT hold g_delta_lock (span capture takes it). */
+void vol_retire_recipe(invfs_volume *v, uint64_t inode_id,
+                       const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
+                       int del);
+void vol_retire_pbas(invfs_volume *v, uint64_t inode_id,
+                     const uint64_t *pbas, size_t npbas,
+                     const uint64_t *keep, size_t nkeep);
 /* WP606: encode tombstone pad(s) over exactly `len` bytes at `out`
  * (caller provides `len` bytes). Returns `len`, or 0 when `len` cannot
  * hold a pad. Unit-tested (delta_test): the total is always exact. */
 size_t vol_delta_pad_build(uint8_t *out, size_t len);
+/* WP607: heal retained spans ahead of a fence the delta paths do not own.
+ * Every successful barrier flushes ALL dirty pages device-wide --
+ * including doomed spans whose pads were never written. A fence that does
+ * not heal first (close-flush, fold, anchor) commits failed mutations raw
+ * (the leg5 r17 remount-ghost: doomed at error time, fenced raw at gate
+ * unmount). No-op when nothing needs healing; the caller's barrier still
+ * decides the ack. Takes g_delta_lock. */
+void vol_delta_heal(invfs_volume *v);
 
 /* WP602: close the staged group. Issues one vmux_barrier when records were
  * staged since the last covering barrier and returns its result, so a 0 is

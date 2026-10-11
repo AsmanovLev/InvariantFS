@@ -2599,6 +2599,12 @@ static void ino_key(uint64_t id, uint8_t k[8])
         k[i] = (uint8_t)(id >> (56 - 8 * i));
 }
 
+/* WP607: public row-key builder for retire entries (same encoding). */
+void vol_inode_row_key(uint64_t id, uint8_t k[8])
+{
+    ino_key(id, k);
+}
+
 /* Encode the fixed row prefix. WP-M5 writes xattr_len == 0 (the xattr tree
  * is WP-M7); the field is frozen so that WP needs no format break. */
 static uint16_t ino_encode(const invfs_inode *in, uint8_t *buf)

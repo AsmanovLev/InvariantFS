@@ -497,6 +497,15 @@ static int leg_ok(void)
     oracle(v, "bystander.bin", b, FILE_SZ,
            "the bystander is untouched by the truncate's free");
 
+    /* WP607: the truncate retires its old blocks instead of freeing them
+     * synchronously (a staged row may still be doomed and unwound --
+     * freeing under it is the s35/s23 use-after-free). The retire entry
+     * drains at the first successful fence while the new row is still
+     * live, so sync between the truncate and the reclaim check. The
+     * invariant this test pins (no LIVE row names a FREE block) holds
+     * under retire by construction: the drain verifies span/seq liveness
+     * before freeing anything. */
+    ok(vol_sync(v) == 0, "sync fences the truncate (retire drains)");
     nfree = count_free(v, old_pba, n_old, NULL);
     note("  [after-ok-trunc] %d of %d pre-truncate pbas are free\n", nfree, n_old);
     ok(nfree == n_old,

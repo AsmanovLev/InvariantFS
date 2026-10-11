@@ -2,6 +2,7 @@
  * hard links, replace/unlink. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP607 retire API */
 #include "vol_fault.h"
 
 /* Test-only door (src/core/vol_fault.h): the arming state of THIS
@@ -528,19 +529,22 @@ uint64_t vol_create_node(invfs_volume *v, const char *name,
     }
     if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
-    /* The supersede is now durable in the delta log and the live row names
-     * the NEW recipe, so the old blocks are unreachable by anything that can
-     * still be read -- free them now, and only now. Mirrors vol_unlink:
-     * the row goes first, the blocks second.
+    /* WP607: the supersede is STAGED, not durable (group commit may doom
+     * and unwind it), so the old blocks must not be freed here -- a
+     * resurrected row naming freed blocks is the s35/s23 use-after-free
+     * (the leg2-52eba7a class, one level up: freeing on an unfenced
+     * decision). Retire them instead: the first successful fence covering
+     * this row frees them, and only while this row is still the live one.
+     * Mirrors vol_unlink: the row goes first, the blocks second -- with a
+     * fence between them now.
      *
-     * Deferring costs nothing here. The row this publishes names NO recipe
-     * for a REG/DIR replacement (recipe_addr is memset to zero, and a zero
-     * address names no blocks -- vol_free_recipe_blocks, vol_ast.c:151),
-     * so nothing live points into the old recipe when the free runs; the
+     * The row this publishes names NO recipe for a REG/DIR replacement
+     * (recipe_addr is memset to zero, and a zero address names no blocks),
+     * so nothing live points into the old recipe when the retire runs; the
      * recipe BLOB is a base-tree value under 0x04 || BLAKE3(blob), reclaimed
      * by the fold, not here. Where a recipe IS published (a symlink target)
      * the address is BLAKE3 of the blob, so identical content recurs at the
-     * SAME address -- which is exactly why the free is guarded on the row
+     * SAME address -- which is exactly why the retire is guarded on the row
      * having MOVED. That is the guard vol_release_superseded_blob already
      * carries, and it is load-bearing twice over: vol_inode_delta_put only
      * invalidates the pba map when recipe_addr changes, so freeing an
@@ -548,7 +552,7 @@ uint64_t vol_create_node(invfs_volume *v, const char *name,
      * to nothing. */
     if (had_content &&
         memcmp(in.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) != 0)
-        vol_free_recipe_blocks(v, old_addr, 0);
+        vol_retire_recipe(v, id, old_addr, 0);
     if (vol_dirent_delta_put(v, pino, leaf, id) != 0)
         return 0;
     if (in.type == INVFS_ITYP_DIR)
@@ -815,14 +819,11 @@ int vol_unlink(invfs_volume *v, const char *name)
             return -1;
         }
         if (vol_inode_delta_delete(v, id) != 0) {
-            /* WP604: the dirent is already gone, so a bare -1 reports
+            /* WP604/WP607: the dirent is already gone, so a bare -1 reports
              * failure for a mutation that happened (rc==0 iff changed).
-             * The row is intact whenever the row-delete append itself did
-             * not run, so put the name back: best effort, still -1. */
-            if (vol_dirent_delta_put(v, pino, leaf, id) != 0)
-                fprintf(stderr, "invarifs: unlink %s: failed AND the "
-                        "dirent rollback failed; the namespace may be "
-                        "torn. Run invf-fsck.\n", name);
+             * Unwind via doom (infallible; a compensating put-back append
+             * can itself fail under chaos). The hold still needs release. */
+            vol_delta_doom(v);
             vol_pba_ref_release(v);
             return -1;
         }
@@ -843,45 +844,57 @@ int vol_unlink(invfs_volume *v, const char *name)
          * Report it, and name the file, so the operator knows which reclaim
          * to chase.
          *
-         * WP604: reporting it is not the same as returning -1 for a mutation
-         * that already happened. The free runs AFTER the name and the row
-         * are gone, and on failure it has freed nothing (vol_ast.c: the
-         * parse/load legs return -1 having touched no refcount), so the
-         * honest answer is to put both back -- row first, dirent second,
-         * the create ordering, so a crash mid-rollback leaves an orphan
-         * row, never a dangling name -- and keep the -1 LOUD with the
-         * namespace unchanged. The file stays unreadable either way (its
-         * recipe would not load before the unlink either); fsck names it
-         * instead of silently leaking its blocks under no name. The
-         * sibling cascade below is skipped on this path: the '!' parts are
-         * still intact, and purging them while restoring the main name
-         * would strand a container without its members. Rollback is best
-         * effort: if the compensating appends fail too, the -1 stands and
-         * the message says what is missing. */
-        if (in.type == INVFS_ITYP_REG &&
-            vol_free_recipe_blocks(v, in.recipe_addr, 0) != 0) {
-            int rrb = vol_inode_delta_put(v, id, &in);
-            int rdb = (rrb == 0)
-                ? vol_dirent_delta_put(v, pino, leaf, id) : -1;
-            if (rrb == 0 && rdb == 0) {
-                fprintf(stderr, "invarifs: unlink %s: recipe does not "
-                        "load or parse, so its data blocks were NOT "
-                        "reclaimed; the unlink was rolled back and the "
-                        "file is unchanged. Run invf-fsck.\n", name);
-            } else {
-                fprintf(stderr, "invarifs: unlink %s: recipe does not "
-                        "load or parse AND the rollback failed (row=%d "
-                        "dirent=%d); the namespace may be torn. Run "
-                        "invf-fsck.\n", name, rrb, rdb);
+         * WP607: the free itself is RETIRED (delete-kind entry on this
+         * row): it runs at the first fence while the row is still absent.
+         * A fence-failure doom restores the row and drops the entry, so
+         * the resurrected file keeps its blocks (the s23 late tear).
+         * The WP604 put-back compensation stays, but moved one step
+         * earlier: instead of freeing and putting back on failure, probe
+         * the recipe READ-ONLY now (vol_recipe_load resolves+validates
+         * without freeing). Unresolvable now means unresolvable at drain
+         * too, so put both back right away (row first, dirent second),
+         * keep the -1 LOUD and the namespace unchanged -- the D2 leg pins
+         * this. Resolvable now means retire: a later tear fails at drain
+         * instead, loudly, and the blocks stay allocated for the sweep
+         * orphan collector (the op already succeeded; nothing to put
+         * back). The row-delete-failure compensation above stays: a
+         * staging error still needs the name put back right away. */
+        if (in.type == INVFS_ITYP_REG) {
+            uint8_t *probe = NULL;
+            size_t probelen = 0;
+            invfs_ast_hdr pah;
+            const invfs_ast_block_entry *pents = NULL;
+            size_t pnents = 0;
+            int presolved = (vol_recipe_load(v, in.recipe_addr, &probe,
+                                             &probelen) == 0 && probe &&
+                               vol_ast_recipe_parse(probe, probelen, &pah,
+                                                    &pents, &pnents) == 0 &&
+                               pents != NULL);
+            free(probe);
+            if (!presolved) {
+                int rrb = vol_inode_delta_put(v, id, &in);
+                int rdb = (rrb == 0)
+                    ? vol_dirent_delta_put(v, pino, leaf, id) : -1;
+                if (rrb == 0 && rdb == 0) {
+                    fprintf(stderr, "invarifs: unlink %s: recipe does not "
+                            "load or parse, so its data blocks were NOT "
+                            "reclaimed; the unlink was rolled back and the "
+                            "file is unchanged. Run invf-fsck.\n", name);
+                } else {
+                    fprintf(stderr, "invarifs: unlink %s: recipe does not "
+                            "load or parse AND the rollback failed (row=%d "
+                            "dirent=%d); the namespace may be torn. Run "
+                            "invf-fsck.\n", name, rrb, rdb);
+                }
+                vol_pba_ref_release(v);
+                return -1;
             }
-            vol_pba_ref_release(v);
-            return -1;
+            vol_retire_recipe(v, id, in.recipe_addr, 1);
         }
         /* Cascade delete container/transcode siblings if main file is
          * unlinked. Still inside the hold: this is a nested vol_unlink
          * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
-         * so it nests correctly instead of unlocking early. Reached only
-         * on success (WP604: the free-failure path above returns first). */
+         * so it nests correctly instead of unlocking early. */
         if (strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
         vol_pba_ref_release(v);
@@ -895,18 +908,10 @@ int vol_unlink(invfs_volume *v, const char *name)
             return -1;
         in.nlink--;
         if (vol_inode_delta_put(v, id, &in) != 0) {
-            /* WP604: the dirent is already gone, so a bare -1 reports
-             * failure for a mutation that happened. Put the name AND the
-             * count back: best effort, still -1. */
-            in.nlink++;
-            int rrb = vol_inode_delta_put(v, id, &in);
-            int rdb = (rrb == 0)
-                ? vol_dirent_delta_put(v, pino, leaf, id) : -1;
-            if (rrb != 0 || rdb != 0)
-                fprintf(stderr, "invarifs: unlink %s: failed AND the "
-                        "rollback failed (row=%d dirent=%d); the "
-                        "namespace may be torn. Run invf-fsck.\n",
-                        name, rrb, rdb);
+            /* WP604/WP607: the dirent is already gone, so a bare -1 reports
+             * failure for a mutation that happened. Unwind via doom
+             * (infallible); the in-memory nlink-- dies with the stack. */
+            vol_delta_doom(v);
             return -1;
         }
     }
@@ -921,14 +926,17 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     invfs_inode f_in, t_in;
     const char *fn, *tn;
     int rc;
-    /* WP606: abort compensation state. A stage that succeeded followed
-     * by a later failure must not stay visible to a caller that saw
-     * FAIL (leg5 GHOST: put(r17) staged, fparent lookup EIO, r17 left
-     * live). victim_dropped/new_put record what to undo; the abort
-     * path below undoes it best-effort, WP604 style. */
-    int victim_dropped = 0, victim_had_row = 0, new_put = 0;
-    invfs_inode victim_in;
-    uint64_t victim_id = 0;
+    /* WP606/WP607: abort state. A stage that succeeded followed by a later
+     * failure must not stay visible to a caller that saw FAIL (leg5 GHOST:
+     * put(r17) staged, fparent lookup EIO, r17 left live). The abort path
+     * below unwinds via vol_delta_doom -- pure RAM plus tombstone pads,
+     * infallible by construction. (The first shape was compensating
+     * appends, WP604 style, but a compensating append can itself fail
+     * under chaos -- its own barrier EIOs -- and leave the original stage
+     * live with no doom trigger. Doom cannot fail.) `staged` gates the
+     * doom to ops that actually staged (no gratuitous unwinds); the pba
+     * hold is released if taken. */
+    int staged = 0, hold_taken = 0;
 
     if (!v || !from || !to || !from[0] || !to[0])
         return -1;
@@ -981,12 +989,11 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
         if (t_in.nlink > 1) {
             /* A name, not the inode: frees nothing, so it needs no map. */
             if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
-                return -1;
-            victim_dropped = 1;
-            victim_id = t_id;
+                goto rename_abort;
+            staged = 1;
             t_in.nlink--;
             if (vol_inode_delta_put(v, t_id, &t_in) != 0)
-                return -1;
+                goto rename_abort;
         } else {
             /* WP unlink-takes-map-after-dirent-drop: THIS IS THE SAME DEFECT
              * AS vol_unlink, and it was wrong in the same way.
@@ -1010,30 +1017,22 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
              * because the ordering it encoded is the thing being fixed.
              */
             vol_pba_ref_hold(v);
+            hold_taken = 1;
             pba_ref_ensure(v);
-            if (vol_dirent_delta_del(v, t_pino, tleaf) != 0) {
-                vol_pba_ref_release(v);
-                return -1;
-            }
-            if (vol_inode_delta_delete(v, t_id) != 0) {
-                /* WP606: the victim name is already gone; put it back
-                 * (best effort, still -1), or an ERR caller leaves a
-                 * missing victim behind. */
-                if (vol_dirent_delta_put(v, t_pino, tleaf, t_id) != 0)
-                    fprintf(stderr, "invarifs: rename: victim drop "
-                            "failed AND its rollback failed; the "
-                            "namespace may be torn. Run invf-fsck.\n");
-                vol_pba_ref_release(v);
-                return -1;
-            }
-            victim_dropped = 1;
-            victim_had_row = 1;
-            victim_id = t_id;
-            victim_in = t_in;
-            /* WP-N1: targeted free of overwritten destination data blocks */
+            if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
+                goto rename_abort;
+            staged = 1;
+            if (vol_inode_delta_delete(v, t_id) != 0)
+                goto rename_abort;
+            /* WP-N1/WP607: targeted free of overwritten destination data
+             * blocks -- RETIRED, not freed: the victim row is staged, not
+             * durable, and an abort unwinds it (doom below). The
+             * delete-kind entry frees at the first fence while the row is
+             * still absent; a restored victim drops it and keeps blocks. */
             if (t_in.type == INVFS_ITYP_REG)
-                vol_free_recipe_blocks(v, t_in.recipe_addr, 0);
+                vol_retire_recipe(v, t_id, t_in.recipe_addr, 1);
             vol_pba_ref_release(v);
+            hold_taken = 0;
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,
@@ -1041,40 +1040,24 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
      * never under neither. */
     if (vol_dirent_delta_put(v, t_pino, tleaf, f_id) != 0)
         goto rename_abort;
-    new_put = 1;
+    staged = 1;
     if (vol_path_lookup(v, fparent, &f_pino) != 1)
         goto rename_abort;
     if (vol_dirent_delta_del(v, f_pino, fleaf) != 0)
         goto rename_abort;
-    /* WP606: fence before ack. An acked rename must be unwound by no
-     * later fence failure (doom would roll it back while the caller saw
-     * OK); a refused fence is an ERR with the namespace compensated
-     * below, never a half-applied rename. */
-    if (vol_sync(v) != 0)
-        goto rename_abort;
+    /* WP607: no internal fence -- the FUSE layer pins an acked rename
+     * itself (WP22c barrier after vol_rename OK), so this would be a
+     * second barrier per rename. */
     return 0;
 rename_abort:
-    /* Best effort, still -1: drop the new name, restore a dropped
-     * victim (row first, dirent second: the create ordering, so a crash
-     * mid-rollback leaves an orphan row, never a dangling name). */
-    if (new_put) {
-        if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
-            fprintf(stderr, "invarifs: rename: abort AND the new-name "
-                    "rollback failed; the namespace may be torn. Run "
-                    "invf-fsck.\n");
-        new_put = 0;
-    }
-    if (victim_dropped) {
-        int vok = 0;
-        if (victim_had_row)
-            vok = vol_inode_delta_put(v, victim_id, &victim_in);
-        if (vok != 0 ||
-            vol_dirent_delta_put(v, t_pino, tleaf, victim_id) != 0)
-            fprintf(stderr, "invarifs: rename: abort AND the victim "
-                    "rollback failed; the namespace may be torn. Run "
-                    "invf-fsck.\n");
-        victim_dropped = 0;
-    }
+    /* Unwind everything staged (doom is infallible; compensating appends
+     * are not -- see the state comment above). A later fence pads the
+     * spans; pre-stage exits above never reach here, so unrelated retained
+     * records are never unwound gratuitously. */
+    if (staged)
+        vol_delta_doom(v);
+    if (hold_taken)
+        vol_pba_ref_release(v);
     return -1;
 }
 

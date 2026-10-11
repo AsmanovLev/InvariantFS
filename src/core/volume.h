@@ -712,6 +712,8 @@ int vol_xattr_scan(invfs_volume *v, uint64_t inode_id,
 int vol_inode_delta_put(invfs_volume *v, uint64_t inode_id,
                            const invfs_inode *in);
 int vol_inode_delta_delete(invfs_volume *v, uint64_t inode_id);
+/* WP607: row-key builder for retire entries (big-endian inode id). */
+void vol_inode_row_key(uint64_t id, uint8_t k[8]);
 int vol_dirent_delta_put(invfs_volume *v, uint64_t parent,
                             const char *name, uint64_t child);
 int vol_dirent_delta_del(invfs_volume *v, uint64_t parent,

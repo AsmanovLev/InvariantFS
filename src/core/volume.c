@@ -1821,6 +1821,10 @@ int vol_flush(invfs_volume *v)
         vol_io_error_latch(v, "v3 bitmap flush");
         return -1;
     }
+    /* WP607: heal retained spans before this barrier flushes them raw
+     * (close-flush after a doom, with no intervening drain, committed
+     * failed mutations durably -- the leg5 r17 remount-ghost). */
+    vol_delta_heal(v);
     if (vmux_barrier(v, "v3 bitmap") < 0) {
         /* WP605/WP606: a refused flush barrier leaves staged delta bytes
          * (which this barrier would have covered) of unknown fate: doom

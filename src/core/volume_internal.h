@@ -261,6 +261,26 @@ typedef struct {
     uint16_t prev_vlen;              /* shadowed ref value length */
 } delta_staged_rec;
 
+/* WP607 retire entry: content retired by a staged row mutation, freed at
+ * the first successful fence covering it -- and only if the mutation is
+ * still the live one. `del` marks row-DELETE retirements (unlink,
+ * rename-victim): free iff the slot still carries the DELETE tombstone
+ * (a delete stages a flagged slot, never a removal). Otherwise
+ * (supersede) free iff the slot still names the recorded span+seq. */
+typedef struct {
+    uint8_t *key;                    /* row key (copied) */
+    uint16_t klen;
+    int      del;                    /* row-delete retirement */
+    uint64_t seg, off, seq;          /* superseding record span+seq */
+    uint8_t  recipe[INVFS_RECIPE_ADDR_LEN]; /* retired content (row sites) */
+    int      has_recipe;
+    uint64_t *pbas;                  /* retired pbas (commit path) */
+    size_t   npbas;
+    uint64_t *keep;                  /* pbas to spare (commit shares) */
+    size_t   nkeep;
+} delta_retire_ent;
+#define VOL_DELTA_RETIRE_MAX 16384u
+
 
 typedef struct invfs_volume {
     char *path;
@@ -707,6 +727,20 @@ typedef struct invfs_volume {
     size_t   delta_cstaged;            /* retention capacity */
     size_t   delta_doomed;             /* leading retained entries doomed */
     int      delta_rewrite_needed;     /* a fence failed: heal first */
+    /* ---- WP607: deferred frees (retire-on-fence) ---------------------
+     * A row supersede stages first and frees the retired content after.
+     * Under group commit the stage is NOT durable (it may be doomed and
+     * unwound), so freeing synchronously hands live-again rows blocks
+     * that are already reused (s35 0-byte, s23 late tear -- the leg2-52eba7a
+     * class, one level up). Retired content is therefore freed only at a
+     * successful fence, and only while the superseding (or deleting) record
+     * is still the live one: an unwound row drops its retire entry and the
+     * blocks stay allocated. Leaks (dropped entries, over-cap) go to the
+     * sweep orphan collector, never to a double free. */
+    delta_retire_ent *delta_retire;    /* pending retire entries */
+    size_t   delta_nretire;            /* entries pending */
+    size_t   delta_cretire;            /* retire capacity */
+    uint64_t delta_retire_dropped;     /* over-cap leaks (sweep reclaims) */
     /* ---- WP-M14: fold trigger accounting (D2) --------------------------
      * The design gives no numeric thresholds; vol_fold.c measures replay
      * latency and fixes them (recorded there and in the WP-M14 doc). These

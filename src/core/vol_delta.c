@@ -642,6 +642,8 @@ static void dl_doom_entry(invfs_volume *v, delta_staged_rec *e)
             }
         }
     }
+    else {
+    }
     /* The mutation bytes must never be rewritten: free them now. Only
      * off/len survive, for the tombstone pad. */
     free(e->bytes);
@@ -682,6 +684,246 @@ void vol_delta_doom(invfs_volume *v)
     pthread_mutex_lock(&g_delta_lock);
     dl_doom_locked(v);
     pthread_mutex_unlock(&g_delta_lock);
+}
+
+/* WP607 retire list bodies. Span capture + liveness match run under
+ * g_delta_lock; the actual frees run after unlock (vol_free_blocks and
+ * the pba map take their own locks). A mismatch at drain drops the entry
+ * (leak to the sweep orphan collector): never free on doubt. */
+static void dl_retire_free_ent(delta_retire_ent *e)
+{
+    if (!e)
+        return;
+    free(e->key);
+    free(e->pbas);
+    free(e->keep);
+    memset(e, 0, sizeof *e);
+}
+
+/* Snapshot the live span+seq for key (caller just staged the superseding
+ * row). Returns 0 with seg/off/seq set, -1 when the key is absent (normal
+ * for row-delete retirements: the tombstone span is not needed, absence
+ * at drain is the liveness signal). */
+static int dl_retire_span(invfs_volume *v, const uint8_t *key, uint16_t klen,
+                          uint64_t *seg, uint64_t *off, uint64_t *seq)
+{
+    size_t idx;
+    if (!v || !v->delta_index)
+        return -1;
+    idx = di_find(v->delta_index, key, klen);
+    if (idx == (size_t)-1)
+        return -1;
+    *seg = v->delta_index->slot[idx].seg;
+    *off = v->delta_index->slot[idx].off;
+    *seq = v->delta_index->slot[idx].seq;
+    return 0;
+}
+
+/* Append (takes g_delta_lock). Over-cap entries are dropped loudly (leak). */
+static void dl_retire_push(invfs_volume *v, delta_retire_ent *e)
+{
+    delta_retire_ent *nr;
+    if (!v || !e)
+        return;
+    pthread_mutex_lock(&g_delta_lock);
+    if (v->delta_nretire >= VOL_DELTA_RETIRE_MAX) {
+        v->delta_retire_dropped++;
+        fprintf(stderr, "invfs: retire list full (%llu dropped); "
+                "sweep reclaims the leaked blocks\n",
+                (unsigned long long)v->delta_retire_dropped);
+        pthread_mutex_unlock(&g_delta_lock);
+        dl_retire_free_ent(e);
+        return;
+    }
+    if (v->delta_nretire == v->delta_cretire) {
+        size_t ncap = v->delta_cretire ? v->delta_cretire * 2 : 16;
+        nr = (delta_retire_ent *)realloc(v->delta_retire,
+                                         ncap * sizeof *nr);
+        if (!nr) {
+            v->delta_retire_dropped++;
+            fprintf(stderr, "invfs: retire list OOM; sweep reclaims\n");
+            pthread_mutex_unlock(&g_delta_lock);
+            dl_retire_free_ent(e);
+            return;
+        }
+        v->delta_retire = nr;
+        v->delta_cretire = ncap;
+    }
+    v->delta_retire[v->delta_nretire++] = *e;
+    pthread_mutex_unlock(&g_delta_lock);
+}
+
+void vol_retire_recipe(invfs_volume *v, uint64_t inode_id,
+                       const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
+                       int del)
+{
+    delta_retire_ent e;
+    uint8_t kb[8];
+    static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
+    if (!v || !recipe_addr ||
+        memcmp(recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0)
+        return;   /* nothing retired: zero address names no blocks */
+    memset(&e, 0, sizeof e);
+    vol_inode_row_key(inode_id, kb);
+    e.key = (uint8_t *)malloc(sizeof kb);
+    if (!e.key)
+        return;   /* OOM: leak to sweep, same as over-cap */
+    memcpy(e.key, kb, sizeof kb);
+    e.klen = sizeof kb;
+    e.del = del ? 1 : 0;
+    memcpy(e.recipe, recipe_addr, INVFS_RECIPE_ADDR_LEN);
+    e.has_recipe = 1;
+    pthread_mutex_lock(&g_delta_lock);
+    if (dl_retire_span(v, kb, sizeof kb, &e.seg, &e.off, &e.seq) != 0) {
+        e.seg = e.off = e.seq = 0;   /* absent (delete retirements) */
+    }
+    pthread_mutex_unlock(&g_delta_lock);
+    dl_retire_push(v, &e);
+}
+
+void vol_retire_pbas(invfs_volume *v, uint64_t inode_id,
+                     const uint64_t *pbas, size_t npbas,
+                     const uint64_t *keep, size_t nkeep)
+{
+    delta_retire_ent e;
+    uint8_t kb[8];
+    if (!v || !pbas || npbas == 0)
+        return;
+    memset(&e, 0, sizeof e);
+    vol_inode_row_key(inode_id, kb);
+    e.key = (uint8_t *)malloc(sizeof kb);
+    if (!e.key)
+        return;
+    memcpy(e.key, kb, sizeof kb);
+    e.klen = sizeof kb;
+    e.pbas = (uint64_t *)malloc(npbas * sizeof *e.pbas);
+    if (!e.pbas) {
+        free(e.key);
+        return;
+    }
+    memcpy(e.pbas, pbas, npbas * sizeof *e.pbas);
+    e.npbas = npbas;
+    if (keep && nkeep) {
+        e.keep = (uint64_t *)malloc(nkeep * sizeof *e.keep);
+        if (!e.keep) {
+            free(e.key);
+            free(e.pbas);
+            return;
+        }
+        memcpy(e.keep, keep, nkeep * sizeof *e.keep);
+        e.nkeep = nkeep;
+    }
+    pthread_mutex_lock(&g_delta_lock);
+    if (dl_retire_span(v, kb, sizeof kb, &e.seg, &e.off, &e.seq) != 0) {
+        e.seg = e.off = e.seq = 0;
+    }
+    pthread_mutex_unlock(&g_delta_lock);
+    dl_retire_push(v, &e);
+}
+
+/* Drain at a successful fence (caller holds g_delta_lock): move entries
+ * whose mutation is still live into `out` (caller frees them after
+ * unlock), drop the rest in place. Supersede: slot must still name the
+ * recorded span+seq. Delete: the key must still be absent. */
+static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
+                              size_t *nout)
+{
+    delta_retire_ent *live = NULL;
+    size_t nlive = 0, i;
+    *out = NULL;
+    *nout = 0;
+    if (!v || v->delta_nretire == 0)
+        return;
+    live = (delta_retire_ent *)malloc(v->delta_nretire * sizeof *live);
+    if (!live)
+        return;   /* OOM: leave the list for the next fence */
+    for (i = 0; i < v->delta_nretire; i++) {
+        delta_retire_ent *e = &v->delta_retire[i];
+        size_t idx = (size_t)-1;
+        int still_live = 0;
+        if (v->delta_index && e->key)
+            idx = di_find(v->delta_index, e->key, e->klen);
+        if (e->del) {
+            /* Row-delete retirement: the delete stages a tombstone-flagged
+             * slot (di_put updates in place, never removes), so live means
+             * the slot still carries DELETE. A restored/recreated row (or
+             * a missing slot) drops the entry and keeps the blocks. */
+            still_live = (idx != (size_t)-1 &&
+                          (v->delta_index->slot[idx].flags &
+                           INVFS_DELTA_FLAG_DELETE));
+        } else if (idx != (size_t)-1) {
+            delta_slot *s = &v->delta_index->slot[idx];
+            still_live = (s->seg == e->seg && s->off == e->off &&
+                          s->seq == e->seq);
+        }
+        if (still_live) {
+            live[nlive++] = *e;
+        } else {
+            dl_retire_free_ent(e);   /* unwound: blocks stay allocated */
+        }
+    }
+    free(v->delta_retire);
+    v->delta_retire = NULL;
+    v->delta_nretire = 0;
+    v->delta_cretire = 0;
+    *out = live;
+    *nout = nlive;
+}
+
+/* Free collected entries (OUTSIDE g_delta_lock). Recipe form reuses the
+ * synchronous resolver; pba form replays the commit's share-aware loop
+ * against the live map (shares that appeared since retire are spared). */
+static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
+                                size_t n)
+{
+    size_t i, j, k;
+    int need_map = 0;
+    for (i = 0; i < n; i++) {
+        if (list[i].pbas && list[i].npbas) {
+            need_map = 1;
+            break;
+        }
+    }
+    if (need_map) {
+        pba_ref_reset(v);
+        pba_ref_ensure(v);
+    }
+    for (i = 0; i < n; i++) {
+        delta_retire_ent *e = &list[i];
+        if (e->has_recipe) {
+            if (vol_free_recipe_blocks(v, e->recipe, 0) != 0)
+                fprintf(stderr, "invfs: retire: recipe no longer "
+                        "resolves; blocks stay allocated\n");
+        } else if (e->pbas) {
+            for (j = 0; j < e->npbas; j++) {
+                uint64_t pba = e->pbas[j];
+                int keep = 0;
+                if (!pba)
+                    continue;
+                for (k = 0; k < j; k++) {
+                    if (e->pbas[k] == pba) {
+                        keep = 1;
+                        break;
+                    }
+                }
+                if (!keep && e->keep) {
+                    for (k = 0; k < e->nkeep; k++) {
+                        if (e->keep[k] == pba) {
+                            keep = 1;
+                            break;
+                        }
+                    }
+                }
+                if (!keep && pba_ref_count(v, pba) == 0) {
+                    uint64_t plen = 0;
+                    if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
+                        vol_free_blocks(v, pba, plen);
+                }
+            }
+        }
+        dl_retire_free_ent(e);
+    }
+    free(list);
 }
 
 /* WP606 tombstone pad bodies (here for dl_wr16be/invfs_crc32c, §1). */
@@ -740,9 +982,10 @@ static void dl_staged_heal(invfs_volume *v)
         return;
     n = v->delta_doomed < v->delta_nstaged ? v->delta_doomed
                                             : v->delta_nstaged;
-    for (i = 0; i < n; i++)
+    for (i = 0; i < n; i++) {
         (void)dl_pad_span(v, v->delta_staged[i].off,
                           v->delta_staged[i].len);
+    }
     for (i = n; i < v->delta_nstaged; i++) {
         if (!v->delta_staged[i].bytes)
             continue;
@@ -751,6 +994,24 @@ static void dl_staged_heal(invfs_volume *v)
                       v->delta_staged[i].len) != 0)
             break;   /* the barrier below reports the failure */
     }
+}
+
+/* WP607: heal retained spans ahead of a fence the delta paths do not own
+ * (close-flush, fold, anchor). See vol_delta.h. Best-effort trylock: the
+ * anchor runs inside mbuf_rt30_store, which delta appends call under the
+ * lock -- blocking there self-deadlocks (non-recursive mutex). Skipping
+ * is safe: an in-progress delta op heals at its own group-close/drain
+ * fence, which always follows; only fences with no delta op in flight
+ * need this call, and those never contend. */
+void vol_delta_heal(invfs_volume *v)
+{
+    if (!v)
+        return;
+    if (pthread_mutex_trylock(&g_delta_lock) != 0)
+        return;
+    if (v->delta_rewrite_needed && v->delta_nstaged > 0)
+        dl_staged_heal(v);
+    pthread_mutex_unlock(&g_delta_lock);
 }
 
 /* Reservation bookkeeping widens the same dirty byte range everything else
@@ -850,6 +1111,8 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     uint8_t *rec;
     int inserted = 0;
     int kept = 0;   /* WP605/WP606: current record retained until fenced */
+    delta_retire_ent *rdrain = NULL;   /* WP607: freed after unlock */
+    size_t nrdrain = 0;
 
     if (!v || !key || klen == 0)
         return -1;
@@ -1001,6 +1264,10 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         v->delta_pending = 0;
         v->delta_pending_bytes = 0;
         v->delta_rewrite_needed = 0;
+        /* WP607: this fence just made the group durable: retire entries
+         * whose mutation is still live become real frees (after unlock).
+         * Unwound rows drop their entries and keep their blocks. */
+        dl_retire_collect(v, &rdrain, &nrdrain);
     }
 
     seq = ++v->delta_seq;
@@ -1039,12 +1306,16 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     if (inserted)
         v->delta_records++;
     pthread_mutex_unlock(&g_delta_lock);
+    if (rdrain)
+        dl_retire_free_list(v, rdrain, nrdrain);
     return 0;
 }
 
 int vol_delta_drain(invfs_volume *v)
 {
     int rc;
+    delta_retire_ent *rdrain = NULL;   /* WP607: freed after unlock */
+    size_t nrdrain = 0;
 
     if (!v || !v->delta_ready)
         return 0;
@@ -1071,6 +1342,9 @@ int vol_delta_drain(invfs_volume *v)
         v->delta_pending = 0;
         v->delta_pending_bytes = 0;
         v->delta_rewrite_needed = 0;
+        /* WP607: durable now -- retire entries whose mutation is still
+         * live become real frees (after unlock). */
+        dl_retire_collect(v, &rdrain, &nrdrain);
     } else {
         dl_doom_locked(v);
     }
@@ -1078,6 +1352,8 @@ int vol_delta_drain(invfs_volume *v)
      * blkio watermark (groupcommit_test T4): no caller is told staged
      * records are durable, and the next drain retries the flush. */
     pthread_mutex_unlock(&g_delta_lock);
+    if (rdrain)
+        dl_retire_free_list(v, rdrain, nrdrain);
     return rc;
 }
 
@@ -2017,4 +2293,15 @@ void vol_delta_close(invfs_volume *v)
     v->delta_group_bytes = 0;
     dl_staged_free(v);   /* WP606: retained spans die with the session */
     v->delta_rewrite_needed = 0;
+    /* WP607: retire heap dies too; the blocks were never freed (no fence
+     * proved the mutations), so they stay allocated -- honest. */
+    if (v->delta_retire) {
+        size_t _i;
+        for (_i = 0; _i < v->delta_nretire; _i++)
+            dl_retire_free_ent(&v->delta_retire[_i]);
+        free(v->delta_retire);
+        v->delta_retire = NULL;
+        v->delta_nretire = 0;
+        v->delta_cretire = 0;
+    }
 }

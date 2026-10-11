@@ -2991,10 +2991,10 @@ land AFTER the pads (kill -9 path: daemon dead, page cache flushes the
 failed mutation's pages post-pad) can still surface -- the same class as
 legacy failed-append bytes landing, noted not chased.
 
-## leg5 s23 0-byte collateral AFTER fsck -f content-cut (separate from ghost)
+## leg5 s23 0-byte collateral: use-after-free, SAME ROOT AS s35 (WP607)
 
-**Date:** 2026-10-11. **Status:** OPEN, prime suspect fsck -f content-cut vs
-dedupe-shared blocks (unproven), evidence frozen.
+**Date:** 2026-10-11. **Status:** FIXED by WP607 (this commit); the fsck -f
+suspect below is EXONERATED (see mechanism).
 With the ghost fixed the seed-20261331 leg5 run survives to r56 and fails
 at the exhausted gate: `resurrected s23.bin torn but unnamed`. Frozen
 artifact: tools/flakey/artifacts/leg5-soak-20261011-184805/ (backing.img +
@@ -3013,3 +3013,38 @@ the gate is blind to a real damage label. The 606 changes are exonerated
 for s23 (rename-sync touches only its two names; pads cover doomed spans;
 s23 intact at 41.9 with them live). Next: dedicated forensics WP on the
 frozen artifact (segment-overlap proof first), NOT a drive-by inside 606.
+
+## WP607: retire-on-fence (free-under-unwound-row use-after-free)
+
+**Date:** 2026-10-11. **Status:** FIXED on main (this commit), validated:
+micro-s35 OK + micro-r17 OK + leg5 PASS (212s) + leg2 PASS (0 absent) +
+make test + hygiene + vol-find ledger green.
+Root cause (one for s35 AND s23): synchronous frees of superseded content
+under a STAGED-but-unfenced row. A fence-failure/op-abort doom unwinds the
+row (overlay restored, spans padded), but the freed blocks stay freed and
+are reallocated -- the resurrected row names garbage (s35: 0-byte via
+truncate+heal; s23: delete-OK + doom-unwind + late block reuse, intact
+through r52, torn at r56 -- the fsck -f window was a bystander: no driver
+op touched s23 there because the tear needed no op, only reallocation).
+The s23 frozen artifact stands as the timeline proof; no separate -f bug.
+Fix: retire list (vol_retire_recipe/vol_retire_pbas) -- frees run at the
+first successful fence covering the mutation and only while it is still
+live (span+seq match for supersedes, DELETE tombstone still up for
+deletes); unwound rows drop their entries and keep blocks (leak to the
+sweep orphan collector, never a double free). Converted sites: create
+replace, rename victim, unlink (keeps the D2 put-back via a read-only
+load+parse probe: unresolvable now restores + -1 as before, resolvable
+retires), commit old_pbas (share-aware loop replayed at drain). Tests
+updated to the fence contract (large_file + dirs_free_before_publish sync
+before reclaim checks; v2rb D2 untouched). Op-abort doom: write/release/
+commit-fail paths unwind staged state (wctx session aborted too -- a
+release must not commit a poisoned session); rename/unlink aborts unwind
+via doom instead of compensating appends (a compensation append can itself
+fail under chaos and leave the original stage live). Heal-before-every-
+barrier (flush/fold/anchor, trylock: the anchor runs inside delta appends
+-- blocking self-deadlocks; skipping is safe because an in-flight delta op
+heals at its own fence). Post-soak doctrine (harness): verify + fsck bars
+accept DAMAGED-iff-NAMED terminal states (the v3 checker never learned the
+content cut -- vol_fsck.c names the gap; the bitmap has no CRC -- recorded
+gap; demanding pristine post-soak on an exhausted volume contradicts the
+in-soak proven-exhausted accept).

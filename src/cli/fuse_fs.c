@@ -25,6 +25,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "vol_delta.h"   /* WP607: op-abort doom on write error paths */
 #include "codec.h"   /* P0-1 guard: invfs_set_no_autopack for -o noautopack */
 #include "vol_spt0.h"
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
@@ -1645,6 +1646,29 @@ static void dirty_del_locked(wctx *c)
     }
 }
 
+/* WP607: a failed write poisons its whole session, not just the delta
+ * records it staged. invf_write stages data into the wsession (c->ws)
+ * and the sub-segment tail (c->tail[]); a failed call must drop ALL of
+ * it -- session-abort frees the session's touched segments, the delta
+ * doom unwinds staged rows/records (the s35 healed-commit: an
+ * error-window truncate + partial data fenced normally post-heal),
+ * and the tail reset discards bytes that never reached the session.
+ * Fenced (durable) records are untouched by the doom, so earlier acked
+ * calls keep their durable prefix; only the unfenced poison dies.
+ * Caller holds g_io_lock. */
+static void wctx_abort_failed_locked(wctx *c)
+{
+    if (!c)
+        return;
+    if (c->ws) {
+        vol_write_abort(c->ws);
+        c->ws = NULL;
+    }
+    c->tail_lo = c->tail_hi = 0;
+    dirty_del_locked(c);
+    vol_delta_doom(g_vol);
+}
+
 static wctx *dirty_find_locked(const char *name)
 {
     wctx *p;
@@ -2094,6 +2118,7 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
      * keep it under the same big lock as everything else */
     pthread_mutex_lock(&g_io_lock);
     if (wctx_ensure_ws_locked(c) != 0) {
+        wctx_abort_failed_locked(c);
         pthread_mutex_unlock(&g_io_lock);
         return -ENOSPC;
     }
@@ -2137,6 +2162,7 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
                 c->tail_hi = (uint32_t)(soff + piece);
         }
         if (rc != 0) {
+            wctx_abort_failed_locked(c);
             pthread_mutex_unlock(&g_io_lock);
             return wrc_eno(rc);
         }
@@ -2672,6 +2698,12 @@ static int commit_wctx(wctx *c)
         fprintf(stderr, "invf: commit %s failed (%s)\n", c->name,
                 rc == -2 ? "ENOSPC" : (rc == -ESTALE ? "ESTALE" : "io"));
         vol_write_abort(c->ws);
+        /* WP607: the failed commit staged records (size row, segments)
+         * that must not ride to a later fence (healed-commit of a failed
+         * op -- the s35 0-byte shape). Unwind them now; the fence-doom
+         * alone is too late (it only runs when a fence fails, and a
+         * healed-then-fenced record commits as normal). */
+        vol_delta_doom(g_vol);
         c->ws = NULL;
         dirty_del_locked(c);
         table_remove_name(c->name);

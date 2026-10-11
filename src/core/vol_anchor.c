@@ -22,6 +22,7 @@
 
 #include "volume_internal.h"
 #include "vol_anchor.h"
+#include "vol_delta.h"   /* WP607: heal-before-barrier */
 #include "vol_metabuf.h"
 #include "vol_spt0.h"
 #include "blkio.h"
@@ -216,6 +217,7 @@ int anchor_refresh(invfs_volume *v)
         v->anchor_refresh_failed = 1;
         return -1;
     }
+    vol_delta_heal(v);   /* WP607: never fence raw doomed spans */
     vmux_barrier(v, "anchor refresh");
     return 0;
 }
@@ -237,6 +239,7 @@ int anchor_invalidate_at(invfs_volume *v, uint64_t old_pba, const invfs_anc0 *a)
     off = old_pba * (uint64_t)INVFS_BLOCK_SIZE;
     if (io_pwrite(&v->io, off, zero, sizeof zero) != 0)
         return -1;
+    vol_delta_heal(v);   /* WP607: never fence raw doomed spans */
     vmux_barrier(v, "anchor invalidate");
     v->anchor_state = INVFS_ANCHOR_ABSENT;
     v->anchor_adopted = 0;
