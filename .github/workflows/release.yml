@@ -74,7 +74,11 @@ jobs:
           sudo apt-get install -y -qq build-essential pkg-config debhelper devscripts \
             libfuse3-dev zlib1g-dev libzstd-dev python3
       - name: debuild
-        run: debuild -us -uc -b
+        run: |
+          # The packaging tree keeps debian/ under packaging/; debuild wants
+          # it at the root. A CI-local symlink (never committed).
+          ln -s packaging/debian debian
+          debuild -us -uc -b
       - uses: actions/upload-artifact@v4
         with:
           name: dist-deb
