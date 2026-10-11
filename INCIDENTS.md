@@ -2840,3 +2840,23 @@ leg5 runs green in both shapes. Repro: `python3 tools/flakey/soak.py --replay
 NOT faulted in: overwriting blocks of a mounted image conflates metadata
 damage with oracle strictness, so the exact code path is pinned by the replay
 negative control instead.
+
+## soak leg5: dead-end gate needs a proven-exhausted verdict (mirrors leg4 WP502)
+
+**Date:** 2026-10-11. **Status:** FIXED (this entry's commit, soak.py
+only, no engine). A leg5 gate died with ladder dead-end on honestly
+unrecoverable state (artifact
+`tools/flakey/artifacts/leg5-soak-20261011-094055/`: torn base pages,
+both RT30 roots unusable, savepoint damaged, rollback declined for
+cause, fsck -f CANNOT REPAIR named). The gate demanded convergence, so
+honesty failed. Fix, same philosophy as leg4's proven-exhausted
+verdict: `exhausted_proof()` (fsck -f CANNOT REPAIR with torn/
+unreadable/unreachable wording + last-resort savepoint rollback
+attempted, converging if it actually recovers) then ledger-mode
+manifest (verify-CORRUPT UNION fsck --list-damaged names; every
+unreadable/absent model-live file must be damage-named; readable files
+keep exact-or-drop-touched strictness). Namespace-unreadable volumes
+cover absent files by the named catastrophe (per-file naming is
+impossible without enumeration); readable namespaces keep the strict
+per-file demand (stale-mapping tripwire intact). Replay on the dead
+artifact yields EXHAUSTED; healthy volume refuses proof.

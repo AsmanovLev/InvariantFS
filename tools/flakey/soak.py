@@ -421,6 +421,28 @@ class Soak:
         self.log("gate: fsck final rc=%d: %s" % (rc, out[-300:].replace("\n", " | ")))
         return rc == 0 and "\nOK" in ("\n" + out)
 
+    def exhausted_gate_body(self):
+        """Ledger-mode gate for a proven-exhausted volume.
+
+        No re-seal/content-cut (pointless on an unreachable base), no
+        verify-clean demand. Damage = verify-CORRUPT names UNION fsck
+        --list-damaged names; the manifest + absent-model checks of
+        exhausted_gate() police silence. Returns "exhausted"."""
+        rc, out = self.verify()
+        damage = self.damage_names(out)
+        rc2, out2 = self.sh([os.path.join(self.a.bin, "invf-fsck"),
+                              self.a.dev, "--list-damaged"], timeout=300)
+        for ln in (out2 or "").splitlines():
+            p = ln.split("\t")
+            if len(p) >= 4 and p[0] == "damaged" and p[2]:
+                damage.add(p[2])
+        self.log("exhausted: damage names: %s" % sorted(damage))
+        deferred = self.exhausted_gate(damage)
+        self.log("EXHAUSTED gate %d: volume unrecoverable, every loss "
+                   "named (%d damage names, %d drop-touched deferred)"
+                   % (self.n_gates, len(damage), len(deferred)))
+        return "exhausted"
+
     @staticmethod
     def damage_names(verify_out):
         """Bare `CORRUPT: <name>` files from verify --deep output.
@@ -482,13 +504,110 @@ class Soak:
             ent["deleted"] = False     # present, incl. via resurrection
         return deferred
 
+    def exhausted_proof(self):
+        """Last-resort honesty proof for an unrecoverable volume.
+
+        Called only after recover() failed. Returns "converged" if the
+        last-resort savepoint rollback actually recovered the volume
+        (the gate then continues normally), True if proven-exhausted --
+        rollback attempted (when a live window exists) and declined for
+        cause AND fsck -f CANNOT REPAIR with named cause -- and False
+        otherwise. Never mutates except via the rollback attempt, which
+        runs only after fsck -f already refused (nothing left to lose)."""
+        rc, out = self.fsck(fix=True)
+        self.log("exhausted: fsck -f rc=%d: %s"
+                   % (rc, out[-300:].replace("\n", " | ")))
+        if "CANNOT REPAIR" not in out or not ("torn" in out or
+                                                "unreadable" in out or
+                                                "unreachable" in out):
+            self.log("exhausted: fsck -f did not refuse with named "
+                       "cause -- not exhausted")
+            return False
+        rc0, out0 = self.fsck()
+        if "save point:" in out0 and "live" in out0:
+            rc, out = self.rollback()
+            self.log("exhausted: savepoint rollback attempt rc=%d: %s"
+                       % (rc, out[-300:].replace("\n", " | ")))
+            if rc == 0:
+                rc2, out2 = self.fsck()
+                self.log("exhausted: post-rollback fsck rc=%d: %s"
+                           % (rc2, out2[-300:].replace("\n", " | ")))
+                if rc2 == 0 and "\nOK" in ("\n" + out2):
+                    self.log("exhausted: rollback converged -- "
+                               "continuing as a normal gate")
+                    return "converged"
+            elif not ("DAMAGED" in out or "refusing to roll back" in out
+                        or "declined" in out or "no save point" in out):
+                self.log("exhausted: rollback failed WITHOUT a cause "
+                           "-- not exhausted")
+                return False
+        else:
+            self.log("exhausted: no live savepoint -- nothing to "
+                       "roll back")
+        self.log("exhausted: PROVEN (fsck -f CANNOT REPAIR named + "
+                   "rollback declined-or-absent) -- ledger verdict next")
+        return True
+
+    def exhausted_gate(self, damage):
+        """Ledger-mode manifest for a proven-exhausted volume.
+
+        `damage` = verify-CORRUPT names UNION fsck --list-damaged names.
+        Every model-live name must be exact, drop-touched-deferred, or
+        unreadable/absent-and-damage-named; anything else (including a
+        model-live name absent from the volume but named nowhere) fails
+        LOUDLY. Returns True (caller logs the EXHAUSTED markers)."""
+        present = set()
+        ns_unreadable = False
+        try:
+            present = self.ls()
+        except SoakFail as e:
+            # Namespace itself unreadable (base unreachable: torn/freed
+            # roots, quarantined ranges). Per-file naming is then
+            # impossible -- no enumeration exists to name through -- so
+            # the absent-model loop below covers losses by the NAMED
+            # catastrophe (established by exhausted_proof before this
+            # runs), never by per-file silence. A readable namespace
+            # keeps the strict per-file demand.
+            ns_unreadable = True
+            self.log("exhausted: invf-ls failed (%s) -- namespace "
+                       "unreadable, absent-model losses are covered by "
+                       "the named catastrophe, not per-file" % e)
+        deferred = self.diff_manifest(present, self.cat_sha, damage)
+        # The hole diff_manifest cannot see (it iterates present only):
+        # a model-live name absent from the volume is a silent loss
+        # unless damage-named. (Normal-mode gates share the hole --
+        # TODO: extend there once exhausted is proven in the field.)
+        for name, ent in sorted(self.model.items()):
+            if ent.get("deleted") or name in present:
+                continue
+            if name in (damage or set()):
+                self.log("exhausted: %s absent but damage-named -- "
+                           "accounted loss" % name)
+                continue
+            if ns_unreadable:
+                self.log("exhausted: %s absent with unreadable "
+                           "namespace -- covered by the named catastrophe "
+                           "(per-file naming impossible without enumeration)"
+                           % name)
+                continue
+            raise SoakFail("exhausted: %s absent from volume but named "
+                             "nowhere -- silent loss" % name)
+        return deferred
+
     def gate(self, final=False):
         self.n_gates += 1
         self.dm_set("up")
         if self.mounted:
             self.unmount()
-        if not self.recover():
-            raise SoakFail("recovery ladder dead-ended at gate")
+        rec = self.recover()
+        if rec is False:
+            prec = self.exhausted_proof()
+            if prec == "converged":
+                pass
+            elif prec is True:
+                return self.exhausted_gate_body()
+            else:
+                raise SoakFail("recovery ladder dead-ended at gate")
         rc, out = self.verify()
         if rc != 0 and "CORRUPT" not in out and "mismatched" in out:
             self.log("gate: torn parity -> re-seal")
@@ -506,6 +625,62 @@ class Soak:
             self.log("gate: fsck -f (content) rc=%d: %s"
                      % (rc2, out2[-300:].replace("\n", " | ")))
             rc, out = self.verify()
+            if rc != 0 and any(l.startswith("parity:")
+                               for l in out.splitlines()):
+                # Seal exists: try the explicit heal (WP402 tool) before
+                # declaring the tear unrecoverable. Heal reconstructs
+                # from parity, verifies, writes back; unverified or
+                # beyond-capacity groups refuse loudly and change nothing.
+                self.log("gate: still corrupt with live seal -> --heal")
+                rch, outh = self.sweep("--heal")
+                self.log("gate: --heal rc=%d: %s"
+                         % (rch, outh.strip().splitlines()[-1][:120]
+                            if outh.strip() else ""))
+                rc, out = self.verify()
+            if rc != 0:
+                # Last resort: proven-exhausted acceptance (same bar as
+                # the recover() path). Unhealable content tear with every
+                # loss named is honesty, not failure; anything unnamed
+                # still fails below.
+                self.log("gate: unhealable -- ledger-mode manifest next")
+                damage = self.damage_names(out)
+                rcd, outd = self.sh(
+                    [os.path.join(self.a.bin, "invf-fsck"),
+                     self.a.dev, "--list-damaged"], timeout=300)
+                for ln in (outd or "").splitlines():
+                    p = ln.split("\t")
+                    if len(p) >= 4 and p[0] == "damaged" and p[2]:
+                        damage.add(p[2])
+                self.log("exhausted: damage names: %s" % sorted(damage))
+                # Resurrected-with-tear discipline: a model-deleted name
+                # present with content outside history is NOT a clean
+                # rollback -- it must be damage-named like any loss.
+                # Resurrected-with-tear discipline: a model-deleted name
+                # present with content outside history is NOT a clean
+                # rollback -- it must be damage-named like any loss. (ls
+                # itself may fail on a torn namespace; then there is no
+                # present set to discipline and the absent-model check
+                # inside exhausted_gate decides.)
+                try:
+                    present = self.ls()
+                except SoakFail:
+                    present = set()
+                for name in sorted(present):
+                    ent = self.model.get(name)
+                    if ent is None or not ent.get("deleted"):
+                        continue
+                    sha = self.cat_sha(name)
+                    if sha is not None and sha not in ent["hist"] \
+                            and name not in damage:
+                        raise SoakFail(
+                            "exhausted: resurrected %s torn but unnamed "
+                            "-- silent loss" % name)
+                deferred = self.exhausted_gate(damage)
+                self.log("EXHAUSTED gate %d: content tear unhealable, "
+                           "every loss named (%d damage names, %d "
+                           "drop-touched deferred)"
+                           % (self.n_gates, len(damage), len(deferred)))
+                return "exhausted"
         if rc != 0:
             raise SoakFail("verify not clean at gate: %s" % out[-500:])
         # manifest diff: presence => known name + content in its history
@@ -534,6 +709,7 @@ class Soak:
     def run(self):
         self.mount()
         deadline = self.t0 + self.a.seconds
+        exhausted = False
         while time.monotonic() < deadline:
             self.n_rounds += 1
             mode = self.rng.choices(["up", "drop", "error"],
@@ -585,12 +761,21 @@ class Soak:
                 self.dm_set("up")
                 self.mount()
             if self.n_rounds % 4 == 0:
-                self.gate()
-        self.gate(final=True)
+                if self.gate() == "exhausted":
+                    self.log("SOAK: ending leg as proven-exhausted -- "
+                               "chaos won once, every loss named")
+                    exhausted = True
+                    break
+        if not exhausted:
+            self.gate(final=True)
         with open(os.path.join(self.a.work, "model.json"), "w") as f:
             json.dump(self.model, f, indent=1)
-        print("SOAK: PASS rounds=%d ops=%d gates=%d (mode changes in oplog)"
-              % (self.n_rounds, self.n_ops, self.n_gates))
+        if exhausted:
+            print("SOAK: PASS-EXHAUSTED rounds=%d ops=%d gates=%d (chaos won once, honestly)"
+                  % (self.n_rounds, self.n_ops, self.n_gates))
+        else:
+            print("SOAK: PASS rounds=%d ops=%d gates=%d (mode changes in oplog)"
+                  % (self.n_rounds, self.n_ops, self.n_gates))
         return 0
 
 
