@@ -42,7 +42,7 @@ FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
 CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
-            vol_heat vol_sweep vol_read vol_write vol_records vol_ast \
+            vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
             vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
             arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro ed25519 \

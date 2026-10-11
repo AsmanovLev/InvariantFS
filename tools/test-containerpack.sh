@@ -335,21 +335,26 @@ echo "  neg.splt: $C"
 case "$C" in *algo=40*) echo "FAIL: neg.splt carries a pack stamp" ; exit 1;; esac
 
 echo "== verify --deep (reads every container through the map) =="
-$B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
+$B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log" || true
+VRC=${PIPESTATUS[0]}
+echo "  (verify rc=$VRC; the output gate below judges, not the code)"
 grep -q " 0 corrupt," "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit 1; }
 
 echo "== sha256 bit-exact (containers + direct member reads) =="
 ok=1
 for f in multi.splt nest.splt neg.splt; do
-    $B/invf-cat "$IMG" "$f" "$WORK/out/$f" >/dev/null
+    $B/invf-cat "$IMG" "$f" "$WORK/out/$f" >/dev/null \
+        || { echo "CAT-FAILED $f"; ok=0; continue; }
     a=$(sha256sum "$WORK/orig/$f" | cut -d' ' -f1)
     b=$(sha256sum "$WORK/out/$f" | cut -d' ' -f1)
     if [ "$a" != "$b" ]; then echo "MISMATCH $f"; ok=0; fi
 done
 # members are real inodes: read them directly (0 = PPMd batch slice,
 # 2 = ZSTD_BCJ batch slice -- rebuilds flow through batched storage)
-$B/invf-cat "$IMG" "multi.splt!mbr0000-chunk0" "$WORK/out/m0" >/dev/null
-$B/invf-cat "$IMG" "multi.splt!mbr0002-chunk2" "$WORK/out/m2" >/dev/null
+$B/invf-cat "$IMG" "multi.splt!mbr0000-chunk0" "$WORK/out/m0" >/dev/null \
+    || { echo "CAT-FAILED multi.splt!mbr0000-chunk0"; ok=0; }
+$B/invf-cat "$IMG" "multi.splt!mbr0002-chunk2" "$WORK/out/m2" >/dev/null \
+    || { echo "CAT-FAILED multi.splt!mbr0002-chunk2"; ok=0; }
 cmp -s "$WORK/orig/member0.bin" "$WORK/out/m0" || { echo "MISMATCH member0"; ok=0; }
 cmp -s "$WORK/orig/member2.bin" "$WORK/out/m2" || { echo "MISMATCH member2"; ok=0; }
 [ "$ok" = 1 ] || exit 1
@@ -413,7 +418,9 @@ $B/invf-ls "$IMG" | grep -q "nest\.splt!mbr0000-chunk0!mbrmap" \
     || { echo "FAIL: nested member map sibling missing"; exit 1; }
 
 echo "== nested read-back (a map splice through a map splice) =="
-$B/invf-verify "$IMG" --deep | tee "$WORK/verify2.log"
+$B/invf-verify "$IMG" --deep | tee "$WORK/verify2.log" || true
+VRC=${PIPESTATUS[0]}
+echo "  (verify rc=$VRC; the output gate below judges, not the code)"
 grep -q " 0 corrupt," "$WORK/verify2.log" || { echo "FAIL: corrupt after nesting"; exit 1; }
 $B/invf-cat "$IMG" nest.splt "$WORK/out/nest2.splt" >/dev/null
 cmp -s "$WORK/orig/nest.splt" "$WORK/out/nest2.splt" \

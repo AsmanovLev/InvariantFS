@@ -122,6 +122,7 @@
 #include "codec.h"
 #include "rs.h"
 #include "vol_seal.h"   /* WP201: fixed seal menu + dry-run plan */
+#include "vol_migrate.h" /* WP601: migrate stage (defrag relocate + explicit recompress) */
 
 typedef struct sw_bucket { struct sw_bucket *next; int slot; } sw_bucket;
 
@@ -1470,6 +1471,8 @@ int main(int argc, char **argv)
     int reseal_full = 0;             /* WP404: --reseal-full escape hatch */
     int no_realize = 0, stopped = 0;
     int fast = 0;
+    int migrate_on = 1;    /* WP601: migrate stage defaults on (skipped by --fast/--dry-run) */
+    int recompress = 0;    /* WP601: --recompress explicit policy recompress (implies migrate) */
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
     const char *log_path = NULL;
     const char *color_arg = NULL;
@@ -1490,7 +1493,7 @@ int main(int argc, char **argv)
      * and the reclaim -- but it does not get to call that a success. */
     int flush_failed = 0;
     unsigned ui_heat = 0, ui_tier = 0, ui_dedupe = 0;
-    unsigned ui_batches = 0, ui_finalize = 0, ui_seal = 0;
+    unsigned ui_batches = 0, ui_migrate = 0, ui_finalize = 0, ui_seal = 0;
     invfs_dedupe_stats ui_dedupe_stats;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
@@ -1536,7 +1539,14 @@ int main(int argc, char **argv)
                 "              seal when provable)\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
-                "              transcodes, decomposition, batching or dedupe)\n"
+                "              transcodes, decomposition, batching, dedupe or migrate)\n"
+                "  --migrate   run the WP601 migrate stage (defrag relocate;\n"
+                "              default on, skipped by --fast/--dry-run)\n"
+                "  --no-migrate\n"
+                "              skip the migrate stage\n"
+                "  --recompress\n"
+                "              re-run the generic-ZSTD floor on demand (implies\n"
+                "              --migrate; skipped by --fast)\n"
                 "  --compact   run only the inode-area compaction pass\n"
                 "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
                 "                         volume's codepack dir to <dir>,\n"
@@ -1574,7 +1584,9 @@ int main(int argc, char **argv)
                 "  --reseal-full force a full parity recompute\n"
                 "  --fast      cheap pass: RAW files take the generic\n"
                 "              per-segment recompress only (no classification,\n"
-                "              transcodes, decomposition, batching or dedupe)\n"
+                "              transcodes, decomposition, batching, dedupe or migrate)\n"
+                "  --migrate/--no-migrate (WP601 migrate stage; default on)\n"
+                "  --recompress (WP601: re-run the generic-ZSTD floor on demand)\n"
                 "  --compact   run only the inode-area compaction pass\n"
                 "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
                 "                         volume's codepack dir to <dir>,\n"
@@ -1596,6 +1608,13 @@ int main(int argc, char **argv)
             no_realize = 1;
         } else if (strcmp(a, "--fast") == 0) {
             fast = 1;
+        } else if (strcmp(a, "--migrate") == 0) {
+            migrate_on = 1;
+        } else if (strcmp(a, "--no-migrate") == 0) {
+            migrate_on = 0;
+        } else if (strcmp(a, "--recompress") == 0) {
+            recompress = 1;
+            migrate_on = 1;   /* explicit recompress runs in the migrate stage */
         } else if (strcmp(a, "--compact") == 0) {
             /* retired in WP-M21; accepted silently as a no-op */
         } else if (strcmp(a, "--log") == 0 && i + 1 < argc) {
@@ -1941,7 +1960,10 @@ int main(int argc, char **argv)
             ui_tier = vol_ndev(vol) == 2 ? 5 : 0;
             ui_dedupe = ui_tier ? 6 : 5;
             ui_batches = ui_dedupe + 1;
-            ui_finalize = ui_batches + 1;
+            /* WP601: the migrate stage sits between batches and finalize
+             * (seal runs after, so seal sees the compacted layout). */
+            ui_migrate = migrate_on ? ui_batches + 1 : 0;
+            ui_finalize = (migrate_on ? ui_migrate : ui_batches) + 1;
             ui_seal = (seal || rb_f >= 0 || rp_f >= 0 || live_seal) ?
                       ui_finalize + 1 : 0;
             ui_total = ui_seal ? ui_seal : ui_finalize;
@@ -2561,6 +2583,29 @@ progress:
         snprintf(detail, sizeof detail, "gc=%d text=%zu binary=%zu",
                  gcrc, tzp, bzp);
         sw_stage_end(tzrc < 0 ? "flush failed" : detail);
+    }
+
+    /* WP601 migrate stage: defrag relocation (+ explicit policy recompress
+     * with --recompress), between batches and finalize. Skipped by
+     * --fast (a transcode-free cheap pass) and --dry-run (read-only), and
+     * by --no-migrate. Prints its own counts; per-file failures are
+     * contained inside and never fail the sweep. */
+    if (!dry && !fast && migrate_on) {
+        int mrc;
+        const char *env_budget = getenv("INVFS_MIGRATE_MAX_BLOCKS");
+        uint64_t mbudget = 0;
+        if (!invfs_sweep_ui_active())
+            fprintf(stderr, "[migrate] stage started (%s)\n",
+                    recompress ? "relocating + explicit recompress"
+                               : "relocating fragmented segments");
+        if (env_budget && env_budget[0])
+            mbudget = (uint64_t)strtoull(env_budget, NULL, 10);
+        sw_stage_begin(ui_migrate, "migrate", 0,
+                       recompress ? "relocating + explicit recompress"
+                                  : "relocating fragmented segments");
+        mrc = vol_migrate_run(vol, recompress, mbudget, NULL);
+        sw_stage_end(mrc > 0 ? "relocation complete" :
+                     mrc == 0 ? "nothing movable" : "relocation complete");
     }
 
     if (!dry) {
