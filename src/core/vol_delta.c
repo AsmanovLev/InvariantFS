@@ -719,6 +719,30 @@ static int dl_retire_span(invfs_volume *v, const uint8_t *key, uint16_t klen,
     return 0;
 }
 
+/* Rebase pending supersede entries for key to a newer span (caller holds
+ * g_delta_lock). A row superseded twice (A->B->C) would otherwise drop B's
+ * entry at drain (slot already names C) and leak A's blocks until a sweep:
+ * the content is still dead, only the witness span moved, so entries follow
+ * the key. Delete-kind entries are tombstone-bound and never rebased. */
+static void dl_retire_rebase(invfs_volume *v, const uint8_t *key,
+                             uint16_t klen, uint64_t seg, uint64_t off,
+                             uint64_t seq)
+{
+    size_t i;
+    if (!v || !key)
+        return;
+    for (i = 0; i < v->delta_nretire; i++) {
+        delta_retire_ent *o = &v->delta_retire[i];
+        if (o->del || o->klen != klen || !o->key)
+            continue;
+        if (memcmp(o->key, key, klen) != 0)
+            continue;
+        o->seg = seg;
+        o->off = off;
+        o->seq = seq;
+    }
+}
+
 /* Append (takes g_delta_lock). Over-cap entries are dropped loudly (leak). */
 static void dl_retire_push(invfs_volume *v, delta_retire_ent *e)
 {
@@ -749,6 +773,12 @@ static void dl_retire_push(invfs_volume *v, delta_retire_ent *e)
         v->delta_retire = nr;
         v->delta_cretire = ncap;
     }
+    /* WP607 chains: pending supersedes of keys staged by this same record
+     * (e carries its own span) follow it -- their content is still dead.
+     * Skip when the span capture itself missed (all-zero): rebasing to a
+     * void span would orphan entries that still match. */
+    if (!e->del && e->key && (e->seg != 0 || e->off != 0 || e->seq != 0))
+        dl_retire_rebase(v, e->key, e->klen, e->seg, e->off, e->seq);
     v->delta_retire[v->delta_nretire++] = *e;
     pthread_mutex_unlock(&g_delta_lock);
 }
@@ -954,6 +984,23 @@ size_t vol_delta_pad_build(uint8_t *out, size_t len)
         done += (size_t)INVFS_DELTA_REC_HDR_LEN + kl;
     }
     return done;
+}
+
+/* WP607: drain pending retire entries outside any fence (close path and
+ * the drain early-return). The rows they key on are already durable
+ * there (a covering barrier fenced them before retention was freed), so
+ * no barrier is needed -- collect under the lock, free after it. */
+void vol_retire_drain_all(invfs_volume *v)
+{
+    delta_retire_ent *rd = NULL;
+    size_t nrd = 0;
+    if (!v)
+        return;
+    pthread_mutex_lock(&g_delta_lock);
+    dl_retire_collect(v, &rd, &nrd);
+    pthread_mutex_unlock(&g_delta_lock);
+    if (rd)
+        dl_retire_free_list(v, rd, nrd);
 }
 
 static int dl_pad_span(invfs_volume *v, uint64_t off, size_t len)
@@ -1323,9 +1370,17 @@ int vol_delta_drain(invfs_volume *v)
     if (v->delta_pending == 0 && v->delta_nstaged == 0) {
         /* Nothing staged and nothing retained: a covering barrier may
          * already have fenced the group (vol_sync's flush path does), so
-         * there is nothing to pay and 0 is still the honest ack. */
+         * there is nothing to pay and 0 is still the honest ack. Retire
+         * entries still drain here (WP607): their rows were fenced before
+         * retention was freed, so no barrier is needed for them -- collect
+         * under the lock, free after it. */
+        delta_retire_ent *rd = NULL;
+        size_t nrd = 0;
         v->delta_rewrite_needed = 0;  /* nothing to heal */
+        dl_retire_collect(v, &rd, &nrd);
         pthread_mutex_unlock(&g_delta_lock);
+        if (rd)
+            dl_retire_free_list(v, rd, nrd);
         return 0;
     }
     /* WP606: heal retained spans before fencing (same rule as the append

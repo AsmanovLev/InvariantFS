@@ -1686,6 +1686,15 @@ void vol_close(invfs_volume *v)
                         "volume stays dirty and will be recovered at the "
                         "next mount\n");
             } else {
+                /* WP607: everything staged is durable now: drain pending
+                 * retire entries (their rows just fenced) and persist the
+                 * freed bitmap before CLEAN, so offline tools converge to
+                 * identical counts and df is exact at close. */
+                vol_retire_drain_all(v);
+                if (vol_bitmap_flush(v) != 0)
+                    fprintf(stderr, "vol_close: bitmap flush after retire "
+                                    "drain failed; freed blocks stay marked "
+                                    "allocated until the next sweep\n");
                 v->sb.state = INVFS_STATE_CLEAN;
                 if (vol_write_sb(v) != 0)
                     fprintf(stderr, "vol_close: could not mark volume clean; "

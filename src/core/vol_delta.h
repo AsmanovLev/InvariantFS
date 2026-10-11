@@ -132,6 +132,11 @@ void vol_retire_recipe(invfs_volume *v, uint64_t inode_id,
 void vol_retire_pbas(invfs_volume *v, uint64_t inode_id,
                      const uint64_t *pbas, size_t npbas,
                      const uint64_t *keep, size_t nkeep);
+/* WP607: drain pending retire entries outside any fence (close path and
+ * the drain early-return): the rows they key on are already durable, so
+ * no barrier is needed -- collect under the lock, free after it. Entries
+ * whose mutation is no longer live are dropped (blocks stay allocated). */
+void vol_retire_drain_all(invfs_volume *v);
 /* WP606: encode tombstone pad(s) over exactly `len` bytes at `out`
  * (caller provides `len` bytes). Returns `len`, or 0 when `len` cannot
  * hold a pad. Unit-tested (delta_test): the total is always exact. */
