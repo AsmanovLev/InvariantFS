@@ -94,13 +94,31 @@ void vol_delta_close(invfs_volume *v);
  * the CRC-valid prefix; a row naming a lost blob reads EIO, never corrupt),
  * and a refused barrier fails the append, so a 0 was never issued past
  * bytes of unknown fate. WP605: staged bytes are retained until fenced,
- * and the next fence after any failure re-writes them first -- a dm table
- * swap can drop unfenced pages for good, and without the rewrite the log
- * would keep a zero gap stranding every record appended past it
- * (fsync-acked files ABSENT). Rewrite is idempotent and best-effort; the
- * barrier's result still decides the ack. */
+ * and the next fence after any failure healed them -- by rewriting the
+ * retained bytes, which resurrected mutations whose caller saw FAIL (leg5
+ * GHOST). WP606: a fence failure DOOMS the retained set instead (overlay
+ * rolled back at once, mutation bytes freed), and the next fence heals by
+ * writing INVFS_DELTA_FLAG_PAD tombstones over the doomed spans (exact
+ * length, replay-neutral) while live post-failure stages are still
+ * rewritten (drop-victim heal). Failed mutations stay dead, the log stays
+ * continuous. Healing is best-effort; the barrier's result still decides
+ * the ack. */
 int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
                      const uint8_t *val, uint16_t vlen, uint16_t flags);
+
+/* WP606: doom the staged set: every live retained entry leaves pending,
+ * its overlay ref rolls back to the pre-stage snapshot (or the slot is
+ * dropped when the doomed stage created the key), its mutation bytes are
+ * freed, and only off/len survive for the tombstone pad at the next fence.
+ * Idempotent. Called on every fence failure the delta paths do not fence
+ * themselves (vol_flush / vol_sync barriers); the append/drain paths doom
+ * inline under the lock they already hold. */
+void vol_delta_doom(invfs_volume *v);
+
+/* WP606: encode tombstone pad(s) over exactly `len` bytes at `out`
+ * (caller provides `len` bytes). Returns `len`, or 0 when `len` cannot
+ * hold a pad. Unit-tested (delta_test): the total is always exact. */
+size_t vol_delta_pad_build(uint8_t *out, size_t len);
 
 /* WP602: close the staged group. Issues one vmux_barrier when records were
  * staged since the last covering barrier and returns its result, so a 0 is

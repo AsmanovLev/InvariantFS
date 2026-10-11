@@ -104,64 +104,50 @@ static void dl_group_parse(invfs_volume *v)
     v->delta_rewrite_needed = 0;
 }
 
-/* WP605: staged-byte retention helpers. Every caller holds g_delta_lock.
- * Retained count always equals pending (keep on stage, pop on
- * stage-failure, free on fence success and close), so retention is exactly
- * the unfenced set. */
+/* WP605/WP606: staged-byte retention helpers. Every caller holds
+ * g_delta_lock. Retention is the unfenced set: live staged entries (counted
+ * in delta_pending) plus doomed ones (the leading delta_doomed entries,
+ * already subtracted from pending, overlay rolled back, bytes freed).
+ * Freed on every successful fence and on close. */
 static void dl_staged_free(invfs_volume *v)
 {
     size_t i;
     if (!v || !v->delta_staged)
         return;
     for (i = 0; i < v->delta_nstaged; i++)
-        free(v->delta_staged[i].bytes);
+        free(v->delta_staged[i].bytes);   /* NULL once doomed: safe */
     free(v->delta_staged);
     v->delta_staged = NULL;
     v->delta_nstaged = 0;
     v->delta_cstaged = 0;
+    v->delta_doomed = 0;
 }
 
-/* Retain a just-staged record (takes ownership of rec). Best-effort: on
- * OOM the record keeps its pre-WP605 fate (fenced-or-lost with the group)
- * and only the rewrite loses coverage for it. Returns 0 when retained. */
+/* Retain a just-staged record (takes ownership of rec). Snapshots the index
+ * ref the coming di_put will shadow (or its absence) so a later doom
+ * restores exactly the pre-stage overlay. Best-effort: on OOM the record
+ * keeps its pre-WP605 fate (fenced-or-lost with the group) and only the
+ * heal loses coverage for it. Returns 0 when retained. Defined after the
+ * coalescing index (§2); every caller holds g_delta_lock. */
 static int dl_staged_keep(invfs_volume *v, uint64_t off,
-                          uint8_t *rec, size_t rl)
-{
-    delta_staged_rec *ns;
-    if (!v || !rec || rl == 0)
-        return -1;
-    if (v->delta_nstaged == v->delta_cstaged) {
-        size_t ncap = v->delta_cstaged ? v->delta_cstaged * 2 : 16;
-        ns = (delta_staged_rec *)realloc(v->delta_staged,
-                                         ncap * sizeof *ns);
-        if (!ns)
-            return -1;
-        v->delta_staged = ns;
-        v->delta_cstaged = ncap;
-    }
-    v->delta_staged[v->delta_nstaged].off = off;
-    v->delta_staged[v->delta_nstaged].len = rl;
-    v->delta_staged[v->delta_nstaged].bytes = rec;
-    v->delta_nstaged++;
-    return 0;
-}
+                          uint8_t *rec, size_t rl,
+                          const uint8_t *key, uint16_t klen);
 
-/* Re-write retained staged bytes in append order ahead of a fence that
- * follows a failure. Best-effort: a rewrite that still fails is reported
- * by the barrier below failing loudly (or succeeds on healed storage).
- * Bytes that landed despite the failure are rewritten identically. */
-static void dl_staged_rewrite(invfs_volume *v)
-{
-    size_t i;
-    if (!v || !v->delta_staged)
-        return;
-    for (i = 0; i < v->delta_nstaged; i++) {
-        if (io_pwrite(&v->io, v->delta_staged[i].off,
-                      v->delta_staged[i].bytes,
-                      v->delta_staged[i].len) != 0)
-            break;   /* the barrier below reports the failure */
-    }
-}
+/* Encode tombstone pad(s) over exactly `len` bytes at `out` (body after
+ * the wire codecs, §1, for dl_wr16be/invfs_crc32c). */
+size_t vol_delta_pad_build(uint8_t *out, size_t len);
+
+/* Write tombstone pad(s) over one doomed span (body beside pad_build). */
+static int dl_pad_span(invfs_volume *v, uint64_t off, size_t len);
+
+/* Heal retained staged bytes in append order ahead of a fence that follows
+ * a failure. WP606: doomed spans (failed mutations, caller saw FAIL) get
+ * tombstone pads -- never the original bytes, so nothing resurrects --
+ * while live post-failure stages are still rewritten (drop-victim heal:
+ * the WP605 leg2 fix; bytes that landed are rewritten identically).
+ * Best-effort: the barrier below still decides the ack. Body beside
+ * pad_build. */
+static void dl_staged_heal(invfs_volume *v);
 
 void vol_delta_lock(void)
 {
@@ -257,10 +243,16 @@ int vol_delta_rec_parse(const uint8_t *buf, size_t len, size_t off,
     crc = dl_rd32(p + 6);
     if (kl == 0)
         return -1;                       /* an empty key is never valid */
-    if (fl & (uint16_t)~INVFS_DELTA_FLAG_DELETE)
+    if (fl & (uint16_t)~(INVFS_DELTA_FLAG_DELETE | INVFS_DELTA_FLAG_PAD))
         return -1;                       /* reserved flags must be 0 */
     if ((fl & INVFS_DELTA_FLAG_DELETE) && vl != 0)
         return -1;                       /* delete records carry no value */
+    /* WP606 tombstone pads are valid but inert (replay skips them): they
+     * carry no value, never DELETE, and a zero filler sized to the span. */
+    if (fl & INVFS_DELTA_FLAG_PAD) {
+        if (vl != 0 || (fl & INVFS_DELTA_FLAG_DELETE))
+            return -1;                   /* pads are content-free */
+    }
     total = (size_t)INVFS_DELTA_REC_HDR_LEN + (size_t)kl + (size_t)vl;
     if (total > len - off)
         return -1;                       /* truncated record body */
@@ -523,6 +515,244 @@ static int di_put(struct delta_index *di, const uint8_t *key, uint16_t klen,
     return 0;
 }
 
+/* WP606 retention bodies (declared beside dl_group_parse; defined here so
+ * the index types above are complete). */
+static int dl_staged_keep(invfs_volume *v, uint64_t off,
+                          uint8_t *rec, size_t rl,
+                          const uint8_t *key, uint16_t klen)
+{
+    delta_staged_rec *ns;
+    delta_staged_rec *e;
+    size_t idx;
+    if (!v || !rec || rl == 0)
+        return -1;
+    if (v->delta_nstaged == v->delta_cstaged) {
+        size_t ncap = v->delta_cstaged ? v->delta_cstaged * 2 : 16;
+        ns = (delta_staged_rec *)realloc(v->delta_staged,
+                                         ncap * sizeof *ns);
+        if (!ns)
+            return -1;
+        v->delta_staged = ns;
+        v->delta_cstaged = ncap;
+    }
+    e = &v->delta_staged[v->delta_nstaged];
+    e->off = off;
+    e->len = rl;
+    e->bytes = rec;
+    e->has_prev = 0;
+    e->prev_seg = 0;
+    e->prev_off = 0;
+    e->prev_seq = 0;
+    e->prev_flags = 0;
+    e->prev_vlen = 0;
+    /* Snapshot what this key resolves to BEFORE the stage below shadows
+     * it (keep runs before di_put under the same lock, so this is exact).
+     * A later doom restores it -- or deletes the slot when the doomed
+     * stage created the key. */
+    if (key && klen && v->delta_index) {
+        idx = di_find(v->delta_index, key, klen);
+        if (idx != (size_t)-1) {
+            const delta_slot *s = &v->delta_index->slot[idx];
+            e->has_prev = 1;
+            e->prev_seg = s->seg;
+            e->prev_off = s->off;
+            e->prev_seq = s->seq;
+            e->prev_flags = s->flags;
+            e->prev_vlen = s->vlen;
+        }
+    }
+    v->delta_nstaged++;
+    return 0;
+}
+
+/* Backward-shift delete for the linear-probe index (keys are otherwise
+ * never removed). Clears slot idx and reinserts the trailing cluster so
+ * probes still terminate. Bumps the WP117 epoch: the key set changed. */
+static void di_delete_at(struct delta_index *di, size_t idx)
+{
+    size_t mask, i, j;
+    delta_slot tmp;
+    if (!di || idx >= di->cap || !di->slot[idx].key)
+        return;
+    free(di->slot[idx].key);
+    di->slot[idx].key = NULL;
+    di->used--;
+    di->epoch++;
+    mask = di->cap - 1;
+    i = idx;
+    for (;;) {
+        i = (i + 1) & mask;
+        if (!di->slot[i].key)
+            break;
+        tmp = di->slot[i];
+        di->slot[i].key = NULL;
+        di->used--;
+        j = dl_hash(tmp.key, tmp.klen) & mask;
+        for (;;) {
+            if (!di->slot[j].key) {
+                di->slot[j] = tmp;
+                di->used++;
+                break;
+            }
+            j = (j + 1) & mask;
+        }
+    }
+}
+
+/* Roll one doomed entry's overlay back: when the index slot still names
+ * this entry's span, restore the snapshotted prev ref (or delete the slot
+ * when the doomed stage created the key). A newer live stage of the same
+ * key supersedes -- the slot then names another span and is left alone.
+ * Entries are doomed newest-first so chained stages unwind in order. */
+static void dl_doom_entry(invfs_volume *v, delta_staged_rec *e)
+{
+    uint16_t kl, vl, fl;
+    const uint8_t *key;
+    size_t idx;
+    uint64_t seg_pba, seg_off;
+    if (!v || !e)
+        return;
+    if (e->bytes && e->len >= INVFS_DELTA_REC_HDR_LEN && v->delta_index) {
+        kl = dl_rd16be(e->bytes);
+        vl = dl_rd16be(e->bytes + 2);
+        fl = dl_rd16be(e->bytes + 4);
+        if (kl != 0 &&
+            (size_t)INVFS_DELTA_REC_HDR_LEN + (size_t)kl + vl == e->len &&
+            !(fl & INVFS_DELTA_FLAG_PAD)) {
+            key = e->bytes + INVFS_DELTA_REC_HDR_LEN;
+            idx = di_find(v->delta_index, key, kl);
+            if (idx != (size_t)-1) {
+                delta_slot *s = &v->delta_index->slot[idx];
+                seg_pba = e->off / (uint64_t)INVFS_BLOCK_SIZE;
+                seg_off = e->off - seg_pba * (uint64_t)INVFS_BLOCK_SIZE;
+                if (s->seg == seg_pba && s->off == seg_off) {
+                    if (e->has_prev) {
+                        s->seg = e->prev_seg;
+                        s->off = e->prev_off;
+                        s->seq = e->prev_seq;
+                        s->flags = e->prev_flags;
+                        s->vlen = e->prev_vlen;
+                        v->delta_index->epoch++;
+                    } else {
+                        di_delete_at(v->delta_index, idx);
+                        if (v->delta_records > 0)
+                            v->delta_records--;
+                    }
+                }
+            }
+        }
+    }
+    /* The mutation bytes must never be rewritten: free them now. Only
+     * off/len survive, for the tombstone pad. */
+    free(e->bytes);
+    e->bytes = NULL;
+}
+
+/* Doom every live retained entry (newest first): subtract from pending,
+ * roll the overlay back, free the mutation bytes. Idempotent: entries
+ * already doomed are skipped. Caller holds g_delta_lock. */
+static void dl_doom_locked(invfs_volume *v)
+{
+    size_t i;
+    if (!v || !v->delta_staged)
+        goto mark;
+    i = v->delta_nstaged;
+    while (i-- > v->delta_doomed) {
+        delta_staged_rec *e = &v->delta_staged[i];
+        if (v->delta_pending > 0)
+            v->delta_pending--;
+        if (v->delta_pending_bytes >= (uint64_t)e->len)
+            v->delta_pending_bytes -= (uint64_t)e->len;
+        else
+            v->delta_pending_bytes = 0;
+        dl_doom_entry(v, e);
+    }
+    v->delta_doomed = v->delta_nstaged;
+mark:
+    if (v)
+        v->delta_rewrite_needed = 1;
+}
+
+/* WP606: doom the staged set from outside the delta paths (the vol_flush /
+ * vol_sync barrier failures in volume.c). Takes g_delta_lock. */
+void vol_delta_doom(invfs_volume *v)
+{
+    if (!v)
+        return;
+    pthread_mutex_lock(&g_delta_lock);
+    dl_doom_locked(v);
+    pthread_mutex_unlock(&g_delta_lock);
+}
+
+/* WP606 tombstone pad bodies (here for dl_wr16be/invfs_crc32c, §1). */
+size_t vol_delta_pad_build(uint8_t *out, size_t len)
+{
+    size_t done = 0;
+    if (!out || len < (size_t)INVFS_DELTA_REC_HDR_LEN + 1)
+        return 0;
+    while (done < len) {
+        size_t rem = len - done;
+        uint16_t kl;
+        uint32_t crc;
+        uint8_t *p = out + done;
+        if (rem - INVFS_DELTA_REC_HDR_LEN <= 0xFFFFu) {
+            kl = (uint16_t)(rem - INVFS_DELTA_REC_HDR_LEN);
+        } else {
+            /* Leave 0 or >= 11 bytes for the tail: full-size chunks are
+             * 65535, so the remainder after one is rem - 65535, which
+             * exceeds 10 whenever this branch runs (rem > 65545). */
+            kl = (uint16_t)(0xFFFFu - INVFS_DELTA_REC_HDR_LEN);
+        }
+        dl_wr16be(p, kl);
+        dl_wr16be(p + 2, 0);
+        dl_wr16be(p + 4, INVFS_DELTA_FLAG_PAD);
+        memset(p + INVFS_DELTA_REC_HDR_LEN, 0, kl);
+        crc = invfs_crc32c(p + INVFS_DELTA_REC_HDR_LEN, kl);
+        memcpy(p + 6, &crc, 4);
+        done += (size_t)INVFS_DELTA_REC_HDR_LEN + kl;
+    }
+    return done;
+}
+
+static int dl_pad_span(invfs_volume *v, uint64_t off, size_t len)
+{
+    uint8_t *pad;
+    int rc = -1;
+    if (!v || len < (size_t)INVFS_DELTA_REC_HDR_LEN + 1)
+        return -1;
+    pad = (uint8_t *)malloc(len);
+    if (!pad)
+        return -1;
+    if (vol_delta_pad_build(pad, len) != len) {
+        free(pad);
+        return -1;
+    }
+    if (io_pwrite(&v->io, off, pad, len) == 0)
+        rc = 0;
+    free(pad);
+    return rc;
+}
+
+static void dl_staged_heal(invfs_volume *v)
+{
+    size_t i, n;
+    if (!v || !v->delta_staged)
+        return;
+    n = v->delta_doomed < v->delta_nstaged ? v->delta_doomed
+                                            : v->delta_nstaged;
+    for (i = 0; i < n; i++)
+        (void)dl_pad_span(v, v->delta_staged[i].off,
+                          v->delta_staged[i].len);
+    for (i = n; i < v->delta_nstaged; i++) {
+        if (!v->delta_staged[i].bytes)
+            continue;
+        if (io_pwrite(&v->io, v->delta_staged[i].off,
+                      v->delta_staged[i].bytes,
+                      v->delta_staged[i].len) != 0)
+            break;   /* the barrier below reports the failure */
+    }
+}
+
 /* Reservation bookkeeping widens the same dirty byte range everything else
  * does: vol_bm_dirty(), in volume_internal.h. */
 
@@ -597,10 +827,11 @@ static uint64_t delta_new_segment(invfs_volume *v, uint64_t prev)
     }
     free(seg);
     if (vmux_barrier(v, "delta segment header") < 0) {
-        /* WP605: earlier staged bytes are of unknown fate; the next fence
-         * re-writes them. The new segment stays allocated but unnamed (an
-         * fsck orphan, reclaimed by the next -f pass). */
-        v->delta_rewrite_needed = 1;
+        /* WP605/WP606: earlier staged bytes are of unknown fate; doom the
+         * staged set (overlay rolls back at once) and heal at the next
+         * fence. The new segment stays allocated but unnamed (an fsck
+         * orphan, reclaimed by the next -f pass). */
+        dl_doom_locked(v);
         return 0;
     }
     return pba;
@@ -618,7 +849,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     uint32_t crc;
     uint8_t *rec;
     int inserted = 0;
-    int kept = 0;   /* WP605: current record retained for rewrite */
+    int kept = 0;   /* WP605/WP606: current record retained until fenced */
 
     if (!v || !key || klen == 0)
         return -1;
@@ -664,11 +895,12 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
             v->rt.delta_pba = pba;
         }
         if (mbuf_rt30_store(v) != 0) {
-            /* WP605: roll the in-RAM root back to the live segment (the
-             * store may or may not have landed; the old chain is intact
-             * either way) and heal the staged tail at the next fence. */
+            /* WP605/WP606: roll the in-RAM root back to the live segment
+             * (the store may or may not have landed; the old chain is
+             * intact either way), doom the staged set and heal the tail
+             * at the next fence. */
             v->rt.delta_pba = v->delta_seg_pba;
-            v->delta_rewrite_needed = 1;
+            dl_doom_locked(v);
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
@@ -676,7 +908,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
             /* Same rollback: without the publish fence the new segment is
              * unnamed, so the session stays on the old one. */
             v->rt.delta_pba = v->delta_seg_pba;
-            v->delta_rewrite_needed = 1;
+            dl_doom_locked(v);
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
@@ -710,16 +942,16 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
 
     abs = v->delta_seg_pba * (uint64_t)INVFS_BLOCK_SIZE + v->delta_bump;
     if (io_pwrite(&v->io, abs, rec, rl) != 0) {
-        /* WP605: earlier staged bytes share the unknown fate; heal them at
-         * the next fence. */
-        v->delta_rewrite_needed = 1;
+        /* WP605/WP606: earlier staged bytes share the unknown fate; doom
+         * them (overlay rolls back) and heal at the next fence. */
+        dl_doom_locked(v);
         free(rec);
         pthread_mutex_unlock(&g_delta_lock);
         return -1;
     }
-    /* WP605: retain the staged bytes (rec changes hands, not freed) until
-     * the fence that covers them succeeds. */
-    kept = (dl_staged_keep(v, abs, rec, rl) == 0);
+    /* WP605/WP606: retain the staged bytes (rec changes hands, not freed)
+     * until the fence that covers them succeeds. */
+    kept = (dl_staged_keep(v, abs, rec, rl, key, klen) == 0);
     if (!kept)
         free(rec);   /* retention OOM: pre-WP605 fate, no leak */
     /* WP602 group commit: the append is the writer's critical section
@@ -732,26 +964,36 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
      * append, and a count cap of 1 is the legacy shape exactly -- the
      * batching is the only delta. A refused barrier fails the append, so
      * a 0 is never issued past bytes of unknown fate; retained staged
-     * bytes are re-written ahead of the next fence (WP605), so a table
-     * swap can never strand later records past a hole. */
+     * spans are healed ahead of the next fence (WP606: tombstone pads for
+     * the doomed, rewrite for the live), so a table swap can never strand
+     * later records past a hole. */
     v->delta_pending++;
     v->delta_pending_bytes += rl;
     if (v->delta_group_max == 0 || v->delta_group_bytes == 0 ||
         v->delta_pending >= v->delta_group_max ||
         v->delta_pending_bytes >= v->delta_group_bytes) {
         if (v->delta_rewrite_needed && v->delta_nstaged > 0)
-            dl_staged_rewrite(v);
+            dl_staged_heal(v);
         if (vmux_barrier(v, "delta append") < 0) {
-            /* The failed record was never staged: unretain (iff kept) +
-             * uncount it (it must not ride the next group); retained
-             * earlier bytes are re-written ahead of the next fence. */
-            if (kept && v->delta_nstaged > 0) {
-                free(v->delta_staged[v->delta_nstaged - 1].bytes);
-                v->delta_nstaged--;
+            /* WP606: the failed record stays retained but DOOMED (its
+             * caller saw FAIL -- it must never become visible). Its
+             * staged bytes are valid on disk, so the span is consumed
+             * (bump advances past it) and the next fence pads it; the
+             * overlay never named it (di_put runs only below), so its
+             * rollback is a no-op and earlier live stages unwind to
+             * their pre-stage refs. Without retention (!kept) the span
+             * is still consumed but unpadded -- best-effort. */
+            if (!kept) {
+                if (v->delta_pending > 0)
+                    v->delta_pending--;
+                if (v->delta_pending_bytes >= rl)
+                    v->delta_pending_bytes -= rl;
+                else
+                    v->delta_pending_bytes = 0;
             }
-            v->delta_pending--;
-            v->delta_pending_bytes -= rl;
-            v->delta_rewrite_needed = 1;
+            v->delta_bump += rl;
+            v->delta_bytes += rl;
+            dl_doom_locked(v);
             pthread_mutex_unlock(&g_delta_lock);
             return -1;
         }
@@ -765,9 +1007,19 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
     /* off is segment-relative: read_value/addressing re-add seg*blocksize. */
     if (di_put(v->delta_index, key, klen, v->delta_seg_pba, v->delta_bump, seq,
                flags, vlen, &inserted) != 0) {
-        /* OOM: the record is durable, the index is behind. Its bytes stay
-         * retained when kept, so the next fence still re-writes them. */
-        v->delta_rewrite_needed = 1;
+        /* OOM: the record is staged but unindexed. Consume the span and
+         * doom the set (the caller saw FAIL); the next fence pads it. */
+        if (!kept) {
+            if (v->delta_pending > 0)
+                v->delta_pending--;
+            if (v->delta_pending_bytes >= rl)
+                v->delta_pending_bytes -= rl;
+            else
+                v->delta_pending_bytes = 0;
+        }
+        v->delta_bump += rl;
+        v->delta_bytes += rl;
+        dl_doom_locked(v);
         pthread_mutex_unlock(&g_delta_lock);
         return -1;
     }
@@ -797,21 +1049,22 @@ int vol_delta_drain(invfs_volume *v)
     if (!v || !v->delta_ready)
         return 0;
     pthread_mutex_lock(&g_delta_lock);
-    if (v->delta_pending == 0) {
-        /* Nothing staged: a covering barrier may already have fenced the
-         * group (vol_sync's flush path does), so there is nothing to pay
-         * and 0 is still the honest ack. */
-        if (v->delta_nstaged == 0)
-            v->delta_rewrite_needed = 0;  /* WP605: nothing to heal */
+    if (v->delta_pending == 0 && v->delta_nstaged == 0) {
+        /* Nothing staged and nothing retained: a covering barrier may
+         * already have fenced the group (vol_sync's flush path does), so
+         * there is nothing to pay and 0 is still the honest ack. */
+        v->delta_rewrite_needed = 0;  /* nothing to heal */
         pthread_mutex_unlock(&g_delta_lock);
         return 0;
     }
-    /* WP605: heal retained staged bytes before fencing (same rule as the
-     * append path). Usually empty (freed on every success), so this is
-     * free; after a failure it re-writes whatever the swap may have
-     * dropped, and the barrier below decides the ack. */
+    /* WP606: heal retained spans before fencing (same rule as the append
+     * path). Usually empty (freed on every success), so this is free;
+     * after a failure it pads the doomed spans and rewrites the live
+     * ones, and the barrier below decides the ack. A pending==0 drain
+     * with only doomed spans still fences: the pads themselves need the
+     * barrier to become durable. */
     if (v->delta_rewrite_needed && v->delta_nstaged > 0)
-        dl_staged_rewrite(v);
+        dl_staged_heal(v);
     rc = vmux_barrier(v, "delta group drain");
     if (rc == 0) {
         dl_staged_free(v);
@@ -819,7 +1072,7 @@ int vol_delta_drain(invfs_volume *v)
         v->delta_pending_bytes = 0;
         v->delta_rewrite_needed = 0;
     } else {
-        v->delta_rewrite_needed = 1;
+        dl_doom_locked(v);
     }
     /* A refused barrier (rc != 0) advances nothing -- same rule as the
      * blkio watermark (groupcommit_test T4): no caller is told staged
@@ -1325,6 +1578,13 @@ static int delta_replay_segment(invfs_volume *v, uint64_t pba,
             bad = 1;
             break;
         }
+        if (fl & INVFS_DELTA_FLAG_PAD) {
+            /* WP606 tombstone: valid but inert. Advance past it without
+             * indexing -- the log stays continuous, nothing resurrects. */
+            off += rl;
+            last = off;
+            continue;
+        }
         {
             int inserted = 0;
             uint64_t local = (uint64_t)h->hdr_size + off;   /* segment-relative */
@@ -1755,6 +2015,6 @@ void vol_delta_close(invfs_volume *v)
     v->delta_pending_bytes = 0;
     v->delta_group_max = 0;
     v->delta_group_bytes = 0;
-    dl_staged_free(v);   /* WP605: retained bytes die with the session */
+    dl_staged_free(v);   /* WP606: retained spans die with the session */
     v->delta_rewrite_needed = 0;
 }

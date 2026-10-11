@@ -263,7 +263,7 @@ static void test_parser(void)
     ok(vol_delta_rec_parse(buf, sizeof buf, 0, &kl, &vl, &fl, &rl) == -1,
        "empty key rejected");
     memset(buf, 0, sizeof buf);
-    mkrec(buf, "k", "v", 0x0002);
+    mkrec(buf, "k", "v", 0x0004);
     ok(vol_delta_rec_parse(buf, sizeof buf, 0, &kl, &vl, &fl, &rl) == -1,
        "reserved flag rejected");
     memset(buf, 0, sizeof buf);
@@ -274,6 +274,72 @@ static void test_parser(void)
     mkrec(buf, "k", NULL, INVFS_DELTA_FLAG_DELETE);
     ok(vol_delta_rec_parse(buf, sizeof buf, 0, &kl, &vl, &fl, &rl) == 1 &&
        (fl & INVFS_DELTA_FLAG_DELETE) && vl == 0, "delete record parses");
+}
+
+/* WP606: tombstone pads are valid-but-inert and exactly span-sized.
+ * vol_delta_pad_build is the production encoder (not a test copy), so
+ * these cases prove the arithmetic the heal relies on: every span length
+ * a retained record can have (11 minimum, odd sizes, multi-chunk past
+ * 64 KiB) encodes to exactly itself, parses valid with the PAD flag,
+ * and scans as a continuous prefix (pads never stop or tear the log). */
+static void test_pad_build(void)
+{
+    static const size_t spans[] = {
+        11, 12, 13, 27, 100, 1000, 65535, 65544, 65545, 65546,
+        65555, 65556, 65557, 100000, 131080, 200000
+    };
+    uint8_t rec[32];
+    uint8_t *pad;
+    size_t si, worst = 0;
+    uint16_t kl, vl, fl;
+    size_t rl;
+    int rc;
+    uint8_t mix[128];
+    size_t moff = 0, end;
+    uint64_t n = 0;
+    int bad = 0;
+
+    printf("tombstone pads: exact spans, valid-but-inert\n");
+    for (si = 0; si < sizeof spans / sizeof spans[0]; si++) {
+        if (spans[si] > worst)
+            worst = spans[si];
+    }
+    pad = (uint8_t *)malloc(worst);
+    ok(pad != NULL, "pad scratch allocated");
+    if (!pad)
+        return;
+    for (si = 0; si < sizeof spans / sizeof spans[0]; si++) {
+        size_t len = spans[si];
+        size_t off = 0;
+        memset(pad, 0xA5, len);
+        ok(vol_delta_pad_build(pad, len) == len, "pad build exact");
+        while (off < len) {
+            char what[96];
+            rc = vol_delta_rec_parse(pad, len, off, &kl, &vl, &fl, &rl);
+            snprintf(what, sizeof what,
+                     "pad chunk parses (span %lu off %lu)",
+                     (unsigned long)len, (unsigned long)off);
+            ok(rc == 1 && (fl & INVFS_DELTA_FLAG_PAD) && vl == 0 &&
+               !(fl & INVFS_DELTA_FLAG_DELETE) && kl >= 1 &&
+               off + rl <= len, what);
+            if (rc != 1)
+                break;
+            off += rl;
+        }
+        ok(off == len, "pad chunks tile the span exactly");
+    }
+    ok(vol_delta_pad_build(pad, 0) == 0, "zero span builds nothing");
+    ok(vol_delta_pad_build(pad, 10) == 0, "sub-record span builds nothing");
+    ok(vol_delta_pad_build(NULL, 11) == 0, "NULL out builds nothing");
+    memset(mix, 0, sizeof mix);
+    moff += mkrec(mix + moff, "live-a", "1", 0);
+    ok(vol_delta_pad_build(rec, 11) == 11, "11-byte pad builds");
+    memcpy(mix + moff, rec, 11);
+    moff += 11;
+    moff += mkrec(mix + moff, "live-b", "22", 0);
+    end = vol_delta_scan_valid(mix, sizeof mix, &n, &bad);
+    ok(end == moff && n == 3 && !bad, "pads scan as continuous prefix");
+    free(pad);
 }
 
 static void test_scan_valid(void)
@@ -815,6 +881,7 @@ static void run_unit(const char *dir)
     printf("delta tests (WP-M10)\n");
     test_format();
     test_parser();
+    test_pad_build();
     test_scan_valid();
 
     snprintf(img, sizeof img, "%s/invf-delta_test.img", dir);

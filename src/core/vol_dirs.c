@@ -921,6 +921,14 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
     invfs_inode f_in, t_in;
     const char *fn, *tn;
     int rc;
+    /* WP606: abort compensation state. A stage that succeeded followed
+     * by a later failure must not stay visible to a caller that saw
+     * FAIL (leg5 GHOST: put(r17) staged, fparent lookup EIO, r17 left
+     * live). victim_dropped/new_put record what to undo; the abort
+     * path below undoes it best-effort, WP604 style. */
+    int victim_dropped = 0, victim_had_row = 0, new_put = 0;
+    invfs_inode victim_in;
+    uint64_t victim_id = 0;
 
     if (!v || !from || !to || !from[0] || !to[0])
         return -1;
@@ -974,6 +982,8 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
             /* A name, not the inode: frees nothing, so it needs no map. */
             if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
                 return -1;
+            victim_dropped = 1;
+            victim_id = t_id;
             t_in.nlink--;
             if (vol_inode_delta_put(v, t_id, &t_in) != 0)
                 return -1;
@@ -1006,9 +1016,20 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
                 return -1;
             }
             if (vol_inode_delta_delete(v, t_id) != 0) {
+                /* WP606: the victim name is already gone; put it back
+                 * (best effort, still -1), or an ERR caller leaves a
+                 * missing victim behind. */
+                if (vol_dirent_delta_put(v, t_pino, tleaf, t_id) != 0)
+                    fprintf(stderr, "invarifs: rename: victim drop "
+                            "failed AND its rollback failed; the "
+                            "namespace may be torn. Run invf-fsck.\n");
                 vol_pba_ref_release(v);
                 return -1;
             }
+            victim_dropped = 1;
+            victim_had_row = 1;
+            victim_id = t_id;
+            victim_in = t_in;
             /* WP-N1: targeted free of overwritten destination data blocks */
             if (t_in.type == INVFS_ITYP_REG)
                 vol_free_recipe_blocks(v, t_in.recipe_addr, 0);
@@ -1019,12 +1040,42 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
      * design §3): a crash between the two leaves the file under both names,
      * never under neither. */
     if (vol_dirent_delta_put(v, t_pino, tleaf, f_id) != 0)
-        return -1;
+        goto rename_abort;
+    new_put = 1;
     if (vol_path_lookup(v, fparent, &f_pino) != 1)
-        return -1;
+        goto rename_abort;
     if (vol_dirent_delta_del(v, f_pino, fleaf) != 0)
-        return -1;
+        goto rename_abort;
+    /* WP606: fence before ack. An acked rename must be unwound by no
+     * later fence failure (doom would roll it back while the caller saw
+     * OK); a refused fence is an ERR with the namespace compensated
+     * below, never a half-applied rename. */
+    if (vol_sync(v) != 0)
+        goto rename_abort;
     return 0;
+rename_abort:
+    /* Best effort, still -1: drop the new name, restore a dropped
+     * victim (row first, dirent second: the create ordering, so a crash
+     * mid-rollback leaves an orphan row, never a dangling name). */
+    if (new_put) {
+        if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
+            fprintf(stderr, "invarifs: rename: abort AND the new-name "
+                    "rollback failed; the namespace may be torn. Run "
+                    "invf-fsck.\n");
+        new_put = 0;
+    }
+    if (victim_dropped) {
+        int vok = 0;
+        if (victim_had_row)
+            vok = vol_inode_delta_put(v, victim_id, &victim_in);
+        if (vok != 0 ||
+            vol_dirent_delta_put(v, t_pino, tleaf, victim_id) != 0)
+            fprintf(stderr, "invarifs: rename: abort AND the victim "
+                    "rollback failed; the namespace may be torn. Run "
+                    "invf-fsck.\n");
+        victim_dropped = 0;
+    }
+    return -1;
 }
 
 int vol_ensure_path(invfs_volume *v, const char *name)

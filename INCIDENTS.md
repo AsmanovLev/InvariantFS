@@ -2942,3 +2942,74 @@ batched. Residual notes: data-segment drops for edge-acked files
 (observed once as torn bytes, unpinned) live in vol_write.c (out of scope);
 a publish that lands its store but drops its barrier can orphan the old
 chain (pre-existing, needs rollover atomicity work).
+
+## leg5 GHOST from WP605 resurrection-rewrite
+
+**Date:** 2026-10-11. **Status:** GHOST mechanism FIXED by WP606 (this
+branch); a DEEPER leg5 layer (s23, below) is OPEN and separate.
+WP605 (b908849) healed group-commit holes by REWRITING retained staged
+bytes ahead of the post-failure fence. Local leg5 repro + oplog
+(/srv/flakey/leg5repro/oplog.txt, seed 20261331) proves this resurrects
+mutations the caller saw FAIL: t=+17.2 r10 rename r12.bin->r17.bin
+errored loudly (driver correctly never model-noted r17), but a staged
+record of the failed rename was retained and the post-heal fence rewrote
+it, so the rename applied ANYWAY (t=+18.2 r12 GHOST: r17.bin on the
+volume, never written; volume holds both r12.bin and r17.bin). CI leg5
+fails identically on 9595764; CI leg2 PASSED with WP605 (65
+present+bit-exact) -- kept.
+**Fix (fix-forward, group commit stays ON, same triggers):** the heal
+writes TOMBSTONE PADS, not mutations. A fence failure DOOMS the retained
+set at once (vol_delta_doom: pending unwound, overlay rolled back to the
+pre-stage snapshot newest-first, mutation bytes freed), and the next fence
+writes INVFS_DELTA_FLAG_PAD records (new bit 0x0002, claimed per the
+invarifs.h rule; valid-but-inert: replay/skips without indexing, exact
+span length incl. multi-chunk past 64 KiB) over the doomed spans, while
+live post-failure stages are still rewritten (the WP605 drop-victim heal,
+so leg2 continuity survives). The failed append's own span is consumed
+(bump advances past its staged bytes) and padded at the next fence, so
+remount replay cannot resurrect it either. Failed mutations stay dead
+(caller saw error -- honest); the log stays continuous (post-heal fenced
+writes stay visible). Scope: src/core/vol_delta.c + vol_delta.h +
+volume_internal.h + the WP605 vol_flush/vol_sync sites in volume.c only.
+Validated (orchestrator, this branch): leg2 x2 default 0 ABSENT (pads keep
+continuity); leg5 seed-20261331: the r17 GHOST IS GONE (rename ERR leaves
+no name; r17 later created legitimately), but the run now reaches a deeper
+layer and fails on s23 (separate section below -- NOT this bug). make test
+full PASS incl. a RENAME_NOREPLACE-refused-with-EIO OK leg; hygiene green.
+ROOT-CAUSE CORRECTION (orchestrator forensics over the agent's): the pads
+were NECESSARY but the ghost's actual path was NOT the rewrite -- it was
+vol_rename staging put(r17) then failing a LATER READ (fparent lookup EIO)
+with no fence ever attempted, so doom never fired and the live staged put
+fenced normally post-heal. Fixed by abort compensation in vol_rename (drop
+the new name / restore a dropped victim, best-effort, WP604 style) PLUS
+vol_sync before return 0 (an acked rename is fenced: no later doom can
+unwind what the caller saw OK). Audit: rename is the ONLY mutator that
+reads after staging; create/mkdir/unlink/rmdir read-first or compensate.
+Kill-9 boundary note above stands.
+Known boundary (pre-existing, out of scope): staged bytes that physically
+land AFTER the pads (kill -9 path: daemon dead, page cache flushes the
+failed mutation's pages post-pad) can still surface -- the same class as
+legacy failed-append bytes landing, noted not chased.
+
+## leg5 s23 0-byte collateral AFTER fsck -f content-cut (separate from ghost)
+
+**Date:** 2026-10-11. **Status:** OPEN, prime suspect fsck -f content-cut vs
+dedupe-shared blocks (unproven), evidence frozen.
+With the ghost fixed the seed-20261331 leg5 run survives to r56 and fails
+at the exhausted gate: `resurrected s23.bin torn but unnamed`. Frozen
+artifact: tools/flakey/artifacts/leg5-soak-20261011-184805/ (backing.img +
+oplog.txt + model.json; inspected via a COPY, evidence untouched). Facts:
+s23 written under drop t=23.5 (12153B, drop-touched), deleted under up
+t=24.0, resurrected-with-intact-content at every gate r28-r52 (oplog:
+"content in history -- legal" as late as t=41.9), 0 bytes on the final
+image (sha(empty) not in hist), damage names at gate = ['s19.bin'] only.
+No driver op touched s23 between 41.9 and the FAIL; the window holds only
+error/drop chaos, `cli realize`, `fsck -f (content cut)` t=44.3, and a
+--heal attempt. verify --deep on the frozen image names only `CORRUPT:
+s19.bin`; fsck --list-damaged names NOTHING (not even s19). So either -f
+collateralized s23 while cutting s19 (shared dedupe segment excised for
+one row orphans the other -- then -f must name collateral or refuse), or
+the gate is blind to a real damage label. The 606 changes are exonerated
+for s23 (rename-sync touches only its two names; pads cover doomed spans;
+s23 intact at 41.9 with them live). Next: dedicated forensics WP on the
+frozen artifact (segment-overlap proof first), NOT a drive-by inside 606.

@@ -794,9 +794,13 @@ typedef struct {
  *   key_len:u16 BE | val_len:u16 BE | flags:u16 BE | crc32c:u32 | key | val
  * crc32c is CRC32C over key||val (the field itself is not covered). flags
  * bit0 marks a delete record (shadows the base; value absent, val_len == 0);
- * other bits are reserved 0 and a new WP must claim one. A zeroed record
- * header is the clean end of the log (padding after the last live record),
- * not a zero-length record.
+ * bit1 (WP606) marks a tombstone pad: a healed-over failed mutation, valid
+ * but inert -- replay skips it without indexing, so the log stays
+ * continuous past dead spans. A pad carries val_len == 0, never DELETE,
+ * and a zero filler key; the filler length sizes the pad to its span
+ * exactly. Other bits are reserved 0 and a new WP must claim one. A zeroed
+ * record header is the clean end of the log (padding after the last live
+ * record), not a zero-length record.
  *
  * Segment header (WP-M10; stripe size is this WP's decision). 32 blocks =
  * 128 KiB, large enough to hold the largest metadata record this path is
@@ -811,6 +815,7 @@ typedef struct {
 #define INVFS_DELTA_SEG_MAGIC     "DSG3"
 #define INVFS_DELTA_SEG_VERSION   1u
 #define INVFS_DELTA_FLAG_DELETE   0x0001u
+#define INVFS_DELTA_FLAG_PAD      0x0002u   /* WP606 tombstone pad (see above) */
 #define INVFS_DELTA_REC_HDR_LEN   10u
 #define INVFS_DELTA_SEG_BLOCKS    32u   /* 128 KiB stripe (this WP's decision) */
 #define INVFS_DELTA_SEG_BYTES     ((uint64_t)INVFS_DELTA_SEG_BLOCKS * INVFS_BLOCK_SIZE)

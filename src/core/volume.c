@@ -1822,11 +1822,13 @@ int vol_flush(invfs_volume *v)
         return -1;
     }
     if (vmux_barrier(v, "v3 bitmap") < 0) {
-        /* WP605: a refused flush barrier leaves staged delta bytes (which
-         * this barrier would have covered) of unknown fate; the next delta
-         * fence re-writes them. Set even when nothing is staged (harmless:
-         * the rewrite is skipped when retention is empty). */
-        v->delta_rewrite_needed = 1;
+        /* WP605/WP606: a refused flush barrier leaves staged delta bytes
+         * (which this barrier would have covered) of unknown fate: doom
+         * the staged set (failed mutations stay dead) and heal at the
+         * next delta fence (pads for the doomed, rewrite for the live).
+         * Runs even when nothing is staged (harmless: doom of an empty
+         * set only sets the flag). */
+        vol_delta_doom(v);
         return -1;
     }
     /* WP98: the WP25 tier/RAW-mirror indexes need no journal to be
@@ -1913,12 +1915,12 @@ int vol_sync(invfs_volume *v)
      * ack exact -- vol_sync returning 0 means every staged record durable,
      * not merely written. A refused drain latches like a refused barrier. */
     if (vol_delta_drain(v) != 0) {
-        v->delta_rewrite_needed = 1;   /* WP605: heal at the next fence */
+        /* The drain doomed the staged set inline; the flag is set there. */
         vol_io_error_latch(v, "sync");
         return -1;
     }
     if (vmux_barrier(v, "sync") < 0) {
-        v->delta_rewrite_needed = 1;   /* WP605: heal at the next fence */
+        vol_delta_doom(v);   /* WP606: failed mutations stay dead */
         vol_io_error_latch(v, "sync");
         return -1;
     }

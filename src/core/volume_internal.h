@@ -242,11 +242,23 @@ typedef struct {
  * machinery, below); the volume only owns the array. */
 struct cpack_map_cache;
 
-/* WP605: one retained staged delta record (owned bytes for rewrite). */
+/* WP605/WP606: one retained staged delta record. `bytes` is the owned
+ * staged record (zero-copy: the append buffer changes hands) while the
+ * entry is live; WP606 frees it at doom time (failed mutations must stay
+ * dead, so only off/len survive for the tombstone pad). `has_prev` + the
+ * prev_* fields snapshot the index ref this record's di_put shadowed (or
+ * its absence), taken at retain time, so the doom rollback restores
+ * exactly the pre-stage overlay. */
 typedef struct {
     uint64_t off;                    /* absolute volume offset staged at */
     size_t   len;                    /* encoded record length */
-    uint8_t *bytes;                  /* owned record bytes (zero-copy) */
+    uint8_t *bytes;                  /* owned record bytes, NULL once doomed */
+    int      has_prev;               /* index named key before this stage */
+    uint64_t prev_seg;               /* shadowed ref segment pba */
+    uint64_t prev_off;               /* shadowed ref record offset */
+    uint64_t prev_seq;               /* shadowed ref sequence */
+    uint16_t prev_flags;             /* shadowed ref flags */
+    uint16_t prev_vlen;              /* shadowed ref value length */
 } delta_staged_rec;
 
 
@@ -669,23 +681,32 @@ typedef struct invfs_volume {
     uint64_t delta_pending_bytes;      /* their record bytes */
     uint64_t delta_group_max;          /* count cap (0 = unparsed: legacy) */
     uint64_t delta_group_bytes;        /* byte cap (0 = unparsed: legacy) */
-    /* ---- WP605: staged-byte retention (rewrite after failure) ----------
+    /* ---- WP605/WP606: staged-byte retention (pads, not resurrection) --
      * Group commit stages records behind one barrier; a refused fence
      * leaves their bytes of unknown fate, and a dm table swap can drop
      * unfenced pages for good, leaving a zero gap that strands every
      * record appended past it (fsync-acked files ABSENT). Staged record
      * bytes are therefore retained (zero-copy: the append buffer changes
-     * hands) until the fence that covers them succeeds, and the next fence
-     * after any failure re-writes them first -- healing the hole whether
-     * the bytes landed (rewrite is idempotent) or dropped. Rewrite is
-     * best-effort before the barrier, whose result still decides the ack.
-     * Memory is O(staged): freed on every successful fence and on close.
-     * delta_rewrite_needed is set on any fence failure, cleared on success
-     * and by close/mount. */
+     * hands) until the fence that covers them succeeds. WP605 healed the
+     * hole by REWRITING the retained bytes -- which resurrected mutations
+     * whose caller saw FAIL (leg5 GHOST r17.bin). WP606 heals with
+     * TOMBSTONE PADS instead: a fence failure DOOMS the retained set
+     * (delta_doomed watermark): the overlay is rolled back to the prev
+     * snapshot at once (failed mutations invisible to reads/fold), and
+     * the next fence writes INVFS_DELTA_FLAG_PAD records over the doomed
+     * spans (replay-neutral, exact-length) while live post-failure stages
+     * are still rewritten (drop-victim heal, the WP605 leg2 fix). Healing
+     * is best-effort before the barrier, whose result still decides the
+     * ack. Memory is O(staged): freed on every successful fence and on
+     * close. delta_rewrite_needed is set on any fence failure, cleared on
+     * success and by close/mount. Known boundary: staged bytes that
+     * physically landed AFTER the pads (kill -9 page-cache flush) can
+     * still surface -- pre-existing legacy behavior, not chased here. */
     delta_staged_rec *delta_staged;    /* retained staged record bytes */
     size_t   delta_nstaged;            /* records retained */
     size_t   delta_cstaged;            /* retention capacity */
-    int      delta_rewrite_needed;     /* a fence failed: rewrite first */
+    size_t   delta_doomed;             /* leading retained entries doomed */
+    int      delta_rewrite_needed;     /* a fence failed: heal first */
     /* ---- WP-M14: fold trigger accounting (D2) --------------------------
      * The design gives no numeric thresholds; vol_fold.c measures replay
      * latency and fixes them (recorded there and in the WP-M14 doc). These
