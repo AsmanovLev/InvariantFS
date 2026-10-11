@@ -584,6 +584,20 @@ class Soak:
                 self.log("exhausted: %s absent but damage-named -- "
                            "accounted loss" % name)
                 continue
+            if ent.get("drop_touched"):
+                # Rename/delete acked under drop may never have landed
+                # (the device ACKs discards): a drop-touched absence is
+                # device-explained, recorded at op time -- not silence.
+                # An up-mode-pinned absence below stays a FAIL.
+                # TODO: the same shape in a NORMAL (converged) gate --
+                # absent model-live name, no structural damage -- is
+                # currently ignored (diff_manifest iterates present only).
+                # It needs rename-evidence resync (absent dst + present
+                # exact src with covering hist), not silence. Filed.
+                self.log("exhausted: %s absent but drop-touched (last "
+                           "acked touch under drop -- device may have "
+                           "discarded it)" % name)
+                continue
             if ns_unreadable:
                 self.log("exhausted: %s absent with unreadable "
                            "namespace -- covered by the named catastrophe "
