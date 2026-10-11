@@ -17,8 +17,8 @@ In Meta-v3:
 - **Overlay**: Readers look up the Delta Log first; if absent, they read the immutable B+ tree base.
 - **Fold worker**: Periodic background task merges accumulated delta entries into the B+ tree, freeing obsolete pages.
 - **Mount time**: $O(1)$ base root load + short delta replay (`vol_open` →
-  `vol_delta_mount`, `src/core/volume.c:1565`; the replay loop and the
-  torn-tail truncation are in `src/core/vol_delta.c:928-992`). The fold
+  `vol_delta_mount`, `src/core/volume.c:1349`; the replay loop and the
+  torn-tail truncation are in `src/core/vol_delta.c:1946-2030`). The fold
   *trigger* thresholds in §3 are what bound how long that replay can get.
 
 ---
@@ -157,7 +157,8 @@ actually promise. The engine-side entry points are `vol_sync` (FUSE
 
 | Mutation | Commit point | Durable when it returns? |
 |---|---|---|
-| namespace / inode / xattr change | `vol_delta_append` (record `io_pwrite` → staged in the bounded group → group's `vmux_barrier` → index publish) | **at the group's fence**: the cap auto-drain, `vol_delta_drain`, or the next `vol_sync`/`vol_flush`/close/fold barrier (`src/core/vol_delta.c:644-665`) |
+| namespace / inode / xattr change | `vol_delta_append` (record `io_pwrite` → staged in the bounded group → group's `vmux_barrier` → index publish) | **at the group's fence**: the cap auto-drain, `vol_delta_drain`, or the next `vol_sync`/`vol_flush`/close/fold barrier (`src/core/vol_delta.c:1284-1318`) |
+| superseded content (retire) | retire list (`vol_retire_recipe`/`vol_retire_pbas`) → freed at the first successful fence while the superseding/deleting record is still live, else dropped and kept allocated (`dl_retire_collect`, `src/core/vol_delta.c:858`) | at that fence (close drains too) |
 | new delta segment | `delta_new_segment` (zeroed segment + header + barrier) | yes, before `RT30` names it |
 | file content | data segments are written before the delta record that names them; that record's barrier covers them | yes |
 | fold (base-tree COW) | `v3_publish`: bitmap flush + barrier, then `mbuf_root_publish` (`RT30` double slot + barrier) | yes, at publish |
@@ -229,7 +230,7 @@ drift from the code.
 Because the delta append stages behind its group's fence (WP602, §4.4),
 the metadata of a mutation is durable at the latest when `fsync` returns:
 `vol_sync` drains the staged group before its barrier
-(`src/core/volume.c:1909`), so the acknowledgement still means what it
+(`src/core/volume.c:1930`), so the acknowledgement still means what it
 says. What `fsync` adds on v3 beyond the drain is the **bitmap**: the
 allocation map is a derived cache persisted only on flush/publish, so
 `fsync` is the point that pins it. Data blocks are covered by the barrier
@@ -237,12 +238,12 @@ that follows them.
 
 **What `fsync` does not cover, on v3:** the bitmap is *not* made durable
 before a delta record. The record is fenced with its group
-(`src/core/vol_delta.c:644-665`); the bitmap is only written at `vol_flush`
-(`src/core/volume.c:1820`). A crash inside that window leaves a durable
+(`src/core/vol_delta.c:1284-1318`); the bitmap is only written at `vol_flush`
+(`src/core/volume.c:1837`). A crash inside that window leaves a durable
 record naming blocks whose allocation bits are still clear on disk. This is
 safe by **derivation, not by ordering**: the bitmap is a derived cache
 (`vol_fsck.c:25`) and mount replay re-reserves every block a replayed segment
-spans (`dl_reserve_segment`, `src/core/vol_delta.c:409`) before any
+spans (`dl_reserve_segment`, `src/core/vol_delta.c:1074`) before any
 allocator call can hand it out again. The window can strand free space, it
 cannot alias a live block. `tools/delta_test.c`
 (`bitmap-before-delta gap is safe by replay`) is the regression test for

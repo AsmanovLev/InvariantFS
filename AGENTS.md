@@ -232,7 +232,7 @@ file.
   default** — the write path stores fast LZ4 (ZSTD only once RAW fill
   passes 80%, via the adaptive effort ladder) and falls back to verbatim
   when a segment does not shrink; the sweep is what re-encodes into the
-  strong codecs (`src/core/vol_write.c:190`, `:203-204`; see §2.4).
+  strong codecs (`src/core/vol_write.c:251`, `:351-354`; see §2.4).
 
 ### 2.3 Zone layout
 
@@ -271,12 +271,16 @@ When you `unlink()`:
 
 1. A delta delete entry is appended — there is no immediate in-place record
    surgery.
-2. The file's data segments are freed **at `unlink`**: `vol_v3_unlink`
-   walks the inode's recipe and frees every non-shared segment through
-   `vol_v3_free_recipe_blocks` → `vol_free_blocks`
-   (`src/core/vol_dirs.c:598-600`, `src/core/vol_ast.c:125`). Fold drops
-   the delta entry. Two things still defer the space, and they are the
-   reason a delete-then-check cycle can look like a leak:
+2. The file's data segments are **retired at `unlink`, freed at the next
+   fence**: `vol_unlink` stages the row+dirent deletes and files a retire
+   entry on the row (`vol_retire_recipe`, `src/core/vol_dirs.c:900`;
+   resolution via `vol_free_recipe_blocks`, `src/core/vol_ast.c:136`).
+   The first successful fence covering the deletes frees the blocks -- and
+   only while the row is still absent (a fence-failure doom restores the
+   row and drops the entry, so a resurrected file keeps its blocks; an
+   unloadable recipe restores the name right away with `-1`, WP604).
+   Fold drops the delta entry. Three things still defer the space, and
+   they are the reason a delete-then-check cycle can look like a leak:
    - a **live SPT0 savepoint** (§2.6) pins every block the captured
      generation's recipes named, so the blocks stay allocated until the
      next capture drops that window and reclaims what no live recipe
@@ -287,6 +291,9 @@ When you `unlink()`:
    - a `zone == TEXT` entry names a *shared* batch segment, which the
      targeted free deliberately skips — `tz_v3_gc` reclaims it when the
      last live member drops (`src/core/vol_ast.c:153`).
+   - the retire window itself: between the unlink and the next fence the
+     blocks are still allocated (a sync/fsync, the next grouped commit,
+     or close drains them; `df` converges then, not at the unlink).
 3. The bitmap is a derived cache, so `df` reflects the free only after the
    bitmap has been flushed.
 

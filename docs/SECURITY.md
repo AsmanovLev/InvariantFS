@@ -170,7 +170,7 @@ Signatures (verify before first exec) are the planned fix; they are not
 implemented yet.
 
 Escape hatch, for mounting an untrusted volume: `-o noautopack`
-(`src/cli/fuse_fs.c:3839`) or `INVFS_NO_AUTOPACK=1` (covers the offline
+(`src/cli/fuse_fs.c:3924`) or `INVFS_NO_AUTOPACK=1` (covers the offline
 tools, which share the codec TU). When armed, the probe reports every
 tool absent without forking, and the pack exec/cmd trampolines decline
 before forking (`src/codecs/codec.c:665`, `src/core/vol_cpack.c:386`,

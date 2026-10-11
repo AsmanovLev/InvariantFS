@@ -125,3 +125,45 @@ structure-before-reference rule, is in `docs/architecture/META.md` §4.
   case group commit cannot reach (see the trade-offs above).
 - Device-cache semantics change such that the double barrier in
   `fsync`/close is demonstrably wasteful.
+
+## Amendment (WP605-607): staged retention, doom, retire-on-fence
+
+Group commit stages records behind one barrier, so a record can sit
+unfenced while later records fence, and a failed fence can strand a
+mid-log gap that replay stops at (leg2: fsync-acked files invisible
+past the gap). Three mechanisms close it, in this order:
+
+1. **Staged retention + doom (WP605/606).** Every staged record's bytes
+   are retained until its fence succeeds. Any fence failure dooms the
+   retained set at once: the overlay rolls back to pre-stage snapshots
+   (newest first) and the next fence heals the spans with tombstone pads
+   (`INVFS_DELTA_FLAG_PAD`: valid but inert, replay skips them) instead of
+   the failed mutations. A mutation the caller saw fail therefore never
+   becomes visible, while the log stays continuous past it. Op-abort paths
+   (failed write/release/commit, failed rename/unlink past first stage)
+   doom the same way: compensating appends are not used because a
+   compensation can itself fail under chaos and leave the original stage
+   live. Reverts land on cumulative-history states, which the soak
+   oracles accept as legal.
+2. **Heal-before-every-barrier (WP607).** Every successful barrier flushes
+   all dirty pages device-wide, so a fence that does not heal first
+   commits doomed spans raw (close-flush after a doom did exactly this).
+   `vol_delta_heal` runs ahead of the close/flush, fold, and anchor
+   barriers (best-effort trylock: the anchor runs inside delta appends).
+3. **Retire-on-fence (WP607).** Superseded content is freed only at the
+   first successful fence covering the superseding/deleting record, and
+   only while that record is still live (span+seq match; DELETE tombstone
+   still up). A doom-unwound row drops its retire entry and keeps its
+   blocks -- freeing synchronously under a staged row handed resurrected
+   rows reused blocks (0-byte files, late tears). Chained supersedes
+   rebase their entries forward; close and the drain early-return converge
+   pending entries so offline tools see identical counts.
+
+What this explicitly does **not** change: the per-call ack contract above
+(group commit's, kept), the CLEAN-before-durability ordering, or the
+latch. What it adds to the operator-visible contract: `df`/free-block
+counts converge at fences and close, not at the mutating call; a failed
+mutating call leaves the pre-call state (never a torn prefix); post-soak
+terminal damage that is fully named is an accepted proven-exhausted state,
+not a failure to repair (the v3 checker never learned the content cut and
+the bitmap carries no CRC -- both recorded gaps, neither silent).
