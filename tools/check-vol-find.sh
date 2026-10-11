@@ -59,8 +59,9 @@ src/cli/fuse_fs.c:3528:SKIP
 src/cli/fuse_fs.c:3565:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
-src/cli/pack.c:2091:SKIP   # list --volume: unreadable manifest skips the pack row
-src/cli/pack.c:2515:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
+src/cli/pack.c:2834:SKIP   # list --volume: unreadable manifest skips the pack row
+src/cli/pack.c:2867:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
+src/cli/pack.c:3337:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:121:SKIP
 src/cli/ls.c:135:SKIP
