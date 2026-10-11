@@ -147,6 +147,9 @@ jobs:
           path: assets
       - name: stage recipes + notes
         run: |
+          # bootstrap.sh is the README one-liner entry point
+          # (releases/latest/download/bootstrap.sh) -- it must be an asset.
+          cp packaging/bootstrap.sh assets/
           cp packaging/gentoo/invfs-*.ebuild assets/ 2>/dev/null || true
           cp packaging/void/template "assets/void-template-${TAG#v}" 2>/dev/null || true
           cp packaging/PKGBUILD "assets/PKGBUILD-${TAG#v}" 2>/dev/null || true
