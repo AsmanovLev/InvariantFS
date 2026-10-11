@@ -178,6 +178,13 @@ jobs:
         with:
           name: dist-rpm
           path: assets
+      # dist-rpm / dist-deb artifacts arrive nested (x86_64/, debs/); gh
+      # release upload takes files, not directories -- flatten first.
+      - name: flatten artifacts
+        run: |
+          find assets -mindepth 2 -type f -exec mv -t assets {} +
+          find assets -mindepth 1 -type d -empty -delete
+          ls assets/
       - name: stage recipes + notes
         run: |
           # bootstrap.sh is the README one-liner entry point
