@@ -2890,6 +2890,17 @@ with the evidence; neither is proven. Reopen on second occurrence --
 with an artifact, dissect read-vs-verify resolution per inode before
 any other theory.
 
+**Second occurrence:** 2026-10-12, engine-ci run 38165887464 (commit
+f1ec759), soak leg4 arm 4b. Identical signature: `invf-verify --deep`
+clean (9 files ok, 0 corrupt, parity 0 mismatched after re-seal) but
+`invf-cat` readback mismatched orig on the SAME 4 files (a.c, r.log,
+t.tar, w.py), ~22 s after the clean verify, reads only, no kill in
+between. Still no artifact: the workflow does not upload
+`tools/flakey/artifacts` (fixed in the same commit as this note -- the
+soak step now stages the artifacts dir on a nonzero soak rc so the
+third occurrence, if any, is dissectable). Status stays OPEN; no
+theory promoted.
+
 ## migrate + serialize_win: windowed recipes stay put (v1 boundary)
 
 **Date:** 2026-10-11. **Status:** BOUNDARY, not a bug filed. Migrate

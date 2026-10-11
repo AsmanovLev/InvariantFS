@@ -199,7 +199,24 @@ jobs:
           export FLAKEY_WORK="$RUNNER_TEMP/flakey"
           timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh; rc=$?
           echo "soak rc=$rc (informational; pre-war reds tracked, not gating)"
+          echo "SOAK_RC=$rc" >> "$GITHUB_ENV"
           exit 0
+      # The leg4 silent-MISMATCH incident (INCIDENTS.md) can only be
+      # dissected with a failure artifact; stage it when the soak is red
+      # so the next occurrence carries evidence. Always exit 0: the soak
+      # stays informational, the artifact is the deliverable.
+      - name: stage flakey failure artifacts
+        if: env.SOAK_RC != '0'
+        run: |
+          mkdir -p "$RUNNER_TEMP/soak-artifacts"
+          cp -r tools/flakey/artifacts "$RUNNER_TEMP/soak-artifacts/" 2>/dev/null || true
+          du -sh "$RUNNER_TEMP/soak-artifacts" || true
+      - uses: actions/upload-artifact@v4
+        if: env.SOAK_RC != '0'
+        with:
+          name: soak-flakey-artifacts
+          path: ${{ runner.temp }}/soak-artifacts
+          if-no-files-found: ignore
 
   # The distro install harnesses, which build a real Arch and a real Void
   # root and take them through mkfs/import/fsck/verify/bit-exact reads.
