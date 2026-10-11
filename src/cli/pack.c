@@ -23,26 +23,12 @@
  * default. Fetched files are sha256-verified against the pack listing
  * and pass the same signature gate; no bypass. `--release` switches the
  * same resolve (explicit @version or latest from index.json, no GitHub
-<<<<<<< HEAD
  * API) to the registry's GitHub release tarballs
  * (<name>-<version>-<platform>.tar.gz, see tools/package-release.sh in
  * the registry repo): the tarball is unpacked into the tool scratch and
  * the extracted files are verified against the raw-tree sha256 listing
  * plus the same WP203 gate — a bad release refuses exactly like a bad
  * raw fetch.
-=======
- * API) to the registry's GitHub release .ivpack bundles
- * (<name>-<version>.ivpack under tag v1.1.0, see
- * registry/docs/IVPACK-RELEASES.md): the bundle is unzipped (fork+execvp
- * unzip, entry names validated before extract) into the tool scratch and
- * the extracted files are verified against the raw-tree sha256 listing
- * plus the same WP203 gate — a bad bundle refuses exactly like a bad
- * raw fetch. A pack with no .ivpack asset falls back to the round-2
- * release tarball (<name>-<version>-<platform>.tar.gz) with one loud
- * line; nothing else falls back. v1.1.0 ships no manifest.sig sidecars,
- * so .ivpack installs take the gate's missing-signature path (prompt;
- * -y proceeds, -n reports).
->>>>>>> wp/608-pack-registry-fetch
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -57,7 +43,6 @@
 #include <sys/utsname.h>
 #include <unistd.h>
 #include <errno.h>
-#include <signal.h>
 
 #include "blake3.h"
 #include "pack_sig.h"
@@ -85,7 +70,6 @@
  * repos download through curl (execvp, never installed).
  *
  * Release mode (round 2, --release) keeps this resolve and only changes
-<<<<<<< HEAD
  * the download: the tarball comes from the registry's GitHub release
  * assets (DEFAULT_RELEASE_BASE/releases/download/<tag>/, or
  * <repo>/releases/download/<tag>/ under an explicit --repo), is
@@ -98,55 +82,20 @@
  * <base>/releases/download/<tag>/<name>-<version>-<platform>.tar.gz. */
 #define DEFAULT_RELEASE_BASE \
     "https://github.com/AsmanovLev/InvariantFS-registry"
-=======
- * the download: round 3 prefers the .ivpack bundle
- * (<name>-<version>.ivpack, default tag v1.1.0, --release-tag overrides)
- * and falls back to the round-2 tarball (default tag v<version>) with
- * one loud line only when the pack has no .ivpack asset. Both come
- * from the registry's GitHub release assets
- * (DEFAULT_RELEASE_BASE/releases/download/<tag>/, or
- * <repo>/releases/download/<tag>/ under an explicit --repo), are
- * unpacked (unzip/tar) into the same scratch, and are verified against
- * the raw-tree sha256 listing plus the same gate. */
-#define DEFAULT_REPO \
-    "https://raw.githubusercontent.com/AsmanovLev/InvariantFS-registry/main"
-/* Release-asset base: the registry publishes .ivpack bundles (v1.1.0+)
- * and the older dist tarballs as release assets on version tags, so a
- * published asset lives at
- * <base>/releases/download/<tag>/<name>-<version>.ivpack (or
- * <name>-<version>-<platform>.tar.gz for the tarball fallback). */
-#define DEFAULT_RELEASE_BASE \
-    "https://github.com/AsmanovLev/InvariantFS-registry"
-/* Default tag carrying the .ivpack assets (registry/docs/IVPACK-RELEASES.md:
- * one tag carries all packs; v1.1.0 is the .ivpack deliverable). */
-#define DEFAULT_IVPACK_TAG "v1.1.0"
->>>>>>> wp/608-pack-registry-fetch
 /* Cap on files named by one sha256 listing (release extras check). */
 #define MAX_REL_FILES 1024
 
 /* What the fetch resolves: pinned version and/or release-asset mode. */
 typedef struct {
     const char *want_ver;   /* NULL/"" = latest from index.json */
-<<<<<<< HEAD
     int release;            /* 1 = fetch the release tarball */
     const char *rel_tag;    /* NULL/"" = default v<version> */
-=======
-    int release;            /* 1 = fetch the release asset (.ivpack first,
-                             * tarball fallback when the pack has none) */
-    const char *rel_tag;    /* NULL/"" = v1.1.0 for .ivpack, v<version>
-                             * for the tarball fallback */
->>>>>>> wp/608-pack-registry-fetch
     const char *platform;   /* NULL/"" = default <uname>-linux-musl */
 } fetch_opts;
 #define MAX_REG_PACKS 512
 
 static int rmtree(const char *path); /* defined with the volume helpers */
 static int is_codecpack(const char *dir); /* manifest present in dir */
-<<<<<<< HEAD
-=======
-static int read_source_marker(const char *path, char *out,
-                              size_t cap); /* defined with install below */
->>>>>>> wp/608-pack-registry-fetch
 
 typedef struct {
     char key[128];
@@ -536,12 +485,6 @@ static void pack_dep_hint(const char *tool)
         { "tar", "apt install tar", "pacman -S tar",
           "emerge app-arch/tar", "xbps-install tar",
           "dnf install tar" },
-<<<<<<< HEAD
-=======
-        { "unzip", "apt install unzip", "pacman -S unzip",
-          "emerge app-arch/unzip", "xbps-install unzip",
-          "dnf install unzip" },
->>>>>>> wp/608-pack-registry-fetch
     };
     char id[64] = "";
     const char *distro = "unknown";
@@ -608,17 +551,6 @@ static void repo_tar_missing(void)
     pack_dep_hint("tar");
 }
 
-<<<<<<< HEAD
-=======
-static void repo_unzip_missing(void)
-{
-    fprintf(stderr, "invfs-pack: unzip is required to unpack a --release "
-            ".ivpack bundle but was not found on PATH. "
-            "invfs-pack never installs tools itself; install unzip:\n");
-    pack_dep_hint("unzip");
-}
-
->>>>>>> wp/608-pack-registry-fetch
 /* Fetch a repo-relative path into memory (caller frees) or into a file.
  * file:// repos are plain copies (offline-capable); https:// repos go
  * through curl. 0 on success, -1 on failure (*missing set when curl is
@@ -1249,177 +1181,6 @@ static int tar_extract(const char *tb, const char *dir, int *missing)
     return WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
-<<<<<<< HEAD
-=======
-/* Run `unzip -Z1 <zb>`, collecting entry names (one per line, malloc'd,
- * caller frees). fork+execvp, no shell. *missing set when unzip itself
- * is absent (exit 127). */
-static int zip_list(const char *zb, char **out, size_t *outlen,
-                    int *missing)
-{
-    int pipefd[2] = { -1, -1 };
-    pid_t pid;
-    int status = 0;
-    size_t cap = 4096, n = 0;
-    char *buf;
-    ssize_t r;
-    if (missing)
-        *missing = 0;
-    if (out)
-        *out = NULL;
-    if (outlen)
-        *outlen = 0;
-    if (pipe(pipefd) != 0)
-        return -1;
-    pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return -1;
-    }
-    if (pid == 0) {
-        char *argv[4];
-        dup2(pipefd[1], STDOUT_FILENO);
-        close(pipefd[0]);
-        close(pipefd[1]);
-        argv[0] = (char *)"unzip";
-        argv[1] = (char *)"-Z1";
-        argv[2] = (char *)zb;
-        argv[3] = NULL;
-        execvp("unzip", argv);
-        _exit(127);
-    }
-    buf = (char *)malloc(cap);
-    if (!buf) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-            ;
-        return -1;
-    }
-    close(pipefd[1]);
-    while ((r = read(pipefd[0], buf + n, cap - n)) > 0) {
-        n += (size_t)r;
-        if (n == cap) {
-            char *nb;
-            cap *= 2;
-            nb = (char *)realloc(buf, cap);
-            if (!nb) {
-                free(buf);
-                close(pipefd[0]);
-                while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-                    ;
-                return -1;
-            }
-            buf = nb;
-        }
-    }
-    close(pipefd[0]);
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        ;
-    if (!WIFEXITED(status)) {
-        free(buf);
-        return -1;
-    }
-    if (WEXITSTATUS(status) == 127) {
-        if (missing)
-            *missing = 1;
-        free(buf);
-        return -1;
-    }
-    if (WEXITSTATUS(status) != 0) {
-        free(buf);
-        return -1;
-    }
-    if (n >= cap) {
-        char *nb = (char *)realloc(buf, n + 1);
-        if (!nb) {
-            free(buf);
-            return -1;
-        }
-        buf = nb;
-    }
-    buf[n] = 0;
-    *out = buf;
-    if (outlen)
-        *outlen = n;
-    return 0;
-}
-
-/* Run `unzip -q -o <zb> -d <dir>`. fork+execvp, no shell. */
-static int zip_extract(const char *zb, const char *dir, int *missing)
-{
-    pid_t pid;
-    int status = 0;
-    char *argv[7];
-    if (missing)
-        *missing = 0;
-    pid = fork();
-    if (pid < 0)
-        return -1;
-    if (pid == 0) {
-        argv[0] = (char *)"unzip";
-        argv[1] = (char *)"-q";
-        argv[2] = (char *)"-o";
-        argv[3] = (char *)zb;
-        argv[4] = (char *)"-d";
-        argv[5] = (char *)dir;
-        argv[6] = NULL;
-        execvp("unzip", argv);
-        _exit(127);
-    }
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        ;
-    if (!WIFEXITED(status))
-        return -1;
-    if (WEXITSTATUS(status) == 127) {
-        if (missing)
-            *missing = 1;
-        return -1;
-    }
-    return WEXITSTATUS(status) == 0 ? 0 : -1;
-}
-
-/* An .ivpack entry is safe only when it stays under the archive root
- * (which becomes the staged pack dir): no absolute path, no ".."
- * component, no backslash (never a separator in a well-formed zip, so
- * one is either a crafted entry or a non-portable name — refuse both).
- * Directory entries (trailing slash) pass; symlink/special bits cannot
- * be seen in names, so they are refused after extract by the lstat walk
- * (extras_walk), same split as the tarball path. Leading "./" is
- * tolerated (harmless archiver style). */
-static int zip_entry_ok(const char *e)
-{
-    const char *p;
-    size_t len;
-    while (e[0] == '.' && e[1] == '/')
-        e += 2;
-    if (e[0] == '/' || e[0] == 0)
-        return -1;
-    if (strchr(e, '\\') != NULL)
-        return -1;
-    len = strlen(e);
-    if (len > 0 && e[len - 1] == '/')
-        len--; /* directory entry: check the path leading to it */
-    if (len == 0)
-        return -1;
-    p = e;
-    for (;;) {
-        const char *s = strchr(p, '/');
-        size_t cl = s ? (size_t)(s - p) : len - (size_t)(p - e);
-        if (cl == 0 || (cl == 1 && p[0] == '.') ||
-            (cl == 2 && p[0] == '.' && p[1] == '.'))
-            return -1;
-        if (!s)
-            break;
-        p = s + 1;
-        if ((size_t)(p - e) >= len)
-            break;
-    }
-    return 0;
-}
-
->>>>>>> wp/608-pack-registry-fetch
 /* A tar entry is safe only when it stays under top (<name>/<version>):
  * no absolute path, no ".." component, and the top prefix itself
  * (so a crafted tarball cannot write outside the extraction dir or
@@ -1518,13 +1279,8 @@ static int extras_walk(const char *dir, extras_ctx *c)
     return 0;
 }
 
-<<<<<<< HEAD
 /* Fetch one pack's RELEASE tarball into the tool scratch, unpack it,
  * and sha256-verify every extracted file against the raw-tree sha256
-=======
-/* Fetch one pack's RELEASE tarball (round-2 fallback) into the tool scratch,
- * unpack it, and sha256-verify every extracted file against the raw-tree sha256
->>>>>>> wp/608-pack-registry-fetch
  * listing (fetched through `raw`, exactly like the raw path) — so a
  * tarball whose content was tampered with refuses with the same
  * diagnostic as a tampered raw fetch. The WP203 signature gate then runs
@@ -1538,13 +1294,8 @@ static int extras_walk(const char *dir, extras_ctx *c)
  * release asset on a `v*` tag. Default tag is v<version>
  * (--release-tag overrides); default platform is <uname>-linux-musl,
  * package-release.sh's own default (--platform overrides). */
-<<<<<<< HEAD
 static int repo_fetch_release(const reg_pack *best, pack_repo *raw,
                               const char *repo_spec, const fetch_opts *o,
-=======
-static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
-                                const char *repo_spec, const fetch_opts *o,
->>>>>>> wp/608-pack-registry-fetch
                               char *src_out, size_t src_cap,
                               char *dstname_out, size_t dst_cap,
                               char *stage_top_out, size_t stage_cap,
@@ -1947,551 +1698,6 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     return 0;
 }
 
-<<<<<<< HEAD
-=======
-/* Fetch one pack's .ivpack bundle (round 3, preferred under --release)
- * into the tool scratch, unzip it, and verify it two ways: first the
- * bundle's own `sha256` file over every other entry (a tampered bundle
- * refuses here, exactly like a tampered tarball), then every raw-tree
- * sha256-listed file present in the bundle with an equal hash (the
- * listing is fetched through `raw`, exactly like the raw path, so a
- * bundle re-hashed by its tamperer still fails). `manifest.sig` is the
- * one listed file allowed to be absent: v1.1.0 ships no sig sidecars,
- * so .ivpack installs take the WP203 missing-signature path (prompt;
- * -y proceeds, -n reports) — no bypass, no fail-closed invention.
- *
- * Layout contract (registry/docs/IVPACK-RELEASES.md):
- * <name>-<version>.ivpack (zip -0 -X) containing manifest, sha256,
- * lib/<name>.so (iff the pack has one) and bin/* at the archive root.
- * The archive root becomes the staged pack dir: manifest + bin/ live
- * (the engine uses them today), lib/ is laid out beside them, verified
- * but dormant. The bundle's sha256 file is transport, dropped before
- * the install handoff like the raw listing. The WP203 gate then runs
- * unchanged over the staged tree (see cmd_install).
- *
- * Returns 0 on success, 1 when the pack simply has no .ivpack asset
- * (the caller falls back to the tarball with one loud line), -1 on a
- * refusal (corrupt/tampered bundle, unzip absent (*missing set)). A
- * bundle that downloaded whole but fails verification NEVER falls back:
- * that is tampering, not absence. */
-static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
-                             const char *repo_spec, const fetch_opts *o,
-                             char *src_out, size_t src_cap,
-                             char *dstname_out, size_t dst_cap,
-                             char *stage_top_out, size_t stage_cap,
-                             int *missing)
-{
-    char tag[128];
-    char asset[320];
-    char asset_rel[640];
-    pack_repo ar;
-    const char *custom;
-    char scratch[MAX_PATH], staged[MAX_PATH], dl[MAX_PATH];
-    char zbpath[MAX_PATH], shpath[MAX_PATH];
-    char *shtext = NULL;
-    size_t shlen = 0;
-    char *save = NULL, *line;
-    char (*brels)[256] = NULL;
-    int nbrels = 0, bfiles = 0;
-    int miss = 0;
-    src_out[0] = 0;
-    stage_top_out[0] = 0;
-    if (missing)
-        *missing = 0;
-    if (o->rel_tag && o->rel_tag[0])
-        snprintf(tag, sizeof tag, "%s", o->rel_tag);
-    else
-        snprintf(tag, sizeof tag, "%s", DEFAULT_IVPACK_TAG);
-    if (strstr(tag, "/") != NULL || strstr(tag, "..") != NULL) {
-        fprintf(stderr, "invfs-pack: bad --release-tag: %s\n", tag);
-        return -1;
-    }
-    if (snprintf(asset, sizeof asset, "%s-%s.ivpack", best->name,
-                 best->version) >= (int)sizeof asset) {
-        fprintf(stderr, "invfs-pack: release name too long: %s %s\n",
-                best->name, best->version);
-        return -1;
-    }
-    /* Same asset base as the tarball path: an explicit --repo (or
-     * $INVFS_PACK_REPO) keeps its releases/ subtree (hermetic file://
-     * fixtures); otherwise the real GitHub release downloads. */
-    custom = (repo_spec && *repo_spec) ? repo_spec : getenv("INVFS_PACK_REPO");
-    if (custom && *custom) {
-        repo_resolve(&ar, custom);
-        if (snprintf(asset_rel, sizeof asset_rel,
-                     "releases/download/%s/%s", tag,
-                     asset) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
-            return -1;
-        }
-    } else {
-        char base[512];
-        if (snprintf(base, sizeof base, "%s/releases/download/%s",
-                     DEFAULT_RELEASE_BASE, tag) >= (int)sizeof base) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
-            return -1;
-        }
-        repo_resolve(&ar, base);
-        if (snprintf(asset_rel, sizeof asset_rel, "%s",
-                     asset) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
-            return -1;
-        }
-    }
-    printf("fetching %s %s release %s/%s from %s\n", best->name,
-           best->version, tag, asset, ar.base);
-    if (tool_tmpdir(scratch, sizeof scratch, 1 << 20) != 0) {
-        fprintf(stderr, "invfs-pack: no scratch available for the fetch\n");
-        return -1;
-    }
-    if (snprintf(stage_top_out, stage_cap, "%s", scratch) >=
-        (int)stage_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    {
-        size_t nl = strlen(best->name);
-        if (nl > 10 && strcmp(best->name + nl - 10, ".codecpack") == 0) {
-            if (snprintf(dstname_out, dst_cap, "%s", best->name) >=
-                (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
-                        best->name);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-        } else {
-            if (snprintf(dstname_out, dst_cap, "%s.codecpack",
-                         best->name) >= (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
-                        best->name);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-        }
-    }
-    if (snprintf(staged, sizeof staged, "%s/%s", scratch,
-                 dstname_out) >= (int)sizeof staged ||
-        snprintf(dl, sizeof dl, "%s/dl", scratch) >= (int)sizeof dl ||
-        snprintf(zbpath, sizeof zbpath, "%s/pack.ivpack",
-                 scratch) >= (int)sizeof zbpath ||
-        pack_mkdir_p(dl) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage under %s\n", scratch);
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    if (repo_fetch_file(&ar, asset_rel, zbpath, &miss) != 0) {
-        if (miss) {
-            if (missing)
-                *missing = 1;
-            repo_curl_missing();
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        /* No bundle for this pack under this tag: absence, not
-         * tampering. The caller falls back (loud) to the tarball. */
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return 1;
-    }
-    /* list-then-extract: every entry must stay under the archive root */
-    {
-        char *entries = NULL;
-        size_t elen = 0;
-        int zmiss = 0;
-        char *esave = NULL, *e;
-        int any = 0;
-        if (zip_list(zbpath, &entries, &elen, &zmiss) != 0) {
-            if (zmiss) {
-                if (missing)
-                    *missing = 1;
-                repo_unzip_missing();
-            } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot list "
-                        ".ivpack bundle for %s %s (corrupt "
-                        "download?)\n", best->name, best->version);
-            }
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        for (e = strtok_r(entries, "\n", &esave); e;
-             e = strtok_r(NULL, "\n", &esave)) {
-            while (*e == ' ' || *e == '\t')
-                e++;
-            strip_nl(e);
-            if (!*e)
-                continue;
-            if (zip_entry_ok(e) != 0) {
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
-                        "for %s %s escapes the pack dir: %s\n", best->name,
-                        best->version, e);
-                free(entries);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            any++;
-        }
-        free(entries);
-        if (!any) {
-            fprintf(stderr, "invfs-pack: REFUSED: empty .ivpack bundle "
-                    "for %s %s\n", best->name, best->version);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (zip_extract(zbpath, dl, &zmiss) != 0) {
-            if (zmiss) {
-                if (missing)
-                    *missing = 1;
-                repo_unzip_missing();
-            } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot unpack "
-                        ".ivpack bundle for %s %s (corrupt "
-                        "download?)\n", best->name, best->version);
-            }
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-    }
-    /* the bundle's own sha256 covers every other entry: verify first */
-    if (snprintf(shpath, sizeof shpath, "%s/sha256",
-                 dl) >= (int)sizeof shpath) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    shtext = pack_read_file(shpath, &shlen);
-    if (!shtext) {
-        fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle for %s %s "
-                "has no sha256 listing (tampered pack?)\n", best->name,
-                best->version);
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    brels = (char (*)[256])malloc(sizeof *brels * MAX_REL_FILES);
-    if (!brels) {
-        fprintf(stderr, "invfs-pack: out of memory\n");
-        free(shtext);
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    for (line = strtok_r(shtext, "\n", &save); line;
-         line = strtok_r(NULL, "\n", &save)) {
-        char expect[128], rel[256], dest[MAX_PATH];
-        char got[65];
-        char *sp;
-        struct stat st;
-        while (*line == ' ' || *line == '\t')
-            line++;
-        if (!*line || *line == '#')
-            continue;
-        if (sscanf(line, "%127s", expect) != 1)
-            continue;
-        sp = strstr(line, "  ");
-        if (!sp)
-            sp = strchr(line, ' ');
-        if (!sp)
-            continue;
-        sp++;
-        while (*sp == ' ')
-            sp++;
-        snprintf(rel, sizeof rel, "%s", sp);
-        {
-            char *e2 = rel + strlen(rel);
-            while (e2 > rel && (e2[-1] == '\r' || e2[-1] == ' '))
-                *--e2 = 0;
-        }
-        if (strcmp(rel, "sha256") == 0)
-            continue; /* the listing itself: transport, not content */
-        if (!rel[0] || zip_entry_ok(rel) != 0) {
-            fprintf(stderr, "invfs-pack: bad path in .ivpack sha256 "
-                    "listing: %s\n", rel);
-            free(shtext);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (!hex64_ok(expect)) {
-            fprintf(stderr, "invfs-pack: bad sha256 line for %s\n", rel);
-            free(shtext);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (snprintf(dest, sizeof dest, "%s/%s", dl,
-                     rel) >= (int)sizeof dest) {
-            fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
-            free(shtext);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-            fprintf(stderr, "invfs-pack: REFUSED: %s %s/%s is missing "
-                    "from the .ivpack bundle (tampered pack?)\n",
-                    best->name, best->version, rel);
-            free(shtext);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (r256_file(dest, got) != 0 ||
-            strcasecmp(expect, got) != 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
-                    "%s %s/%s (tampered pack?)\n", best->name,
-                    best->version, rel);
-            free(shtext);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (nbrels < MAX_REL_FILES)
-            snprintf(brels[nbrels++], sizeof brels[0], "%s", rel);
-        bfiles++;
-    }
-    free(shtext);
-    if (bfiles == 0) {
-        fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing in "
-                ".ivpack bundle for '%s' (nothing verified)\n", best->name);
-        free(brels);
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    /* the bundle must carry exactly the listed set: anything extra
-     * (or any symlink/special file) refuses, same class as a mismatch. */
-    {
-        extras_ctx cx;
-        int rc;
-        cx.rels = (const char (*)[256])brels;
-        cx.nrels = nbrels;
-        cx.rootlen = strlen(dl) + 1;
-        cx.badrel[0] = 0;
-        cx.nonregular = 0;
-        rc = extras_walk(dl, &cx);
-        if (rc == -2) {
-            if (cx.nonregular)
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
-                        "for %s %s carries a non-regular file %s "
-                        "(tampered pack?)\n", best->name, best->version,
-                        cx.badrel);
-            else
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
-                        "for %s %s carries unlisted file %s (tampered "
-                        "pack?)\n", best->name, best->version,
-                        cx.badrel);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        if (rc != 0) {
-            fprintf(stderr, "invfs-pack: cannot scan unpacked .ivpack "
-                    "for %s %s\n", best->name, best->version);
-            free(brels);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-    }
-    free(brels);
-    /* cross-check against the raw-tree listing: every listed file except
-     * the listing itself and manifest.sig (v1.1.0 ships none) must be
-     * present with an equal hash. A bundle re-hashed by its tamperer
-     * still fails here, because the expected hashes come from the raw
-     * tree, not the bundle. */
-    {
-        char *rshtext = NULL;
-        size_t rshlen = 0;
-        char *rsave = NULL, *rline;
-        int rfiles = 0, rmiss = 0;
-        if (repo_fetch_mem(raw, best->sha256_rel, &rshtext, &rshlen,
-                           &rmiss) != 0 || !rshtext) {
-            if (rmiss) {
-                if (missing)
-                    *missing = 1;
-                repo_curl_missing();
-            } else {
-                fprintf(stderr, "invfs-pack: cannot fetch %s/%s to verify "
-                        "the .ivpack bundle\n", raw->base,
-                        best->sha256_rel);
-            }
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-        for (rline = strtok_r(rshtext, "\n", &rsave); rline;
-             rline = strtok_r(NULL, "\n", &rsave)) {
-            char expect[128], rel[256], dest[MAX_PATH];
-            char got[65];
-            char *sp;
-            struct stat st;
-            while (*rline == ' ' || *rline == '\t')
-                rline++;
-            if (!*rline || *rline == '#')
-                continue;
-            if (sscanf(rline, "%127s", expect) != 1)
-                continue;
-            sp = strstr(rline, "  ");
-            if (!sp)
-                sp = strchr(rline, ' ');
-            if (!sp)
-                continue;
-            sp++;
-            while (*sp == ' ')
-                sp++;
-            snprintf(rel, sizeof rel, "%s", sp);
-            {
-                char *e2 = rel + strlen(rel);
-                while (e2 > rel && (e2[-1] == '\r' || e2[-1] == ' '))
-                    *--e2 = 0;
-            }
-            if (strcmp(rel, "sha256") == 0)
-                continue;
-            if (strcmp(rel, "manifest.sig") == 0)
-                continue; /* v1.1.0 ships no sig sidecar: the WP203
-                           * gate below takes the missing-signature path */
-            if (!rel[0] || zip_entry_ok(rel) != 0) {
-                fprintf(stderr, "invfs-pack: bad path in sha256 "
-                        "listing: %s\n", rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            if (!hex64_ok(expect)) {
-                fprintf(stderr, "invfs-pack: bad sha256 line for %s\n",
-                        rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            if (snprintf(dest, sizeof dest, "%s/%s", dl,
-                         rel) >= (int)sizeof dest) {
-                fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-                fprintf(stderr, "invfs-pack: REFUSED: %s %s/%s is missing "
-                        "from the .ivpack bundle (tampered pack?)\n",
-                        best->name, best->version, rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            if (r256_file(dest, got) != 0 ||
-                strcasecmp(expect, got) != 0) {
-                fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
-                        "%s %s/%s (tampered pack?)\n", best->name,
-                        best->version, rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
-            }
-            rfiles++;
-        }
-        free(rshtext);
-        if (rfiles == 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing for "
-                    "'%s' (nothing verified)\n", best->name);
-            rmtree(scratch);
-            stage_top_out[0] = 0;
-            return -1;
-        }
-    }
-    /* The bundle listing is transport, not pack content: drop it from
-     * the staged tree before the install handoff, exactly like the raw
-     * and tarball paths. lib/ stays: verified above, dormant by design. */
-    unlink(shpath);
-    /* the bundle is no longer needed; drop it before the handoff so a
-     * later rmtree only ever sees the verified tree */
-    unlink(zbpath);
-    if (rename(dl, staged) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage .ivpack pack\n");
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    if (!is_codecpack(staged)) {
-        fprintf(stderr, "invfs-pack: fetched '%s' has no manifest (not a "
-                ".codecpack)\n", best->name);
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    if (snprintf(src_out, src_cap, "%s", staged) >= (int)src_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
-        rmtree(scratch);
-        stage_top_out[0] = 0;
-        return -1;
-    }
-    printf("fetched %s %s (.ivpack, %d file(s) verified)\n", best->name,
-           best->version, bfiles);
-    return 0;
-}
-
-/* --release dispatch (round 3): prefer the .ivpack bundle; fall back to
- * the round-2 tarball with exactly one loud line, and only when the
- * pack has no .ivpack asset (repo_fetch_ivpack returns 1). A bundle
- * that exists but fails verification refuses — never falls back.
- * *ivpack_out reports which asset won (1 = .ivpack, 0 = tarball). */
-static int repo_fetch_release(const reg_pack *best, pack_repo *raw,
-                              const char *repo_spec, const fetch_opts *o,
-                              char *src_out, size_t src_cap,
-                              char *dstname_out, size_t dst_cap,
-                              char *stage_top_out, size_t stage_cap,
-                              int *ivpack_out, int *missing)
-{
-    int rc = repo_fetch_ivpack(best, raw, repo_spec, o, src_out, src_cap,
-                               dstname_out, dst_cap, stage_top_out,
-                               stage_cap, missing);
-    if (rc == 0) {
-        if (ivpack_out)
-            *ivpack_out = 1;
-        return 0;
-    }
-    if (rc == 1) {
-        char tag[128];
-        if (o->rel_tag && o->rel_tag[0])
-            snprintf(tag, sizeof tag, "%s", o->rel_tag);
-        else
-            snprintf(tag, sizeof tag, "%s", DEFAULT_IVPACK_TAG);
-        fprintf(stderr, "invfs-pack: no .ivpack asset for %s %s under "
-                "tag %s; falling back to the release tarball\n",
-                best->name, best->version, tag);
-        rc = repo_fetch_tarball(best, raw, repo_spec, o, src_out, src_cap,
-                                dstname_out, dst_cap, stage_top_out,
-                                stage_cap, missing);
-        if (rc == 0 && ivpack_out)
-            *ivpack_out = 0;
-        return rc;
-    }
-    return -1;
-}
-
->>>>>>> wp/608-pack-registry-fetch
 /* Fetch one pack by registry name into the tool scratch and sha256-verify
  * every file against the pack's sha256 listing. On success src_out holds
  * the staged <name>.codecpack dir, dstname_out its canonical install
@@ -2502,11 +1708,7 @@ static int repo_fetch_release(const reg_pack *best, pack_repo *raw,
 static int repo_fetch_pack(const char *name, const char *repo_spec,
                            const fetch_opts *o, char *src_out, size_t src_cap, char *dstname_out,
                            size_t dst_cap, char *stage_top_out,
-<<<<<<< HEAD
                            size_t stage_cap, int *missing)
-=======
-                           size_t stage_cap, int *ivpack_out, int *missing)
->>>>>>> wp/608-pack-registry-fetch
 {
     pack_repo r;
     reg_pack *packs = NULL;
@@ -2522,11 +1724,6 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     int files = 0;
     src_out[0] = 0;
     stage_top_out[0] = 0;
-<<<<<<< HEAD
-=======
-    if (ivpack_out)
-        *ivpack_out = 0;
->>>>>>> wp/608-pack-registry-fetch
     if (missing)
         *missing = 0;
     repo_resolve(&r, repo_spec);
@@ -2557,12 +1754,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     if (o && o->release) {
         int rc = repo_fetch_release(best, &r, repo_spec, o, src_out,
                                     src_cap, dstname_out, dst_cap,
-<<<<<<< HEAD
                                     stage_top_out, stage_cap, missing);
-=======
-                                    stage_top_out, stage_cap, ivpack_out,
-                                    missing);
->>>>>>> wp/608-pack-registry-fetch
         free(packs);
         return rc;
     }
@@ -2919,35 +2111,10 @@ static void cmd_list_volume(const char *img, const char *filter_family)
             }
             if (filter_family[0] && strcmp(pi.family, filter_family) != 0)
                 continue;
-            /* install-source sibling recorded at install time */
-            {
-                char spath[448], text[16] = "";
-                uint8_t *sbuf = NULL;
-                size_t slen = 0;
-                uint64_t sino;
-                char srctag[16] = "";
-                if (snprintf(spath, sizeof spath,
-                             ".invariantfs/codecpacks/%s.source",
-                             nm) < (int)sizeof spath &&
-                    (sino = vol_find(v, spath)) != 0 &&
-                    vol_read_file(v, sino, &sbuf, &slen) == 0 && sbuf) {
-                    size_t cp = slen < sizeof text - 1 ? slen : sizeof text - 1;
-                    memcpy(text, sbuf, cp);
-                    text[cp] = 0;
-                    free(sbuf);
-                    strip_nl(text);
-                    if (strcmp(text, "ivpack") == 0 ||
-                        strcmp(text, "raw") == 0 ||
-                        strcmp(text, "local") == 0)
-                        snprintf(srctag, sizeof srctag, " [%s]", text);
-                } else {
-                    free(sbuf);
-                }
-                printf("%-20s %-8s %-6s %-12s %-10s volume:%s%s\n",
-                       pi.name[0] ? pi.name : nm,
-                       pi.algo, pi.pack_version, pi.family,
-                       pi.priority[0] ? pi.priority : "-", img, srctag);
-            }
+            printf("%-20s %-8s %-6s %-12s %-10s volume:%s\n",
+                   pi.name[0] ? pi.name : nm,
+                   pi.algo, pi.pack_version, pi.family,
+                   pi.priority[0] ? pi.priority : "-", img);
             found++;
         }
     }
@@ -2994,30 +2161,20 @@ static void cmd_list(const char *filter_family, int installed_only,
                 stat(probe, &pst) == 0 && S_ISDIR(pst.st_mode))
                 is_inst = 1;
             pack_info pi;
-            char srctag[16] = "";
-            char markpath[MAX_PATH + 80];
             memset(&pi, 0, sizeof pi);
-            if (pathf(markpath, sizeof markpath, "%s.source", full,
-                       NULL) == 0) {
-                char kind[16];
-                if (read_source_marker(markpath, kind,
-                                       sizeof kind) == 0)
-                    snprintf(srctag, sizeof srctag, " [%s]", kind);
-            }
             char mp[MAX_PATH + 64];
             if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
             parse_manifest(mp, &pi);
             if (filter_family[0] && strcmp(pi.family, filter_family) != 0)
                 continue;
-            printf("%-20s %-8s %-6s %-12s %-10s %s%s%s\n",
+            printf("%-20s %-8s %-6s %-12s %-10s %s%s\n",
                    pi.name[0] ? pi.name : de->d_name,
                    pi.algo,
                    pi.pack_version,
                    pi.family,
                    pi.priority[0] ? pi.priority : "-",
                    roots[r],
-                   is_inst ? " [installed]" : "",
-                   srctag);
+                   is_inst ? " [installed]" : "");
             found++;
         }
         closedir(d);
@@ -3331,53 +2488,9 @@ static int run_argv(char *const argv[])
 
 static const char *g_argv0;
 
-/* ---- install-source markers ([ivpack] vs [raw] vs [local]) ----
- * `list` reports where an installed pack came from. The answer is
- * recorded at install time in a SIBLING file, never inside the pack
- * dir: the WP203 integrity binding covers every regular file except
- * manifest and manifest.sig, so anything written into the dir would
- * turn the next `verify` BAD. Siblings are ignored by every pack scan
- * (all require S_ISDIR and the .codecpack suffix), by import, and by
- * fsck. A pack installed before markers existed simply shows no tag. */
-static const char *pack_source_kind(int staged, int ivpack)
-{
-    if (!staged)
-        return "local";
-    return ivpack ? "ivpack" : "raw";
-}
-
-static void write_source_marker_file(const char *path, const char *kind)
-{
-    FILE *f = fopen(path, "w");
-    if (!f) {
-        fprintf(stderr, "invfs-pack: warning: cannot record install "
-                "source in %s: %s\n", path, strerror(errno));
-        return;
-    }
-    fprintf(f, "%s\n", kind);
-    fclose(f);
-}
-
-static int read_source_marker(const char *path, char *out, size_t cap)
-{
-    FILE *f = fopen(path, "r");
-    if (!f)
-        return -1;
-    if (!fgets(out, (int)cap, f)) {
-        fclose(f);
-        return -1;
-    }
-    fclose(f);
-    strip_nl(out);
-    if (strcmp(out, "ivpack") != 0 && strcmp(out, "raw") != 0 &&
-        strcmp(out, "local") != 0)
-        return -1;
-    return 0;
-}
-
 static int cmd_install_volume(const char *src, const char *dstname,
                                const char *volume, int overwrite,
-                               int dry_run, const char *srckind)
+                               int dry_run)
 {
     char stage[] = "/tmp/invfs-pack-XXXXXX";
     char sub[MAX_PATH], dest[MAX_PATH], import[MAX_PATH];
@@ -3462,28 +2575,6 @@ static int cmd_install_volume(const char *src, const char *dstname,
         rmtree(stage);
         return 1;
     }
-    /* install-source sibling: imported alongside the pack dir, read by
-     * `list --volume` as [ivpack]/[raw]/[local]. Outside the pack dir
-     * so the WP203 integrity binding never sees it. */
-    {
-        char mark[MAX_PATH];
-        FILE *mf;
-        if (snprintf(mark, sizeof mark, "%s/%s.source", sub,
-                     dstname) >= (int)sizeof mark) {
-            fprintf(stderr, "pack name too long: %s\n", dstname);
-            rmtree(stage);
-            return 1;
-        }
-        mf = fopen(mark, "w");
-        if (!mf) {
-            fprintf(stderr, "cannot stage source marker: %s\n",
-                    strerror(errno));
-            rmtree(stage);
-            return 1;
-        }
-        fprintf(mf, "%s\n", srckind ? srckind : "local");
-        fclose(mf);
-    }
     av[0] = import; av[1] = (char *)volume; av[2] = stage; av[3] = NULL;
     rc = run_argv(av);
     rmtree(stage);
@@ -3516,13 +2607,7 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
     char src[MAX_PATH];
     char dstname[128 + 16];
     char stage_top[MAX_PATH];
-<<<<<<< HEAD
     int staged = 0;
-=======
-    const char *srckind = "local";
-    int staged = 0;
-    int was_ivpack = 0;
->>>>>>> wp/608-pack-registry-fetch
     int rc;
     stage_top[0] = 0;
     if (!release && ((rel_tag && *rel_tag) || (platform && *platform)))
@@ -3564,18 +2649,10 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
              * carry no reliable version), raw tree or --release. */
             if (repo_fetch_pack(fetch_name, repo_spec, &o, src,
                                 sizeof src, dstname, sizeof dstname,
-<<<<<<< HEAD
                                 stage_top, sizeof stage_top,
                                 &missing) != 0)
                 return 1;
             staged = 1;
-=======
-                                stage_top, sizeof stage_top, &was_ivpack,
-                                &missing) != 0)
-                return 1;
-            staged = 1;
-            srckind = pack_source_kind(1, was_ivpack);
->>>>>>> wp/608-pack-registry-fetch
         } else if (find_local_pack(name, src, sizeof src, dstname,
                                    sizeof dstname) != 0) {
             /* Not installed locally: resolve through the registry,
@@ -3583,18 +2660,10 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
              * tree through the same gate below. */
             if (repo_fetch_pack(fetch_name, repo_spec, &o, src,
                                 sizeof src, dstname, sizeof dstname,
-<<<<<<< HEAD
                                 stage_top, sizeof stage_top,
                                 &missing) != 0)
                 return 1;
             staged = 1;
-=======
-                                stage_top, sizeof stage_top, &was_ivpack,
-                                &missing) != 0)
-                return 1;
-            staged = 1;
-            srckind = pack_source_kind(1, was_ivpack);
->>>>>>> wp/608-pack-registry-fetch
         }
     }
     /* WP203 install gate: bad signature refuses (always, no knob);
@@ -3616,12 +2685,7 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
         }
     }
     if (volume && volume[0]) {
-<<<<<<< HEAD
         rc = cmd_install_volume(src, dstname, volume, overwrite, dry_run);
-=======
-        rc = cmd_install_volume(src, dstname, volume, overwrite, dry_run,
-                                srckind);
->>>>>>> wp/608-pack-registry-fetch
         if (staged)
             rmtree(stage_top);
         return rc;
@@ -3681,18 +2745,6 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
          * out on a \' in the path (CodeQL command-line-injection).
          * fork+execlp passes src/dst as argv, never parsed. */
         copy_pack_dir(src, dst);
-<<<<<<< HEAD
-=======
-        /* install-source sibling for `list` ([ivpack]/[raw]/[local]).
-         * Outside the pack dir so the WP203 binding never sees it;
-         * warn-only: the install itself already succeeded. */
-        {
-            char mark[MAX_PATH + 16];
-            if (snprintf(mark, sizeof mark, "%s.source",
-                         dst) < (int)sizeof mark)
-                write_source_marker_file(mark, srckind);
-        }
->>>>>>> wp/608-pack-registry-fetch
         rc = 0;
     }
 done:
@@ -3760,7 +2812,8 @@ static void cmd_remove(const char *name)
     if (stat(dst, &st) != 0 || !S_ISDIR(st.st_mode)) {
         fprintf(stderr, "pack '%s' not installed at %s\n", name, HOST_ROOT);
         return;
-    }    /* No shell (see cmd_install): dst derives from the pack name. */
+    }
+    /* No shell (see cmd_install): dst derives from the pack name. */
     pid_t pid = fork();
     if (pid < 0) {
         fprintf(stderr, "failed to fork for remove %s\n", dst);
@@ -3776,13 +2829,6 @@ static void cmd_remove(const char *name)
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         fprintf(stderr, "failed to remove %s\n", dst);
         return;
-    }
-    /* drop the install-source sibling too (best effort) */
-    {
-        char mark[MAX_PATH + 16];
-        if (snprintf(mark, sizeof mark, "%s.source",
-                     dst) < (int)sizeof mark)
-            unlink(mark);
     }
     printf("removed '%s'\n", name);
 }
@@ -4010,7 +3056,6 @@ static void usage(void)
         "installs through the same signature gate below. `name@version`\n"
         "pins the version and always resolves through the registry (never\n"
         "the local roots); a version that is not in the index fails loud.\n"
-<<<<<<< HEAD
         "--release fetches the pack's release tarball\n"
         "<name>-<version>-<platform>.tar.gz from the registry's GitHub\n"
         "release assets instead of the raw tree (default tag v<version>,\n"
@@ -4020,35 +3065,12 @@ static void usage(void)
         "extracted files are verified against the raw-tree sha256 listing\n"
         "plus the same gate -- a bad release refuses exactly like a bad\n"
         "raw fetch. With --repo the tarball is read under\n"
-=======
-        "--release fetches the pack's .ivpack bundle\n"
-        "<name>-<version>.ivpack from the registry's GitHub\n"
-        "release assets instead of the raw tree (default tag v1.1.0;\n"
-        "--release-tag overrides). The bundle is unzipped into the tool\n"
-        "scratch (needs unzip on PATH; entry names are validated before\n"
-        "extract, symlinks/special files refused) and the extracted files\n"
-        "are verified against the raw-tree sha256 listing plus the same\n"
-        "gate -- a bad bundle refuses exactly like a bad raw fetch. A pack\n"
-        "with no .ivpack asset falls back to the release tarball\n"
-        "<name>-<version>-<platform>.tar.gz (default tag v<version>,\n"
-        "default platform <uname>-linux-musl; --release-tag/--platform\n"
-        "override) with one loud line; nothing else falls back (needs tar).\n"
-        "v1.1.0 ships no signatures, so .ivpack installs take the\n"
-        "missing-signature path below (prompt; -y proceeds, -n reports).\n"
-        "With --repo assets are read under\n"
->>>>>>> wp/608-pack-registry-fetch
         "<repo>/releases/download/<tag>/ (hermetic fixtures). --repo takes\n"
         "a file:// dir (offline) or https:// base; $INVFS_PACK_REPO also\n"
         "works. Default: https://raw.githubusercontent.com/\n"
         "AsmanovLev/InvariantFS-registry/main. `list` (without\n"
         "--installed) shows registry packs as [available]/[installed]; an\n"
         "unreachable registry warns once and lists installed only.\n"
-<<<<<<< HEAD
-=======
-        "Installed packs carry their install source: `list` shows [ivpack],\n"
-        "[raw], or [local] next to the source (packs installed before this\n"
-        "was recorded show no tag).\n"
->>>>>>> wp/608-pack-registry-fetch
         "\n"
         "signatures (v1, ed25519 over the manifest): a pack with a BAD\n"
         "signature is REFUSED, always, no knob. A pack with NO signature\n"
@@ -4061,19 +3083,6 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    /* Never die on SIGPIPE (exit 141) when a downstream filter closes
-     * the pipe early. The suites pipe `list --volume 2>&1 | grep -q`,
-     * and grep -q quits at the FIRST match — which is the unbuffered
-     * stderr progress line, always ahead of the buffered stdout rows.
-     * What used to be a usually-won race (exit before grep closes)
-     * becomes a usually-lost one as soon as list does any per-row work
-     * (the install-source read), so a green suite turns into a lottery.
-     * Ignore the signal process-wide instead: writes then fail with
-     * EPIPE and the tool still exits on its own terms. Fork+exec
-     * children inherit the disposition, but none of them writes to a
-     * pipe its reader abandons (list/extract pipes are always drained
-     * by the parent; cp/rm/import write files, not stdout). */
-    signal(SIGPIPE, SIG_IGN);
     g_argv0 = argv[0];
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
