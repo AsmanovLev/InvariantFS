@@ -2900,3 +2900,45 @@ the uninitialized-moves defect fixed in this WP, and with harness
 set -e artifacts). v1 skips windowed recipes entirely (lane-owned);
 revisiting serialize_win-after-pba-swap needs a dedicated WP with a
 deterministic repro, not drive-by analysis.
+
+## leg2 durability regression from group commit (WP602), discriminator done
+
+**Date:** 2026-10-11. **Status:** FIXED by WP605 (wp/605-groupcommit-fix, pending merge/review); mechanism proven, see note below.
+Wave-5 merge 9b6f6b8 (group commit 8be19f3): soak leg2 failed in CI
+(run 38111189456: dozens of fsync-acked pinned files ABSENT post-storm,
+NOT torn bytes; green on rerun) and 3/3 locally (13-18 ABSENT/run,
+pinned_ok=25-32, seed varies). Discriminator: same suite with
+INVFS_DELTA_GROUP_MAX=1 (legacy per-record barriers) PASSES, 0 ABSENT
+(seed=20260831, 69s). So the regression is IN group commit's
+drain/barrier path, not in harness or storm luck. Suspects (unproven):
+barrier-error latch stuck across heal (post-heal fsync/fold silently
+dropped), staged-but-unbarriered records at storm onset treated as
+durable, unmount-time fold/flush interacting with group state.
+Fixed by WP605 (subagent, verified leg2 x3 agent-side + x2 orchestrator-side,
+0 ABSENT; kill -9 8/8; make test + hygiene): staged record bytes are retained
+until their fence succeeds; the next fence after any failure rewrites them
+first, healing the dm-drop hole. Group commit stays ON; no default flip needed.
+
+**WP605 mechanism (proven by on-disk forensics + barrier tracing, 2026-10-11):**
+not the three suspects above. Group commit stages up to 64 records behind
+one barrier; error-window commits fail loudly (reads/alloc EIO) but their
+partial delta appends still stage (buffered pwrite returns 0) and advance
+the bump. A dm suspend/reload/resume cycle then drops those unfenced dirty
+pages for good (27 journaled pwrite-OK-but-zero-on-device, all prc=0),
+leaving a mid-log zero gap; post-heal appends continue past it and replay
+stops at the gap, so genuinely-fenced post-heal files go invisible
+(fsync-acked ABSENT; post-gap bytes present-on-disk in every image).
+Legacy per-record barriers never stage, so no gap (discriminator holds).
+**Fix (fix-forward, group commit stays ON):** staged record bytes are
+retained (zero-copy) until fenced; the next fence after any failure
+re-writes them first (idempotent heal), so no hole is ever fenced past
+(src/core/vol_delta.c + vol_delta.h + volume_internal.h struct fields +
+vol_sync/vol_flush failure-signal in src/core/volume.c). Validated:
+FLAKEY_ONLY=2 leg2 x3 default (25/10/13 pinned, 0 ABSENT), GROUP_MAX=1
+cross-check PASS, groupcommit/delta unit tests + delta-groupcommit-crash
+probe + FUSE kill -9 probe (8/8 acked survive) green, make test +
+repo-hygiene green. Circuit-breaker no longer needed; default stays
+batched. Residual notes: data-segment drops for edge-acked files
+(observed once as torn bytes, unpinned) live in vol_write.c (out of scope);
+a publish that lands its store but drops its barrier can orphan the old
+chain (pre-existing, needs rollover atomicity work).
