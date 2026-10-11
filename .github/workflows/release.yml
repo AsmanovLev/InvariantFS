@@ -71,7 +71,7 @@ jobs:
       - name: dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config debhelper \
+          sudo apt-get install -y -qq build-essential pkg-config debhelper devscripts \
             libfuse3-dev zlib1g-dev libzstd-dev python3
       - name: debuild
         run: debuild -us -uc -b
@@ -96,6 +96,9 @@ jobs:
       - name: build package
         run: |
           pacman -Sy --noconfirm --needed base-devel
+          # Runtime deps only (the artifact is prebuilt), but install them so
+          # makepkg's dependency check also validates the metadata names.
+          pacman -Sy --noconfirm fuse3 zstd zlib
           useradd -m builder
           cp tree/packaging/PKGBUILD pkg/
           cd pkg
