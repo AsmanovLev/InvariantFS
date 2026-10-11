@@ -310,37 +310,37 @@ When you `unlink()`:
 ### 2.5 The sweep
 
 `invf-sweep` is the background worker. A single-device, non-`--dry-run` run is
-seven core stages, in this order (`tools/invf-sweep.c`):
+eight core stages, in this order (`tools/invf-sweep.c`):
 
 | # | stage | what it does | cite |
 |---|---|---|---|
-| 1 | `prepare` | policy only (F9: the capture used to live here; it moved to after `collect` validates, so a refused sweep leaves the volume untouched) | `invf-sweep.c:1787` |
-| 2 | `collect` | walk the live inodes | `:1690` |
-| 3 | `transform` | per-file lane dispatch: builtin container lanes, codecpack/containerpack lanes, text/binary batching, EXER carve, generic ZSTD floor — each only after its own bit-exactness guard passes | `:1850` |
-| 4 | `heat` | promote hot batch members to standalone segments | `:2035` |
-| 5 | `dedupe` | per-segment BLAKE3; cross-file and intra-file merge | `:2071` |
-| 6 | `batches` | GC of dead text/binary batches + the shared batch flush | `:2116` |
-| 7 | `finalize` | the durability point: checkpoint and volume flush | `:2147` |
+| 1 | `prepare` | checkpoint + policy (F9: the capture used to live here; it moved to after `collect` validates, so a refused sweep leaves the volume untouched) | `invf-sweep.c:1787` |
+| 2 | `collect` | walk the live inodes | `:2130` |
+| 3 | `transform` | per-file lane dispatch: builtin container lanes, codecpack/containerpack lanes, text/binary batching, EXER carve, generic ZSTD floor — each only after its own bit-exactness guard passes | `:2292` |
+| 4 | `heat` | promote hot batch members to standalone segments | `:2477` |
+| 5 | `dedupe` | per-segment BLAKE3; cross-file and intra-file merge | `:2513` |
+| 6 | `batches` | GC of dead text/binary batches + the shared batch flush | `:2558` |
+| 7 | `migrate` | tier migration between devices (WP601) | `:2603` |
+| 8 | `finalize` | the durability point: checkpoint and volume flush | `:2612` |
 
 Two variants: a two-device volume inserts `tier` (hot/cold balancing) between
-`heat` and `dedupe` (`invf-sweep.c:2052`), and `--seal` appends `seal`
-(an 8th stage, native v3 since WP201)
-(`:2190`). Under `--dry-run`, stage 3 reports as `plan`.
+`heat` and `dedupe` (`invf-sweep.c:2494`), and `--seal` appends `seal`
+(a 9th stage, native v3 since WP201)
+(`:2649`). Under `--dry-run`, stage 3 reports as `plan`.
 
 Note the ordering: **re-encoding (stage 3) happens before reclaiming
 (stages 5–6)**, not after. A sweep therefore needs free space for the new
 encoding before it gets the old space back.
 
-> **v3 space accounting when a lane supersedes a file.** The builtin
-> container lanes do **not** release the superseded recipe's data segments
-> on v3 — the `vol_delete_inode` after each `vol_create_*_file` is guarded
-> `if (!v3 && ...)` (`src/core/vol_sweep.c:1058`, `:1075`, `:1093`,
-> `:1132`, `:1184`). The containerpack lane is two-sided by contrast: it
-> branches the *other* way, releasing the superseded recipe on v3
-> (`if (v->sb.vol_flags & VOLF_V3) cpack_release_superseded(...) else
-> vol_delete_inode(...)`, `src/core/vol_cpack.c:3162-3165` and
-> `:3189-3192`; the release is a targeted `vol_v3_free_recipe_blocks`,
-> `src/core/vol_cpack.c:2784`). Measured on a 12-file / 1.8 MiB
+> **v3 space accounting when a lane supersedes a file.** Both the builtin
+> container lanes and the containerpack lane retire the superseded recipe
+> through the same shared helper, `vol_release_superseded_blob`
+> (`src/core/vol_ast.c`; called from six lane sites in
+> `src/core/vol_sweep.c:487-737` and via `cpack_release_superseded`,
+> `src/core/vol_cpack.c:3448-3452`, at `:4082` and `:4106`). The old
+> two-sided shape (builtin lanes skipping the release on v3 while cpack
+> branched `if (VOLF_V3)`) is gone; every lane retires the same way now.
+> Measured on a 12-file / 1.8 MiB
 > TAR corpus (v3 image, `invf-mkfs` + `invf-import` + `invf-sweep`,
 > `invf-fsck` free-block counts): a lane sweep left **478 free blocks
 > stranded** as "unclaimed — allocated, no live reference"; the next bare
@@ -356,8 +356,8 @@ encoding before it gets the old space back.
 > **CORRECTION — the 478 was not measured to be lane retirement.** A later
 > four-cell measurement on a named corpus (12 TARs, 122,880 B each,
 > 2,836,480 B total, v3 image, `invf-fsck` free blocks) implemented the
-> shared `sweep_retire_superseded()` shape four ways -- with and without the
-> savepoint pin, with and without the helper -- and **all four cells were
+> shared retire-helper shape (`vol_release_superseded_blob`) four ways --
+> with and without the savepoint pin, with and without the helper -- and **all four cells were
 > identical** (249413 free after the lane sweep). The shape reclaimed
 > **zero** additional blocks on that corpus. The 253-block swing between
 > sweep 1 and sweep 2 is **the savepoint pin being discharged at the next
@@ -390,12 +390,13 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > FUSE daemon runs: the watermark pass (`-o raw_watermark=<pct>`) and,
 > since WP134, `kill -USR1` and the `user.invfs.sweep` xattr too. All three
 > in-FUSE triggers set the same in-process flag
-> (`src/cli/fuse_fs.c:2108`, `:3377`), and the sweep thread's
+> (`g_sweep_now`, set at `src/cli/fuse_fs.c:2183` by the USR1 handler and
+> at `:3458` by the xattr, consumed by the tick at `:2512`), and the sweep thread's
 > `invf_sweep_worker` takes the same capture under `g_io_lock`, after the
 > sweepable list validates and before the first mutation (F9-worker: the
 > capture used to run at entry, so every refuse path mutated first and
 > refused second -- same fix as the offline reorder).
-> (`src/cli/fuse_fs.c:2055-2086`, the walk at `:2116`). **So a USR1 or
+> (`src/cli/fuse_fs.c:2326-2340`, the walk at `:2300-2307`). **So a USR1 or
 > xattr sweep on v3 CAN be rolled back**: unmount, then `invf-rollback`.
 > The daemon prints that command when it arms the window — but only on a
 > mount started with `-f`, because `fuse_daemonize` sends the daemon's own
@@ -429,7 +430,7 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > **nothing**, which proves the live window is holding only live blocks
 > because a pass that superseded nothing created no debt. That is what
 > makes the cycle finite instead of a sweep that re-pins forever
-> (`src/cli/fuse_fs.c:2361-2447`). Measured on a 1535-block RAW zone with
+> (`src/cli/fuse_fs.c:2569-2614`). Measured on a 1535-block RAW zone with
 > 697 blocks staged offline: **2 passes, the second reclaiming all 697,
 > RAW fill back to 0, and quiet from ~5 s on** — with no `invf-sweep`, no
 > write, no signal and no unmount in between.
@@ -457,9 +458,9 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 **not** switch the pending drain on. The drain — and only the drain, never
 `transform`, never dedupe, never re-encode, never a savepoint — is what the
 sweep thread's 1 Hz tick does on every tick
-(`src/cli/fuse_fs.c:2294`, the drain at `:2340-2350`). The variable gates how
+(`src/cli/fuse_fs.c:2510`, the drain at `:2556-2566`). The variable gates how
 often the thread re-evaluates the *handle-open deferral* around it
-(`:2306-2334`): at `N` it checks every Nth tick, and with the default (unset,
+(`:2522-2554`): at `N` it checks every Nth tick, and with the default (unset,
 so `N == 0`) it never checks at all, which means the drain runs even while a
 file handle is open. Both facts used to be invisible, because until the thread
 was created in the daemon and not in the `fuse_daemonize` parent, none of this

@@ -104,20 +104,20 @@ namespaces are kept disjoint by key *length* and by a prefix byte
 (`src/core/invarifs.h:1262-1282`):
 
 - **Inodes**: 8-byte big-endian inode ID, no prefix
-  (`v3_ino_key`, `src/core/vol_btree.c:2441-2448`). Being exactly 8 bytes
+  (`ino_key`, `src/core/vol_btree.c:2595-2600`). Being exactly 8 bytes
   is what keeps this namespace disjoint from the prefixed and lengthened
   ones below.
 - **Dirents**: `parent_inode_id:u64 BE || name_len:u16 BE || name bytes`,
   no prefix — always ≥ 10 bytes, which is what keeps it disjoint from the
-  8-byte inode keys (`v3_dirent_key`, `src/core/vol_btree.c:3988-3999`; the
-  layout is frozen at `:3969`). The value is the child inode id, 8 bytes BE.
+  8-byte inode keys (`dirent_key`, `src/core/vol_btree.c:4422-4433`; the
+  layout is frozen at `DIRENT_KEY_FIXED`, `:4419`). The value is the child inode id, 8 bytes BE.
   A directory's own anchor entry has `name_len == 0`.
 - **Xattrs**: `0x03 || inode_id:u64 BE || name_len:u16 BE || name`
-  (`v3_xattr_key`, `src/core/vol_btree.c:2780-2792`; prefix
+  (`xattr_key`, `src/core/vol_btree.c:2985-2997`; prefix
   `INVFS_XATTR_KEY_PREFIX` = `0x03`, `src/core/invarifs.h:1272`). The
   value is the raw xattr value bytes. Values too large for one base page use
   **continuation keys**: the same key with `0x00 || chunk_index:u16 BE`
-  appended (`v3_xattr_chunk_key`, `src/core/vol_btree.c:2795-2803`); an xattr
+  appended (`xattr_chunk_key`, `src/core/vol_btree.c:2999-3007`); an xattr
   name cannot contain NUL, so the two key shapes are unambiguous.
 - **Recipe blobs**: `0x04 || BLAKE3-256(serialized recipe)[32]`
   (`INVFS_RECIPE_KEY_PREFIX` = `0x04`, `src/core/invarifs.h:1282`). This
