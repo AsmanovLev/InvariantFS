@@ -7,8 +7,14 @@ invf-sweep \- InvariantFS offline sweep driver (classification, transcode, seal)
 .RB [ \-\-dry\-run ]
 .RB [ \-\-fast ]
 .RB [ \-\-compact ]
-.RB [ \-\-seal | \-\-unseal ]
-.RB [ \-\-realize ]
+.RB [ \-\-seal [5\||10\||20\||25] | \-\-unseal ]
+.RB [ \-\-verify\-seal ]
+.RB [ \-\-stale\-mode=auto\||notify\||off ]
+.RB [ \-\-heal [ \fIgroup ...\fR ] ]
+.RB [ \-\-reseal\-full ]
+.RB [ \-\-migrate | \-\-no\-migrate ]
+.RB [ \-\-recompress ]
+.RB [ \-\-realize | \-\-no\-realize ]
 .br
 .B invf-sweep
 .I image
@@ -54,10 +60,49 @@ classification, transcodes, decomposition, batching or dedupe.
 .B \-\-compact
 Run only the inode-area compaction pass.
 .TP
-.B \-\-seal
-After the sweep, re-seal shadow parity (WP20: XOR stripes, optionally an RS
-layer-2). This is the bit-rot recovery layer; note the sweep retires RAW
-originals, so an unsealed volume has no second copy.
+.B \-\-seal [5\||10\||20\||25]
+After the sweep, seal shadow parity with native per-chunk RS groups
+(5/10/20/25%% redundancy steps; default from the volume policy). Each
+chunk carries its own parity alongside the data (piggyback layout, footer
+last), so a torn chunk heals from its neighbours without a second volume.
+Note the sweep retires RAW originals, so an unsealed volume has no second
+copy.
+.TP
+.B \-\-verify\-seal
+Read-only seal scrub: report per-group parity drift, change nothing.
+Exits 0 clean, 3 on drift, 1 on tool failure. No sweep runs.
+.TP
+.BI \-\-stale\-mode= auto\||notify\||off
+What a bare run does about stale seal (parity older than the data):
+.B auto
+reseals (default),
+.B notify
+reports without resealing,
+.B off
+prints one line. An explicit
+.B \-\-seal / \-\-unseal
+always wins; unsealed volumes stay silent.
+.TP
+.BI \-\-heal [ \fIgroup ...\fR ]
+Heal drifted seal groups explicitly (no group list = all drifted). Healing
+is never automatic: drift is reported loudly and only this flag repairs it.
+.TP
+.B \-\-reseal\-full
+Force a full parity recompute. By default only groups dirty since the
+last seal are restriped, when provable; the rest are skipped.
+.TP
+.B \-\-migrate , \-\-no\-migrate
+Run (default on) or skip the defrag relocate stage: live segments move
+out of fragmented extents into consolidated ones. Skipped by
+.B \-\-fast
+and
+.BR \-\-dry\-run .
+.TP
+.B \-\-recompress
+Re-run the generic ZSTD floor on demand (implies
+.BR \-\-migrate ,
+skipped by
+.B \-\-fast ).
 .TP
 .B \-\-unseal , \-\-free\-redundant
 Drop the redundancy layer.
@@ -71,8 +116,11 @@ Paranoid RS parity fraction and variant.
 .B \-\-redundant\-bench
 Benchmark the redundancy encoder.
 .TP
-.B \-\-realize
-Drop the previous sweep's savepoint. After this,
+.B \-\-realize , \-\-no\-realize
+Accept the last sweep (free the savepoint that opened its window) or keep
+the previous checkpoint live (blocks stay held until the next sweep).
+After
+.BR \-\-realize ,
 .BR invf-rollback (8)
 can no longer undo that sweep.
 .TP

@@ -11,8 +11,13 @@ deduplication, codec selection and partial reads fall out naturally.
 
 FUSE-based, single-host, content-addressed. Written in C11.
 
-**Status: experimental.** No frozen on-disk format, no power-loss durability
-contract. Not a replacement for ext4/XFS on general workloads.
+**Status: experimental.** The on-disk format is Meta-v3 and Meta-v3 only
+(a pre-v0.5 volume will not open; there is no conversion path). Durability
+contract: acknowledged writes are durable (`fsync` fences before it
+returns; a failed call leaves the pre-call state, never a torn prefix) --
+see `docs/adr/ADR-009-v3-durability-contract.md`. Anything not yet
+acknowledged may be absent after a crash, never torn. Not a replacement
+for ext4/XFS on general workloads.
 
 ## Features
 
@@ -40,7 +45,20 @@ contract. Not a replacement for ext4/XFS on general workloads.
 * **Content Addressing & Dedup** — immutable recipes and shadow blobs are
   BLAKE3-addressed with deduplication.
 * **Savepoints & Rollback** — durable metadata savepoints (SPT0) provide instant
-  rollback via `invf-rollback`.
+  rollback via `invf-rollback`. Every sweep (offline, watermark, `kill -USR1`,
+  or xattr-triggered) arms one before it rewrites anything.
+* **Seal parity** — native per-chunk Reed-Solomon groups over Shadow
+  (`invf-sweep --seal`), with read-only scrub (`--verify-seal`), explicit
+  repair (`--heal`), stale-mode policy (`--stale-mode`), and incremental
+  reseal of dirty groups only.
+* **Pack signatures** — codec/container packs are ed25519-signed; bad
+  signatures refuse, missing ones prompt (skippable).
+* **Defrag migrate** — the sweep's migrate stage relocates fragmented live
+  segments into consolidated extents.
+* **Damage journal** — `invf-fsck --list-damaged` names every file the
+  volume cannot read back fully; `-f` excises only what it can prove
+  unreachable and refuses the rest loudly (`--discard-reachable` is the
+explicit, destructive override).
 * **Recovery tooling** — append-only Delta Log with replay; `invf-fsck [-f]`
   walks, quarantines and repairs.
 * **Two-device volumes** — dev0 (metadata + RAW) and dev1 (canonical Shadow),
@@ -104,7 +122,9 @@ codec CPU cost.
 * Not a drop-in ext4/XFS/ZFS replacement for general workloads.
 * No network/SAN support; single host only.
 * No high write throughput: new bytes always allocate fresh segments (never patched in place) and consolidation is offline.
-* No power-loss durability guarantee (`make flakey` is a soak, not a contract).
+* Power loss keeps only acknowledged writes (`fsync`-durable); unacknowledged
+  writes may be absent afterwards, never torn (`make flakey` soaks exactly
+  this boundary).
 * No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
 * The on-disk format is not frozen; the v3 record layout is a deliberate
   break, and it is the only one this build reads.
@@ -142,7 +162,8 @@ Shadow, re-encodes with ZSTD where bit-exactness is proven, and updates recipes
 via inode-id-keyed publication.
 
 ```
-unlink()  ->  delta delete entry appended; space reclaimed at next fold + sweep
+unlink()  ->  delta delete entry appended; blocks retired, freed at the next
+               fence (sync/fsync/close); fold and sweep reclaim leaks/orphans
 ```
 
 For complete architecture specifications, see:

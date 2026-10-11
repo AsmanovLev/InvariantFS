@@ -4,7 +4,8 @@ invf-verify \- verify an InvariantFS volume's integrity
 .SH SYNOPSIS
 .B invf-verify
 .IR image | device
-.RB [ \-\-deep ]
+.RB [ \-\-deep | \-\-verify\-seal ]
+.RB [ \-\-ignore\-missing\-codecs ]
 .SH DESCRIPTION
 .B invf-verify
 checks an InvariantFS volume for structural and content integrity. The
@@ -13,7 +14,7 @@ volume is opened read-only and is
 locked: a mounted InvariantFS can be verified while it runs.
 .PP
 The default pass validates the superblock (magic, checksum, block size),
-the block bitmap accounting, and the inode-area record chain. With
+the block bitmap accounting, and the Meta-v3 base B+ tree. With
 .B \-\-deep
 every stored byte of every file is additionally decoded through the real
 read path - batches, container rebuilds, codec blobs - and checked, so a
@@ -27,6 +28,14 @@ systemd unit runs a weekly deep verify over the volumes listed in
 .TP
 .B \-\-deep
 Decode and compare every file's content, not just the structures.
+.TP
+.B \-\-verify\-seal
+Read-only seal scrub: report per-group parity drift, change nothing.
+Exits 0 clean, 3 on drift, 1 on tool failure. No sweep runs.
+.TP
+.B \-\-ignore\-missing\-codecs
+Do not fail when a file's codec pack is absent; report those files as
+unverifiable instead.
 .SH EXIT STATUS
 0 when the volume is clean; 1 on any failure (the failures are enumerated
 on stderr); 2 on usage errors.

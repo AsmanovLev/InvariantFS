@@ -64,6 +64,18 @@ disables kernel caching entirely so every stat hits the daemon).
 RAW-zone fill percent that makes the daemon kick an early checkpoint-armed
 sweep (WP26); 0 disables. See
 .BR INVFS_RAW_WATERMARK .
+.TP
+.BI noautopack
+Do not auto-run container/codec helper tools for this mount (same as
+.BR INVFS_NO_AUTOPACK=1 ,
+see
+.BR invarifs (7)).
+Mounts that serve untrusted volumes should pass it; note FUSE itself
+still needs
+.B user_allow_other
+in
+.I /etc/fuse.conf
+for any other uid to reach the mount at all.
 .SH ENVIRONMENT
 .TP
 .B INVFS_SWEEP_INTERVAL

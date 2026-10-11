@@ -3,6 +3,7 @@
 invf\-import \- bulk tree importer for InvariantFS volumes
 .SH SYNOPSIS
 .B invf\-import
+.RB [ \-\-fail\-on\-skip ]
 .I volume
 .I src\-dir
 .RI [ exclude\-dir\-name ...]
@@ -18,6 +19,14 @@ Optional trailing arguments name directories to exclude from the walk
 (e.g.
 .BR \.git " " node_modules ).
 Maximum recursion depth is 32.
+.SH OPTIONS
+.TP
+.B \-\-fail\-on\-skip
+Exit 3 if any path was not imported. By default every skipped path is
+reported on stderr with the reason and the exit status stays 0; an
+unreadable source is DATA LOSS, not a format limit -- re-run as root (or
+under sudo) to read root-only files such as
+.IR /etc/shadow .
 .SH ENVIRONMENT
 .TP
 .B INVFS_IMPORT_PREFIX

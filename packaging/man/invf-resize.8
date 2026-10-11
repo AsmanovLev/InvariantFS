@@ -4,7 +4,7 @@ invf-resize \- grow or shrink an InvariantFS volume offline
 .SH SYNOPSIS
 .B invf-resize
 .IR image | device
-.IR newsize [ K | M | G ]
+.IR newsize [ K | M | G ] | \-\-max
 .SH DESCRIPTION
 .B invf-resize
 resizes an InvariantFS volume (WP18). The volume must be unmounted.
@@ -22,6 +22,10 @@ named by the
 .B INVFS_DEV1
 environment variable or the hint recorded at mkfs time). Shrinking a
 two-device volume is refused.
+.SH OPTIONS
+.TP
+.B \-\-max
+Grow to fill all available device space.
 .SH ENVIRONMENT
 .TP
 .B INVFS_DEV1

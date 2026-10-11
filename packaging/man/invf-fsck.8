@@ -5,7 +5,8 @@ invf-fsck \- check and repair an InvariantFS volume
 .B invf-fsck
 .I image
 .RB [ \-f | \-\-fix ]
-.RB [ \-\-repair ]
+.RB [ \-\-discard\-reachable ]
+.RB [ \-\-list\-damaged ]
 .RB [ \-q ]
 .SH DESCRIPTION
 .B invf-fsck
@@ -37,16 +38,31 @@ is refused until dev0 is reattached.
 .BR \-f , " \-\-fix"
 Apply repairs instead of only reporting.
 .TP
-.B \-\-repair
-WP20b layer-2 RS recovery: after the structural scan, reconstruct
-CRC-failed shadow segments from the RS(32+m2, 32) parity. Stripes damaged
-beyond m2 are reported and left untouched.
+.B \-\-discard\-reachable
+With
+.BR \-f ,
+excise a quarantined key range even when a live inode still needs a key
+inside it. That DESTROYS those files' content permanently; the pass
+names the cost first. Without it,
+.B \-f
+refuses every range it cannot clear, leaves the volume DAMAGED and
+intact, and exits 3 with CANNOT REPAIR naming the files at stake.
+.TP
+.B \-\-list\-damaged
+Read-only: after the report, print one TAB-separated line per live file
+the volume cannot read back fully:
+.IR damaged TAB id TAB name TAB reason TAB size .
+Reasons: torn-recipe, torn-xattr, torn-row, recipe-corrupt,
+recipe-missing, recipe-incoherent. An empty list with an OK verdict means
+nothing is damaged. Exit code unchanged.
 .TP
 .B \-q
 Quiet: suppress per-item progress.
 .SH EXIT STATUS
-0 when no issues were found (or all fixed); 1 on unrepairable errors or
-open failure; 2 on usage errors.
+0 when no issues were found (or all fixed); 1 on tool/open failure;
+2 on usage errors; 3 when the volume is DAMAGED (issues found, or a
+repair the pass will not take without
+.BR \-\-discard\-reachable ).
 .SH SEE ALSO
 .BR invf-verify (8),
 .BR invf-sweep (8),
