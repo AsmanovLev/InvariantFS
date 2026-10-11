@@ -27,10 +27,13 @@ jobs:
           ref: ${{ env.TAG }}
       - name: version coherence (tag vs tree)
         run: |
+          set -x
           VER="${TAG#v}"
+          echo "TAG=$TAG VER=$VER HEAD=$(git rev-parse HEAD)"
           # No VERSION file in-tree (make release generates it); the tag
-          # itself is the version source of truth here.
-          git describe --exact-match --match "v$VER" HEAD
+          # itself is the version source of truth here. Compare by SHA so
+          # a shallow checkout cannot confuse describe.
+          test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$TAG")"
           grep -q "pkgver=$VER" packaging/PKGBUILD
           head -n 1 packaging/debian/changelog | grep -q "($VER-"
           echo "tree matches $TAG"
