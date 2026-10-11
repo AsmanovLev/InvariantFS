@@ -107,20 +107,20 @@ src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
 src/core/vol_cpack.c:395:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:2856:SKIP
-src/core/vol_cpack.c:3199:SKIP
-src/core/vol_cpack.c:3199:SKIP
-src/core/vol_cpack.c:3296:SKIP
-src/core/vol_cpack.c:3296:ACTS
-src/core/vol_cpack.c:3541:ACTS
-src/core/vol_cpack.c:4037:SKIP
-src/core/vol_cpack.c:4119:SKIP
-src/core/vol_cpack.c:4119:SKIP
-src/core/vol_cpack.c:4119:ACTS
-src/core/vol_cpack.c:4119:SKIP
-src/core/vol_cpack.c:4119:ACTS
-src/core/vol_cpack.c:4220:SKIP
-src/core/vol_cpack.c:4220:SKIP
+src/core/vol_cpack.c:2949:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3292:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3293:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3389:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3390:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:3634:SKIP   # leftover-sibling check: absent means nothing to purge
+src/core/vol_cpack.c:4130:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:4212:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:4227:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:4228:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:4232:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:4253:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:4313:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:4345:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1013:SKIP
@@ -147,18 +147,6 @@ src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
 src/core/volume.c:1361:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
-src/core/vol_cpack.c:3199:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3296:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4119:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4119:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4139:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4220:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3200:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:3297:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4134:SKIP   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4135:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4160:ACTS   # непомечен: добавлено при правке vol_cpack.c
-src/core/vol_cpack.c:4252:SKIP   # непомечен: добавлено при правке vol_cpack.c
 "
 
 fail=0

@@ -814,3 +814,16 @@ void vol_release_superseded_blob(invfs_volume *v, uint64_t inode_id,
 { (void)v; (void)inode_id; (void)old_addr; }
 int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out)
 { (void)v; (void)name; if (ino_out) *ino_out = 0; return -1; }
+/* WP603: tar_batch_begin/end drive blkio_set_commit/blkio_force_flush
+ * (durability fencing for the TAR member loop). Same situation as
+ * vol_release_superseded_blob above: off the map-cache path under
+ * test, so stubbed here rather than linked. */
+void blkio_set_commit(blkio *io, uint64_t bytes, uint64_t ms, uint64_t idle_ms)
+{ (void)io; (void)bytes; (void)ms; (void)idle_ms; }
+void blkio_force_flush(blkio *io)
+{ (void)io; }
+/* WP603: tar_batch_end pays the deferred window with one barrier. Same
+ * off-path story as above: the map-cache test never seals or sweeps,
+ * so the stub only has to link (0 = durable, never observed here). */
+int vmux_barrier(struct invfs_volume *v, const char *what)
+{ (void)v; (void)what; return 0; }
