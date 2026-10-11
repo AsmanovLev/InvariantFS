@@ -32,7 +32,9 @@
  * (pba-refcount == 1), RAW-zone segments into shadow holes. The zone
  * TAG is left untouched (RAW-in-shadow is ordinary): retagging would
  * hide lane-pending files from their lanes, while the publish gate
- * already guarantees convergence. Dedupe-shared segments are already
+ * already guarantees convergence. Tier-covered segments (dev0 copies /
+ * dev1 mirrors via wp25) are skipped: freeing one drops its copy through
+ * wp25_on_free and collapses heat accounting. Dedupe-shared segments are already
  * consolidated, and copying them per file would undo dedupe.
  * v1 recompress handles single-entry recipes only (the common small-file
  * shape); multi-entry files are skipped and counted, not half-done.
@@ -62,6 +64,7 @@ typedef struct {
     uint64_t recompress_saved;  /* payload bytes saved by recompress */
     size_t files_skipped_multi; /* recompress-eligible shape but multi-entry */
     size_t files_skipped_windows; /* relocate-skipped: windowed (lane-owned) recipes */
+    size_t segments_skipped_tier; /* relocate-skipped: tier-covered (tier owns placement) */
     uint64_t seal_ranges;       /* old-pba ranges passed to seal_dirty_mark */
     uint64_t seal_blocks;       /* blocks covered by those ranges */
     uint64_t free_runs_before;  /* fragmentation metric, before ... */

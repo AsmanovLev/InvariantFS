@@ -168,11 +168,26 @@ static int migrate_cand_cmp(const void *a_, const void *b_)
 
 typedef struct { uint64_t old_pba, old_plen, new_pba, new_plen; } migrate_move;
 
+/* Tier/raw-mirror coverage: freeing this segment would drop its dev0
+ * acceleration copy (or dev1 mirror) via wp25_on_free -- measured: moved
+ * canonicals orphan their copies, heat accounting collapses, and the
+ * multidev demotion leg sees no pressure. Tier owns these placements;
+ * v1 leaves them. Single-device volumes have empty maps (always miss). */
+static int tier_covered(invfs_volume *v, uint64_t pba)
+{
+    uint64_t dp = 0, dl = 0;
+    if (wp25_tier_lookup(v, pba, &dp, &dl) == 0)
+        return 1;
+    if (wp25_rawm_lookup(v, pba, &dp, &dl) == 0)
+        return 1;
+    return 0;
+}
+
 static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
                         uint64_t *budget_io, int *budget_hit,
                         size_t *moved_segs, uint64_t *moved_blocks,
                         uint64_t *seal_ranges, uint64_t *seal_blocks,
-                        size_t *skipped_up)
+                        size_t *skipped_up, size_t *skipped_tier)
 {
     invfs_inode in;
     uint8_t *blob = NULL;
@@ -243,6 +258,8 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
             continue;
         if (pba_ref_count(v, ne[i].pba) != 1)
             continue;           /* shared: dedupe's output, leave it */
+        if (tier_covered(v, ne[i].pba))
+            continue;           /* tier copy or raw mirror: tier owns it */
         if (seg_extent_checked(v, ne[i].pba, &plen) != 0 || plen == 0)
             continue;
         need_bytes += plen * INVFS_BLOCK_SIZE;
@@ -271,6 +288,10 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
             continue;
         if (pba_ref_count(v, old_pba) != 1)
             continue;
+        if (tier_covered(v, old_pba)) {
+            (*skipped_tier)++;
+            continue;
+        }
         if (seg_extent_checked(v, old_pba, &old_plen) != 0 || old_plen == 0)
             continue;
         /* Checked read (CRC-verified, seal-recovery + tier failover
@@ -665,7 +686,7 @@ int vol_migrate_run(invfs_volume *v, int recompress, uint64_t max_blocks,
     v->shadow_cursor = v->sb.shadow_zone_start;
 
     for (i = 0; i < ctx.n; i++) {
-        size_t ms = 0, su = 0;
+        size_t ms = 0, su = 0, st = 0;
         uint64_t mb = 0, sr = 0, sb = 0;
         int fr;
         if (budget == 0) {
@@ -677,7 +698,7 @@ int vol_migrate_run(invfs_volume *v, int recompress, uint64_t max_blocks,
                 continue;
         } else {
             fr = migrate_file(v, ctx.cand[i].id, ctx.cand[i].name, &budget,
-                              &budget_hit, &ms, &mb, &sr, &sb, &su);
+                              &budget_hit, &ms, &mb, &sr, &sb, &su, &st);
             if (fr == 2) {
                 lr.files_skipped_windows += 1;
             } else if (fr > 0) {
@@ -688,6 +709,7 @@ int vol_migrate_run(invfs_volume *v, int recompress, uint64_t max_blocks,
                 lr.seal_blocks += sb;
             }
             lr.segments_skipped_upward += su;
+            lr.segments_skipped_tier += st;
         }
         if (recompress) {
             size_t nr = 0;
@@ -708,11 +730,12 @@ out_frag:
     vol_migrate_frag(v, &lr.free_runs_after, &lr.frag_after);
     if (!invfs_sweep_ui_active())
         printf("migrate: %zu file(s) seen, %zu moved (%zu segments, "
-               "%llu blocks, %zu upward-skipped, %zu window-skipped)%s; frag runs %llu->%llu score %.3f->%.3f; "
+               "%llu blocks, %zu upward-skipped, %zu window-skipped, %zu tier-skipped)%s; frag runs %llu->%llu score %.3f->%.3f; "
                "seal-dirty %llu range(s) (%llu blocks)%s\n",
                lr.files_seen, lr.files_moved, lr.segments_moved,
                (unsigned long long)lr.blocks_moved,
                lr.segments_skipped_upward, lr.files_skipped_windows,
+               lr.segments_skipped_tier,
                budget_hit ? " [budget hit]" : "",
                (unsigned long long)lr.free_runs_before,
                (unsigned long long)lr.free_runs_after,
