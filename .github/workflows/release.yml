@@ -79,10 +79,13 @@ jobs:
           # it at the root. A CI-local symlink (never committed).
           ln -s packaging/debian debian
           debuild -us -uc -b
+          # debuild drops artifacts in the parent dir; upload-artifact
+          # forbids '..', so stage them inside the workspace.
+          mkdir -p debs && mv ../*.deb ../*.buildinfo ../*.changes debs/
       - uses: actions/upload-artifact@v4
         with:
           name: dist-deb
-          path: "../*.deb"
+          path: debs/
 
   arch:
     needs: tarball
