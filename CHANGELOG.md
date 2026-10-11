@@ -8,7 +8,7 @@ Pack registry fetch (WP608) + per-distro release pipeline.
 
 ### Added
 - `invfs-pack` fetches packs from the registry (WP608): raw-tree mode
-  (`install <name>[@<version>]` via `codecpacks/index.json`), source-tarball
+  (`install <name>[@<version>]` via the registry index), source-tarball
   release mode, and `.ivpack` mode (prefers `.ivpack` bundles from registry
   releases, loud fallback to tarballs). Same sha256 + WP203 signature gate
   on every path (bad refuses, missing prompts); no-shell curl/tar/unzip
