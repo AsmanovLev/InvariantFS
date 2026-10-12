@@ -253,12 +253,14 @@ on a global lock.
   fail. `allow_other` is always permitted for root, so this does not require
   `CONFIG_FUSE_ALLOW_ALL`. See `INCIDENTS.md` WP227; **WP225-RESOLVED-PARTIAL is
   superseded -- it exonerated the filesystem incorrectly.**
-  Because of this, **the busybox/OpenRC/runit fallback is still the
-  recommendation for unattended boots** — the reachability target is met, but a
-  working message bus is not.
-  A system that boots to `graphical.target` with no bus is not a usable
-  multi-user system, so unattended operation should still use the
-  busybox/OpenRC/runit fallback until WP225 is fixed.
+  Re-confirmed independently 2026-10-12 (WP611, fresh box + KVM):
+  `dbus.service` started OK, `multi-user.target` and `graphical.target`
+  reached, `systemctl is-system-running` reports `running`, SSH works.
+  The busybox/OpenRC/runit path stays documented as a supported
+  alternative for unattended boots, not as a fallback from a broken bus.
+  (One wart from the re-confirmation run, unrelated to dbus: `systemctl
+  poweroff` over SSH did not finish in 120 s -- FUSE-root shutdown is
+  slow; see `INCIDENTS.md` WP227.)
   README previously called this "runtime lookup corruption on two-device
   volumes (H2)". That wording does not match what is observed — nothing here
   shows corrupted lookups, and the boot completes — so #3 is restated above

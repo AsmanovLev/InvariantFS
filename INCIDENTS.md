@@ -2354,6 +2354,19 @@ and the measurement that caused the wrongful exoneration now reads:
     messagebus exec on invfs  : PASS      uid1000     exec on exec-tmpfs : PASS
 
 **So the tmpfs anomaly is fully explained and there is no second mechanism.**
+
+### WP227 — independent re-confirmation 2026-10-12 (WP611)
+
+Fresh box, fresh Debian trixie debootstrap, KVM, `allow_other` initramfs
+from a clean build: `dbus.service Started OK`, `multi-user.target` and
+`graphical.target` reached, `systemctl is-system-running: running`, SSH
+round-trip as root works, `/` mount line carries `allow_other`. The bus
+was never exercised by a non-root client in this run (serial getty lost
+to a dev-ttyS0 timeout; the `busctl --system` probe is now in
+`tools/ki3b-jobs.py` for next time) -- but `running` (not `degraded`)
+plus the WP227 unit-level proof closes the question twice over: the
+203/EXEC defect is fixed. Wart, unrelated: `systemctl poweroff` over
+SSH did not complete in 120 s (FUSE-root shutdown slowness, not dbus).
 `setpriv`, `cat`, `head` and `ls` all live on the root filesystem, so with the
 root mounted without `allow_other`, `messagebus` could not exec the probe's own
 instruments either. Every failing tmpfs line was that, not tmpfs. The one
