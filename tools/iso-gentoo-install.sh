@@ -18,15 +18,15 @@ set -u
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK="${WORK:?set WORK to a scratch dir}"
 # Pinned ISO (policy: reproducible inputs; bump with checksum together).
-ISO_VER="20260913T163055Z"
+ISO_VER="20261011T170049Z"
 ISO_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-$ISO_VER.iso"
 # Upstream publishes SHA512 in the .DIGESTS file; verified with sha512sum.
-ISO_SHA512="7bc150d92d330d90135683e8b430e03fde7f7284e8d868923ebf66b0f94c2b77a0ae9db51696e51704ed0a05769c31939bf26cf7af96a3829608ab2479519047  install-amd64-minimal-$ISO_VER.iso"
-# Kernel+initramfs paths INSIDE the ISO (confirmed against 20260913).
+ISO_SHA512="69fe76e75d63d09235f7309c7c1daa7b64b2aa2674a7aab81290a1c03ef78d304635d294ea3f15d641b51ef2313dcee3e343f8243984315bde7f8a862328a3ee  install-amd64-minimal-$ISO_VER.iso"
+# Kernel+initramfs paths INSIDE the ISO (confirmed against 20261011).
 ISO_KERNEL="boot/gentoo"
 ISO_INITRD="boot/gentoo.igz"
 # dracut live root lookup (confirmed: grub.cfg root=live:CDLABEL=...).
-ISO_LABEL="Gentoo-amd64-20260913"
+ISO_LABEL="Gentoo-amd64-20261011"
 # Throwaway root password for the dosshd CI guest. Not a credential to
 # anything real; the guest is NATed, short-lived, and destroyed after.
 GUEST_PW="invfs-live-install"
@@ -91,9 +91,9 @@ note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 # then a bare sha512sum miss), while the host path is loud and shares the
 # already-proven NAT route. Pin mirrors tools/iso-guest-gentoo-setup.sh
 # STAGE3_VER/URL/SHA512 -- bump together (guest re-verifies authoritatively).
-STAGE3_VER="20261004T164559Z"
+STAGE3_VER="20261011T170049Z"
 STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
-STAGE3_SHA512="2cf0030d683481ef9a5aac737b636abb3532c88a15972709811423564945ef8694685003dccb5c78e453633b792af2af27c504f0a0e69101bd472b26d892aea8  stage3.tar.xz"
+STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac74c521b630386baed747e3c32b44b96fd4db143adb72738c0dc68dabfc8d6c8e  stage3.tar.xz"
 if [ ! -f "$SERVEDIR/stage3.tar.xz" ]; then
     note "downloading stage3 $STAGE3_VER"
     curl -fsSL -o "$SERVEDIR/stage3.tar.xz" "$STAGE3_URL" || fail "stage3 download failed"

@@ -69,6 +69,11 @@ ABASE=$(basename "$ART" .tar.zst)
 # The guest script must never pin a version: point its artifact
 # references at the tree under test (served copy only).
 sed -i "s/invfs-v[0-9.][0-9.]*-x86_64/$ABASE/g" "$SERVEDIR/iso-guest-arch-setup.sh"
+# Same for the served recipe: the tree PKGBUILD tracks the NEXT release
+# while `make release` here stamps git-describe (no tag yet), so pkgver
+# would name an artifact that was never served. Pin it to the served one.
+PVER=$(echo "$ABASE" | sed 's/^invfs-v//; s/-x86_64$//')
+sed -i "s/^pkgver=.*/pkgver=$PVER/" "$SERVEDIR/PKGBUILD"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
 if [ "$ACCEL" = auto ]; then
