@@ -1035,10 +1035,11 @@ jobs:
           # guaranteed mismatch. Bump version= in the overlay only.
           BUILT_VER=$(tar --zstd -xOf "$ART" --wildcards '*/VERSION' | head -1 | sed 's/^v//')
           sed -i "s/^version=.*/version=$BUILT_VER/" "$OVER/template"
-          # xbps-src stages distfiles under hostdir/sources/<pkgname>/; the
-          # old sources/<pkg>-<ver>/ path was invisible, so every run did a
-          # real fetch of whatever the committed version pointed at.
-          SRCDIST=/tmp/vp/hostdir/sources/invfs
+          # xbps-src looks for distfiles at
+          # hostdir/sources/<pkgname>-<version>/ (00-distfiles.sh:
+          # srcdir=$XBPS_SRCDISTDIR/$pkgname-$version); anything else is
+          # invisible and triggers a real fetch.
+          SRCDIST=/tmp/vp/hostdir/sources/invfs-$BUILT_VER
           mkdir -p "$SRCDIST"
           cp "$ART" "$SRCDIST/"
           H=$(cut -d' ' -f1 dist/SHA256SUMS)
