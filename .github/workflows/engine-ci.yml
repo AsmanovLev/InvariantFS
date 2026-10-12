@@ -197,7 +197,11 @@ jobs:
           # convention); runners use their temp dir via the suite's own
           # FLAKEY_WORK override instead.
           export FLAKEY_WORK="$RUNNER_TEMP/flakey"
-          timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh; rc=$?
+          # Runner executes steps with `bash -e`: a bare `timeout ...; rc=$?`
+          # dies on the timeout line itself when the suite fails, so rc is
+          # never recorded and the artifact staging below is skipped. The
+          # &&/|| shape survives -e on both paths.
+          timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh && rc=0 || rc=$?
           echo "soak rc=$rc (informational; pre-war reds tracked, not gating)"
           echo "SOAK_RC=$rc" >> "$GITHUB_ENV"
           exit 0

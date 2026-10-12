@@ -2901,6 +2901,17 @@ soak step now stages the artifacts dir on a nonzero soak rc so the
 third occurrence, if any, is dissectable). Status stays OPEN; no
 theory promoted.
 
+**Third occurrence:** 2026-10-12, engine-ci run 38222564259 (commit
+7f53d4f), soak leg4 arm 4b. Same 4 files (a.c, r.log, t.tar, w.py),
+same signature (verify-clean + parity-clean, cat readback mismatched).
+The staged artifact MISSED again: the soak step runs under `bash -e`,
+so `timeout ...; rc=$?` died on the timeout line itself -- `exit 0` and
+the SOAK_RC/export never ran, downstream staging skipped. Fixed the
+same day (`&& rc=0 || rc=$?` survives -e on both paths). Three
+identical occurrences, zero dissections: the mechanism is now the
+prime suspect class (deterministic read divergence with no crash
+between reads), but still unproven.
+
 ## migrate + serialize_win: windowed recipes stay put (v1 boundary)
 
 **Date:** 2026-10-11. **Status:** BOUNDARY, not a bug filed. Migrate

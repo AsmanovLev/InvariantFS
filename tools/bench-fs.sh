@@ -17,7 +17,7 @@
 set -e
 set -o pipefail
 
-REPO=/home/user/InvariantFS
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 B=$REPO/bin
 WORK=/dev/shm/wp11bench
 IMG=${IMG:-wp11bench.img}
@@ -74,11 +74,18 @@ for i in range(4):
 print("rand: 4 incompressible files")
 PY
 
-# text tree: the .c/.h of busybox, layout preserved
+# text tree: the .c/.h of busybox (layout preserved) when present, else
+# this repo's own sources -- always available, still deterministic.
 mkdir -p "$CORPUS/src"
-( cd "$REPO/tools/busybox-src" && \
-  find . \( -name '*.c' -o -name '*.h' \) -print0 | tar --null -cf - --files-from=- ) \
-  | ( cd "$CORPUS/src" && tar -xf - )
+if [ -d "$REPO/tools/busybox-src" ]; then
+  ( cd "$REPO/tools/busybox-src" && \
+    find . \( -name '*.c' -o -name '*.h' \) -print0 | tar --null -cf - --files-from=- ) \
+    | ( cd "$CORPUS/src" && tar -xf - )
+else
+  ( cd "$REPO" && \
+    find src tools \( -name '*.c' -o -name '*.h' \) -print0 | tar --null -cf - --files-from=- ) \
+    | ( cd "$CORPUS/src" && tar -xf - )
+fi
 echo "text: $(find "$CORPUS/src" -type f | wc -l) files, $(du -sm "$CORPUS/src" | cut -f1) MB"
 
 # 5 binaries, 1..5MB, deterministic pick (smallest five in that band)
