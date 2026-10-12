@@ -66,7 +66,7 @@ explicit, destructive override).
 * **Codec packs** — codecs are external, versioned packs (`manifest` + helper)
   discovered at runtime; a volume can carry the packs it needs and self-host
   them across a maintenance boot.
-* **Pack registry** — `invfs-pack` installs/verifies packs from the
+* **Pack registry** — `invf-pack` installs/verifies packs from the
   [registry](https://github.com/AsmanovLev/InvariantFS-registry), with
   alternatives (one encoder per family) and static helpers.
 * **POSIX layer** — mode/uid/gid enforced daemon-side, POSIX.1e ACLs stored as
@@ -199,7 +199,7 @@ sh packaging/bootstrap.sh --source --prefix /usr/local
 
 Boot a distribution root on InvFS (single- or two-device):
 `docs/GENTOO-INSTALL.md`, `docs/ARCH-INSTALL.md`, `docs/VOID-INSTALL.md`.
-Codec packs: `invfs-pack` — see the
+Codec packs: `invf-pack` — see the
 [registry](https://github.com/AsmanovLev/InvariantFS-registry).
 
 ## Build & test

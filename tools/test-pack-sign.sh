@@ -26,7 +26,7 @@ set -o pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/tools/lib-scratch.sh"
 B=$REPO/bin
-WORK="${INVFS_PACKSIGN_WORK:-$(invfs_scratch_root)/invfs-packsign-$$}"
+WORK="${INVFS_PACKSIGN_WORK:-$(invfs_scratch_root)/invf-packsign-$$}"
 IMG=ps-sign.img
 rm -rf "$WORK" && mkdir -p "$WORK/pack/bin" "$WORK/keys" "$WORK/empty"
 cd "$WORK"
@@ -50,10 +50,10 @@ EOF
     chmod 755 pack/bin/enc pack/bin/dec
     rm -f pack/manifest.sig
 }
-count_packs() { $B/invfs-pack list --volume "$IMG" 2>/dev/null | grep -c "volume:$IMG" || true; }
+count_packs() { $B/invf-pack list --volume "$IMG" 2>/dev/null | grep -c "volume:$IMG" || true; }
 
 echo "== [0] keygen =="
-$B/invfs-pack keygen || fail "keygen rc=$?"
+$B/invf-pack keygen || fail "keygen rc=$?"
 [ -f "$WORK/keys/default.sec" ] || fail "no default.sec"
 [ -f "$WORK/keys/default.pub" ] || fail "no default.pub"
 [ "$(stat -c %a "$WORK/keys/default.sec")" = "600" ] || fail "sec not 0600"
@@ -61,33 +61,33 @@ pass "keygen wrote default.{sec,pub}, sec 0600"
 
 echo "== [1] sign + install =="
 mkpack
-$B/invfs-pack sign --key "$WORK/keys/default.sec" ./pack || fail "sign rc=$?"
+$B/invf-pack sign --key "$WORK/keys/default.sec" ./pack || fail "sign rc=$?"
 [ -f pack/manifest.sig ] || fail "no manifest.sig"
 grep -q "^integrity = " pack/manifest || fail "no integrity line"
 $B/invf-mkfs "$IMG" 1 >/dev/null
-$B/invfs-pack install --volume "$IMG" ./pack > install1.log 2>&1 \
+$B/invf-pack install --volume "$IMG" ./pack > install1.log 2>&1 \
     || fail "signed install rc=$?"
 grep -q "signature OK" install1.log || fail "no signature-OK gate note"
-$B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
+$B/invf-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg1: pack count"
 pass "signed install OK"
 
 echo "== [2] refuse-bad =="
 printf 'evil = 1\n' >> pack/manifest
-$B/invfs-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
+$B/invf-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
     && fail "leg2: tampered manifest installed"
 pass "tampered manifest refused (even with -y)"
 # restore manifest by re-signing, then tamper a helper instead
-$B/invfs-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
+$B/invf-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
     || fail "re-sign rc=$?"
 printf 'X' >> pack/bin/enc
-$B/invfs-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
+$B/invf-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
     && fail "leg2: tampered helper installed"
 pass "tampered helper refused (even with -y)"
 # restore helper, tamper the sidecar instead (flip one hex char of the
 # key field: envelope stays well-formed, trust does not)
 truncate -s -1 pack/bin/enc
-$B/invfs-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
+$B/invf-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
     || fail "re-sign 2 rc=$?"
 python3 - "$WORK/pack/manifest.sig" <<'EOF'
 import sys
@@ -96,7 +96,7 @@ b = bytearray(open(p, 'rb').read())
 b[20] = 0x62 if b[20] == 0x61 else 0x61  # flip a<->b, both hex
 open(p, 'wb').write(bytes(b))
 EOF
-$B/invfs-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
+$B/invf-pack install -y --volume "$IMG" ./pack >/dev/null 2>&1 \
     && fail "leg2: tampered sidecar installed"
 pass "tampered sidecar refused (even with -y)"
 [ "$(count_packs)" = "1" ] || fail "leg2: refusal changed the volume"
@@ -112,33 +112,33 @@ cp -a pack packB
 sed -i 's/name = vxp/name = vxpB/' packB/manifest
 cp -a pack packC
 sed -i 's/name = vxp/name = vxpC/' packC/manifest
-$B/invfs-pack install --skip-signature-verification -y --volume "$IMG" ./pack \
+$B/invf-pack install --skip-signature-verification -y --volume "$IMG" ./pack \
     >/dev/null || fail "leg3: --skip rc=$?"
 pass "missing + --skip installs"
-printf 'y\n' | $B/invfs-pack install --volume "$IMG" ./packB >/dev/null \
+printf 'y\n' | $B/invf-pack install --volume "$IMG" ./packB >/dev/null \
     || fail "leg3: piped y rc=$?"
 pass "missing + answer-y installs (prompt really asked)"
-printf 'n\n' | $B/invfs-pack install --volume "$IMG" ./packC >/dev/null 2>&1 \
+printf 'n\n' | $B/invf-pack install --volume "$IMG" ./packC >/dev/null 2>&1 \
     && fail "leg3: answer-n installed"
 pass "missing + answer-n aborts"
-$B/invfs-pack install --volume "$IMG" ./packC >/dev/null 2>&1 < /dev/null \
+$B/invf-pack install --volume "$IMG" ./packC >/dev/null 2>&1 < /dev/null \
     && fail "leg3: closed-stdin installed"
 pass "missing + closed stdin aborts"
-$B/invfs-pack install -y --volume "$IMG" ./pack >/dev/null \
+$B/invf-pack install -y --volume "$IMG" ./pack >/dev/null \
     || fail "leg3: -y rc=$?"
 pass "missing + -y installs"
 rm -rf packC && cp -a pack packC && sed -i 's/name = vxp/name = vxpC/' packC/manifest
 before=$(count_packs)
-$B/invfs-pack install -n --volume "$IMG" ./packC > dry.log 2>&1 \
+$B/invf-pack install -n --volume "$IMG" ./packC > dry.log 2>&1 \
     || fail "leg3: -n rc=$?"
 grep -q "UNSIGNED" dry.log || fail "leg3: -n names the unsigned state"
 [ "$(count_packs)" = "$before" ] || fail "leg3: -n installed something"
 pass "missing + -n reports UNSIGNED, installs nothing"
 
 echo "== [4] untrusted key =="
-$B/invfs-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
+$B/invf-pack sign --key "$WORK/keys/default.sec" ./pack >/dev/null \
     || fail "re-sign 3 rc=$?"
-INVFS_KEYRING="$WORK/empty" $B/invfs-pack install -y --volume "$IMG" ./pack \
+INVFS_KEYRING="$WORK/empty" $B/invf-pack install -y --volume "$IMG" ./pack \
     >/dev/null 2>&1 && fail "leg4: unknown key installed"
 pass "signed-by-unknown-key refused"
 

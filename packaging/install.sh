@@ -8,9 +8,10 @@
 #
 # The rpm/debian/arch packaging calls this same script, so the FHS layout
 # lives in exactly one place:
-#     bin/invf*                   -> $PREFIX/bin   (NOT invf-* -- that glob
-#                                    silently drops invfs-pack, the codecpack
-#                                    manager, from every package)
+#     bin/invf*                   -> $PREFIX/bin   (the pack manager is
+#                                    bin/invf-pack now; the old invfs-pack
+#                                    name silently dropped it from every
+#                                    package, fixed by the rename)
 #     tools/codecpacks/*.codecpack-> $PREFIX/lib/invfs/codecpacks
 #                                    (C helpers rebuilt from source when
 #                                     $CC is available)

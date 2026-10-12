@@ -393,8 +393,8 @@ installable, and none of them was visible from the install guides.
    Related, and also unfixed: `meta_probe` is in `$(TOOLS)` but does not
    match `bin/invf*`, so it is dropped by the artifact path. The release
    ships 19 of `$(TOOLS)`'s 20.
-7. **`invfs-pack` was missing from every package.** It ships in the
-   artifact, but the `invf-*` glob does not match `invfs-pack` (that is
+7. **`invf-pack` was missing from every package.** It ships in the
+   artifact, but the `invf-*` glob does not match `invf-pack` (that is
    `invfs`, not `invf-`), so the codecpack manager was silently dropped by
    `packaging/install.sh`, by `packaging/debian/install` and by
    `%{_bindir}/invf-*` in the spec. The globs are now `invf*`.

@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-pack-registry.sh -- invfs-pack registry fetch (WP608) e2e.
+# test-pack-registry.sh -- invf-pack registry fetch (WP608) e2e.
 #
 # Leg 1 (list): `list --repo file://<fixture>` shows the fixture pack as
 #   [available]; `list --installed` shows installed-only and never touches
@@ -83,16 +83,17 @@ set -o pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/tools/lib-scratch.sh"
 B=$REPO/bin
-WORK="${INVFS_PACKREG_WORK:-$(invfs_scratch_root)/invfs-packreg-$$}"
+WORK="${INVFS_PACKREG_WORK:-$(invfs_scratch_root)/invf-packreg-$$}"
 IMG=pr-reg.img
 IMG2=pr-reg2.img
 IMG3=pr-reg3.img
 IMG4=pr-reg4.img
 IMG5=pr-reg5.img
 IMG6=pr-reg6.img
+IMG7=pr-reg7.img
 rm -rf "$WORK" && mkdir -p "$WORK/repo/codecpacks" "$WORK/keys" "$WORK/empty"
 cd "$WORK"
-rm -f "$IMG" "$IMG2" "$IMG3" "$IMG4" "$IMG5" "$IMG6"
+rm -f "$IMG" "$IMG2" "$IMG3" "$IMG4" "$IMG5" "$IMG6" "$IMG7"
 PLAT="$(uname -m)-linux-musl"
 
 export INVFS_KEYRING="$WORK/keys"
@@ -100,7 +101,7 @@ FIXREPO="file://$WORK/repo"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 pass() { echo "ok:   $*"; }
-count_packs() { $B/invfs-pack list --volume "${1:-$IMG}" 2>/dev/null | grep -c "volume:${1:-$IMG}" || true; }
+count_packs() { $B/invf-pack list --volume "${1:-$IMG}" 2>/dev/null | grep -c "volume:${1:-$IMG}" || true; }
 
 # pack source tree: the fixture repo's version dir doubles as the authored
 # pack dir (signed BEFORE the sha256 listing is written: the listing is
@@ -195,9 +196,9 @@ EOF
 }
 
 echo "== [0] fixture =="
-$B/invfs-pack keygen >/dev/null || fail "keygen rc=$?"
+$B/invf-pack keygen >/dev/null || fail "keygen rc=$?"
 mkpack
-$B/invfs-pack sign --key "$WORK/keys/default.sec" "$PKDIR" >/dev/null \
+$B/invf-pack sign --key "$WORK/keys/default.sec" "$PKDIR" >/dev/null \
     || fail "sign rc=$?"
 write_listing
 mkupack
@@ -223,7 +224,7 @@ EOF
     printf 'r-helper-%s-001' "$seed" > "$d/bin/enc"
     printf 'r-helper-%s-002' "$seed" > "$d/bin/dec"
     chmod 755 "$d/bin/enc" "$d/bin/dec"
-    $B/invfs-pack sign --key "$WORK/keys/default.sec" "$d" >/dev/null \
+    $B/invf-pack sign --key "$WORK/keys/default.sec" "$d" >/dev/null \
         || fail "sign vxr $ver rc=$?"
     ( cd "$d" && sha256sum manifest manifest.sig bin/enc bin/dec > sha256 )
     rm -rf "$stage"
@@ -239,31 +240,31 @@ $B/invf-mkfs "$IMG" 1 >/dev/null
 pass "fixture registry ready"
 
 echo "== [1] list: available vs installed =="
-$B/invfs-pack list --repo "$FIXREPO" > list.log 2>&1 \
+$B/invf-pack list --repo "$FIXREPO" > list.log 2>&1 \
     || fail "list rc=$?"
 grep -q "vxp.*\[available\]" list.log || fail "leg1: vxp not [available]"
 grep -q "vxpU.*\[available\]" list.log || fail "leg1: vxpU not [available]"
 grep -q "pack(s) available in registry" list.log \
     || fail "leg1: no available count"
-$B/invfs-pack list --installed --repo file:///nonexistent-wp608 \
+$B/invf-pack list --installed --repo file:///nonexistent-wp608 \
     > listinst.log 2>&1 || fail "leg1: list --installed rc=$?"
 grep -q "warning: registry" listinst.log \
     && fail "leg1: --installed touched the network"
 pass "registry packs listed [available]; --installed stays offline"
 
 echo "== [2] fetch + install (signed) =="
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG" vxp > install1.log 2>&1 \
+$B/invf-pack install --repo "$FIXREPO" --fetch-source --volume "$IMG" vxp > install1.log 2>&1 \
     || fail "fetch install rc=$?"
 grep -q "fetching vxp 1.0.0" install1.log || fail "leg2: no fetching line"
 grep -q "file(s) verified" install1.log || fail "leg2: no sha256 verify line"
 grep -q "signature OK" install1.log || fail "leg2: no signature-OK gate note"
-$B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
+$B/invf-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg2: pack count"
 pass "bare install fetched, verified, gate-OK, aboard"
 
 echo "== [3] tampered transport refuses =="
 printf 'X' >> "$PKDIR/bin/enc"
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG" vxp \
+$B/invf-pack install -y --repo "$FIXREPO" --fetch-source --volume "$IMG" vxp \
     > tamper.log 2>&1 && fail "leg3: tampered helper installed"
 grep -q "sha256 mismatch" tamper.log || fail "leg3: no mismatch diagnostic"
 [ "$(count_packs)" = "1" ] || fail "leg3: refusal changed the volume"
@@ -274,19 +275,19 @@ echo "== [4] bad signature refuses (even with -y) =="
 printf 'evil = 1\n' >> "$PKDIR/manifest"
 # re-hash the listing so transport passes and the GATE is what refuses
 ( cd "$PKDIR" && sha256sum manifest manifest.sig bin/enc bin/dec > sha256 )
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG" vxp \
+$B/invf-pack install -y --repo "$FIXREPO" --fetch-source --volume "$IMG" vxp \
     > badsig.log 2>&1 && fail "leg4: bad-signature pack installed"
 [ "$(count_packs)" = "1" ] || fail "leg4: refusal changed the volume"
 pass "bad-signature fetched pack refused"
 # restore the fixture for the remaining legs (fresh tree, fresh signature)
 mkpack
-$B/invfs-pack sign --key "$WORK/keys/default.sec" "$PKDIR" >/dev/null \
+$B/invf-pack sign --key "$WORK/keys/default.sec" "$PKDIR" >/dev/null \
     || fail "re-sign rc=$?"
 write_listing
 
 echo "== [5] missing-signature fetched matrix =="
 before=$(count_packs)
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG" vxpU \
+$B/invf-pack install -y --repo "$FIXREPO" --fetch-source --volume "$IMG" vxpU \
     > unsigned-y.log 2>&1 || fail "leg5: -y rc=$?"
 grep -qi "unsigned" unsigned-y.log || fail "leg5: -y names no unsigned state"
 [ "$(count_packs)" = "2" ] || fail "leg5: -y installed nothing"
@@ -309,20 +310,20 @@ d["packs"].append({"name": "vxpN", "version": "3.0.0", "pack_version": 3,
                    "sha256": "codecpacks/vxpN/3.0.0/sha256"})
 json.dump(d, open(p, "w"), indent=2)
 EOF
-$B/invfs-pack install -n --repo "$FIXREPO" --volume "$IMG" vxpN \
+$B/invf-pack install -n --repo "$FIXREPO" --fetch-source --volume "$IMG" vxpN \
     > unsigned-n.log 2>&1 || fail "leg5: -n rc=$?"
 grep -qi "unsigned" unsigned-n.log || fail "leg5: -n names no unsigned state"
 [ "$(count_packs)" = "2" ] || fail "leg5: -n installed something"
 pass "missing + -n reports UNSIGNED, installs nothing"
 
 echo "== [6] unreachable repo + unknown pack =="
-$B/invfs-pack list --repo file:///nonexistent-wp608 > unreach.log 2>&1 \
+$B/invf-pack list --repo file:///nonexistent-wp608 > unreach.log 2>&1 \
     || fail "leg6: list rc=$?"
 grep -q "warning: registry .*unreachable" unreach.log \
     || fail "leg6: no loud unreachable line"
 grep -q "\[available\]" unreach.log \
     && fail "leg6: phantom available packs"
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG" nosuchpack \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG" nosuchpack \
     > unknown.log 2>&1 && fail "leg6: unknown pack installed"
 grep -q "not found in registry" unknown.log \
     || fail "leg6: unknown pack names no registry"
@@ -338,7 +339,7 @@ pass "fsck OK, host untouched"
 
 echo "== [8] release tarball install (name@ver) =="
 $B/invf-mkfs "$IMG2" 1 >/dev/null
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG2" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG2" \
     "vxr@1.0.0" --release > rel1.log 2>&1 \
     || fail "release install rc=$?"
 grep -q "fetching vxr 1.0.0 release v1.0.0/vxr-1.0.0-" rel1.log \
@@ -355,7 +356,7 @@ pass "name@ver --release fetched the tarball, verified, gate-OK, aboard"
 
 echo "== [9] release latest resolve (no GitHub API) =="
 $B/invf-mkfs "$IMG3" 1 >/dev/null
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG3" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG3" \
     vxr --release > rel2.log 2>&1 \
     || fail "release latest rc=$?"
 grep -q "fetching vxr 2.0.0 release" rel2.log \
@@ -380,7 +381,7 @@ cp "$TB" "$TB.good"
 tar -C "$TAMPD" -czf "$TB" "vxr/1.0.0" || fail "repack tampered"
 rm -rf "$TAMPD"
 $B/invf-mkfs "$IMG4" 1 >/dev/null
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG4" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG4" \
     "vxr@1.0.0" --release > reltamper.log 2>&1 \
     && fail "leg10: tampered tarball installed"
 grep -q "sha256 mismatch" reltamper.log \
@@ -391,7 +392,7 @@ pass "tampered release refused at the sha256 gate, volume unchanged"
 # truncated tarball: not even listable, still a loud refusal
 head -c 120 "$TB.good" > "$WORK/trunc.tgz"
 mv "$WORK/trunc.tgz" "$TB"
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG4" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG4" \
     "vxr@1.0.0" --release > reltrunc.log 2>&1 \
     && fail "leg10b: truncated tarball installed"
 grep -Eq "cannot list|cannot unpack" reltrunc.log \
@@ -400,21 +401,21 @@ grep -Eq "cannot list|cannot unpack" reltrunc.log \
     || fail "leg10b: refusal changed the volume"
 mv "$TB.good" "$TB"
 # restored tarball installs again (the fixture is whole)
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG4" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG4" \
     "vxr@1.0.0" --release > relrestore.log 2>&1 \
     || fail "restored release install rc=$?"
 [ "$(count_packs "$IMG4")" = "1" ] || fail "leg10c: pack count"
 pass "truncated release refused loud; restored tarball installs"
 
 echo "== [11] missing version errors loudly (both modes) =="
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG4" \
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG4" \
     "vxr@9.9.9" --release > relmiss.log 2>&1 \
     && fail "leg11: missing version installed"
 grep -q "version '9.9.9' not found" relmiss.log \
     || fail "leg11: release names no version"
 grep -q "not found in registry" relmiss.log \
     || fail "leg11: release names no registry"
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG4" \
+$B/invf-pack install --repo "$FIXREPO" --fetch-source --volume "$IMG4" \
     "vxr@9.9.9" > relmiss-raw.log 2>&1 \
     && fail "leg11: raw missing version installed"
 grep -q "version '9.9.9' not found" relmiss-raw.log \
@@ -507,7 +508,7 @@ pass "ivpack fixture ready (vxi with lib, vxn bin-only)"
 
 echo "== [13] .ivpack install (unsigned, lib dormant, [ivpack]) =="
 $B/invf-mkfs "$IMG5" 1 >/dev/null
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
     "vxi@1.0.0" --release > iv1.log 2>&1 \
     || fail ".ivpack install rc=$?"
 grep -q "fetching vxi 1.0.0 release v1.1.0/vxi-1.0.0.ivpack" iv1.log \
@@ -519,7 +520,7 @@ grep -qi "unsigned" iv1.log \
 grep -q "falling back" iv1.log \
     && fail "leg13: present .ivpack fell back"
 [ "$(count_packs "$IMG5")" = "1" ] || fail "leg13: pack count"
-$B/invfs-pack list --volume "$IMG5" 2>&1 | grep -q "\[ivpack\]" \
+$B/invf-pack list --volume "$IMG5" 2>&1 | grep -q "\[ivpack\]" \
     || fail "leg13: list shows no [ivpack]"
 # layout: manifest byte-verbatim + bin/ live + lib/ beside them.
 $B/invf-cat "$IMG5" .invariantfs/codecpacks/vxi.codecpack/manifest \
@@ -538,18 +539,18 @@ pass ".ivpack installed unsigned (-y), manifest+bin live, lib dormant, [ivpack]"
 
 echo "== [13b] .ivpack missing-signature prompt + dry-run =="
 $B/invf-mkfs "$IMG6" 1 >/dev/null
-printf 'y\n' | $B/invfs-pack install --repo "$FIXREPO" \
+printf 'y\n' | $B/invf-pack install --repo "$FIXREPO" \
     --volume "$IMG6" "vxi@1.0.0" --release > ivprompt-y.log 2>&1 \
     || fail "leg13b: piped-y rc=$?"
 [ "$(count_packs "$IMG6")" = "1" ] || fail "leg13b: piped-y installed nothing"
-$B/invfs-pack install -n --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -n --repo "$FIXREPO" --volume "$IMG6" \
     "vxn@1.0.0" --release > ivprompt-n.log 2>&1 \
     || fail "leg13b: -n rc=$?"
 grep -qi "unsigned" ivprompt-n.log \
     || fail "leg13b: -n names no unsigned state"
 [ "$(count_packs "$IMG6")" = "1" ] \
     || fail "leg13b: -n installed something"
-printf 'n\n' | $B/invfs-pack install --repo "$FIXREPO" \
+printf 'n\n' | $B/invf-pack install --repo "$FIXREPO" \
     --volume "$IMG6" "vxn@1.0.0" --release > ivprompt-n2.log 2>&1 \
     && fail "leg13b: piped-n installed"
 [ "$(count_packs "$IMG6")" = "1" ] \
@@ -557,7 +558,7 @@ printf 'n\n' | $B/invfs-pack install --repo "$FIXREPO" \
 pass "prompt-y installs, prompt-n and -n install nothing"
 
 echo "== [14] no-.so pack installs bin-only =="
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
     "vxn@1.0.0" --release > ivn.log 2>&1 \
     || fail "leg14: no-.so install rc=$?"
 grep -q "(.ivpack, .*file(s) verified" ivn.log \
@@ -570,7 +571,7 @@ cmp "$WORK/run.got" "$VNDIR/bin/run" \
 $B/invf-cat "$IMG6" .invariantfs/codecpacks/vxn.codecpack/lib/vxn.so \
     "$WORK/so-no.bin" >/dev/null 2>&1 \
     && fail "leg14: unexpected lib/ in a no-.so pack"
-$B/invfs-pack list --volume "$IMG6" 2>&1 | grep -q "vxn.*\[ivpack\]" \
+$B/invf-pack list --volume "$IMG6" 2>&1 | grep -q "vxn.*\[ivpack\]" \
     || fail "leg14: list shows no [ivpack] for vxn"
 pass "no-.so .ivpack installs bin-only, still [ivpack]"
 
@@ -586,7 +587,7 @@ printf 'X' >> "$WORK/ivtamper/bin/enc"
 ( cd "$WORK/ivtamper" && zip -0 -X -q -r "$TAMPI" \
     manifest sha256 bin lib ) || fail "repack tampered"
 before=$(count_packs "$IMG6")
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
     "vxi@1.0.0" --release > ivtamper.log 2>&1 \
     && fail "leg15: tampered bundle installed"
 grep -q "sha256 mismatch" ivtamper.log \
@@ -594,7 +595,7 @@ grep -q "sha256 mismatch" ivtamper.log \
 [ "$(count_packs "$IMG6")" = "$before" ] \
     || fail "leg15: refusal changed the volume"
 cp "$WORK/vxi-1.0.0.ivpack.good" "$TAMPI"
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG5" \
     "vxi@1.0.0" --release > ivrestore.log 2>&1 \
     || fail "leg15: restored bundle install rc=$?"
 [ "$(count_packs "$IMG5")" = "1" ] || fail "leg15: pack count"
@@ -613,7 +614,7 @@ z.writestr("/abs-probe.txt", b"evil")
 z.close()
 EOF
 before=$(count_packs "$IMG6")
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
     "vxi@1.0.0" --release > ivevil.log 2>&1 \
     && fail "leg16: escaping bundle installed"
 grep -q "escapes the pack dir" ivevil.log \
@@ -638,7 +639,7 @@ z.writestr("sha256", hashlib.sha256(man).hexdigest().encode() +
            b"  bin/link\n")
 z.close()
 EOF
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
     "vxi@1.0.0" --release > ivlink.log 2>&1 \
     && fail "leg16: symlink bundle installed"
 grep -q "REFUSED" ivlink.log || fail "leg16: no symlink refusal"
@@ -648,7 +649,7 @@ cp "$WORK/vxi-1.0.0.ivpack.good" "$TAMPI"
 pass "escaping entries refused pre-extract, symlink refused, nothing written"
 
 echo "== [17] missing unzip fails with the distro hint =="
-PATH="$WORK/empty" $B/invfs-pack install -y --repo "$FIXREPO" \
+PATH="$WORK/empty" $B/invf-pack install -y --repo "$FIXREPO" \
     --volume "$IMG6" "vxi@1.0.0" --release > ivnounzip.log 2>&1 \
     && fail "leg17: install without unzip succeeded"
 grep -q "unzip is required" ivnounzip.log \
@@ -663,7 +664,7 @@ echo "== [18] --release-tag override =="
 mkdir -p "$WORK/repo/releases/download/v9-custom"
 cp "$WORK/vxi-1.0.0.ivpack.good" \
     "$WORK/repo/releases/download/v9-custom/vxi-1.0.0.ivpack"
-$B/invfs-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
+$B/invf-pack install -y --repo "$FIXREPO" --volume "$IMG6" \
     "vxi@1.0.0" --release --release-tag v9-custom > ivtag.log 2>&1 \
     || fail "leg18: custom-tag install rc=$?"
 grep -q "release v9-custom/vxi-1.0.0.ivpack" ivtag.log \
@@ -684,12 +685,12 @@ EOF
 printf 'local-helper-001' > "$WORK/localpack/bin/enc"
 printf 'local-helper-002' > "$WORK/localpack/bin/dec"
 chmod 755 "$WORK/localpack/bin/enc" "$WORK/localpack/bin/dec"
-$B/invfs-pack install --repo "$FIXREPO" --volume "$IMG5" \
+$B/invf-pack install --repo "$FIXREPO" --fetch-source --volume "$IMG5" \
     vxp > ivraw.log 2>&1 || fail "leg19: raw install rc=$?"
-$B/invfs-pack install -y --volume "$IMG5" \
+$B/invf-pack install -y --volume "$IMG5" \
     ./localpack > ivlocal.log 2>&1 || fail "leg19: local install rc=$?"
 [ "$(count_packs "$IMG5")" = "3" ] || fail "leg19: pack count"
-$B/invfs-pack list --volume "$IMG5" > ivmarks.log 2>&1 \
+$B/invf-pack list --volume "$IMG5" > ivmarks.log 2>&1 \
     || fail "leg19: list rc=$?"
 grep -q "vxi.*\[ivpack\]" ivmarks.log \
     || fail "leg19: vxi not [ivpack]"
@@ -698,6 +699,16 @@ grep -q "vxp.*\[raw\]" ivmarks.log \
 grep -q "vxl.*\[local\]" ivmarks.log \
     || fail "leg19: vxl not [local]"
 pass "one volume lists [ivpack] + [raw] + [local]"
+
+echo "== [19b] default is release (bare install, no --release flag) =="
+$B/invf-mkfs "$IMG7" 1 >/dev/null
+$B/invf-pack install --repo "$FIXREPO" --volume "$IMG7" \
+    vxr > defrel.log 2>&1 || fail "leg19b: default install rc=$?"
+grep -q "fetching vxr .* release " defrel.log \
+    || fail "leg19b: default did not take the release path"
+[ "$(count_packs "$IMG7")" = "1" ] || fail "leg19b: pack count"
+$B/invf-fsck "$IMG7" | grep -q "^OK$" || fail "leg19b: fsck"
+pass "bare install defaults to the release bundle"
 
 echo "== [20] ivpack volumes clean, host untouched =="
 for _img in "$IMG5" "$IMG6"; do

@@ -166,8 +166,8 @@ UNIT_SCRATCH ?= $(if $(INVFS_UNIT_SCRATCH),$(INVFS_UNIT_SCRATCH),/tmp)
 FRB_T := $(CURDIR)/build/frbtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-fuse invf-import invf-sweep meta_probe \
-           invf-stats invf-resize invf-rollback invfs-pack \
+           invf-zip invf-fuse invf-import invf-sweep \
+           invf-stats invf-resize invf-rollback invf-pack \
            invf-vnode invf-plugin-host
 
 # Declared FIRST so it stays the default goal: make uses the first target in
@@ -279,10 +279,9 @@ $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 # and resolves tools/codecpacks/... relative to the repo root.
 $(eval $(call TOOL_RULE,ivpack_packs_test,-ldl))
 
-# WP60: invfs-pack is named differently (invfs- not invf-)
 # WP203: pack signatures (src/cli/pack_sig.o) gate install; ed25519.o
 # comes in through CORE_O above.
-$(OUT)/invfs-pack: $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
+$(OUT)/invf-pack: $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
 	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) $(LDLIBS)
 $(OBJ)/pack.o: $(SRC)/cli/pack.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -1491,7 +1490,9 @@ test-packs: all
 	$(TESTENV) $(TESTISO) bash tools/plugin-daemon-smoke.sh
 
 # e2e tier: tmpfs images under /dev/shm; test-jxl needs cjxl/djxl installed
-e2e: all
+# meta_probe is a mutating debug probe for e2e suites, not a user tool:
+# it ships in no package (off the TOOLS list) but e2e builds it.
+e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-textzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dedupe.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-heat.sh

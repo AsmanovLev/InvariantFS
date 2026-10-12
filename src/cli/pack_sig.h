@@ -1,7 +1,7 @@
 /* pack_sig.h — pack manifest signatures v1 (WP203).
  *
  * Trust model, in one paragraph: a codecpack is code the daemon executes,
- * and `invfs-pack install` fetches it from wherever the operator points
+ * and `invf-pack install` fetches it from wherever the operator points
  * it. v1 signs the MANIFEST (which carries an `integrity` line binding
  * every helper file's bytes), verifies at INSTALL time, refuses a BAD
  * signature always, and prompts on a MISSING one. Load-time re-verify is

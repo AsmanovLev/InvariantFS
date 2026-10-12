@@ -200,7 +200,7 @@ jobs:
             echo "  - fedora/rhel: sudo rpm -i invfs-*.rpm";
             echo "  - gentoo/void: ebuild/template recipes attached (source builds)";
             echo "Codec/container packs are installed manually in this release:";
-            echo "  invfs-pack install ./path/to/pack  (registry fetch: WP608, in progress)";
+            echo "  invf-pack install ./path/to/pack  (registry fetch: WP608, in progress)";
           } > assets/RELEASE-NOTES.txt
           ls assets/
       - name: publish GitHub release

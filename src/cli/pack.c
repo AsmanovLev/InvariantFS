@@ -1,16 +1,16 @@
 /*
  * pack.c — codec-pack registry manager for InvariantFS
  *
- *   invfs-pack list [--volume IMG] [--installed|-i] [family]
- *   invfs-pack info <pack>
- *   invfs-pack install [-y|-n] [--skip-signature-verification] [--volume IMG] <pack|./path>
- *   invfs-pack remove <pack>
- *   invfs-pack verify [<pack>]
- *   invfs-pack keygen [--keyring DIR] [name]
- *   invfs-pack sign --key SECFILE <pack|./path>
- *   invfs-pack alternatives <family>
- *   invfs-pack use <family> <pack>
- *   invfs-pack where
+ *   invf-pack list [--volume IMG] [--installed|-i] [family]
+ *   invf-pack info <pack>
+ *   invf-pack install [-y|-n] [--skip-signature-verification] [--volume IMG] <pack|./path>
+ *   invf-pack remove <pack>
+ *   invf-pack verify [<pack>]
+ *   invf-pack keygen [--keyring DIR] [name]
+ *   invf-pack sign --key SECFILE <pack|./path>
+ *   invf-pack alternatives <family>
+ *   invf-pack use <family> <pack>
+ *   invf-pack where
  *
  * Pack signatures v1 (WP203): `sign` binds the manifest (+ its integrity
  * line over every helper file) with ed25519 into manifest.sig; `install`
@@ -21,9 +21,13 @@
  * back to <repo>/codecpacks/index.json when the name is not installed
  * locally; `--repo file://...|https://...` overrides the built-in
  * default. Fetched files are sha256-verified against the pack listing
- * and pass the same signature gate; no bypass. `--release` switches the
- * same resolve (explicit @version or latest from index.json, no GitHub
- * API) to the registry's GitHub release .ivpack bundles
+ * and pass the same signature gate; no bypass. The default fetch is the
+ * release bundle below; `--fetch-source` opts into the raw tree
+ * (manifest + helper sources, NO binaries: a C pack installed that way
+ * does not run -- dev/audit only). `--release` is the explicit spelling
+ * of the default. In release mode the same resolve (explicit @version
+ * or latest from index.json, no GitHub API) pulls the registry's GitHub
+ * release .ivpack bundles
  * (<name>-<version>.ivpack under tag v1.1.0, see
  * registry/docs/IVPACK-RELEASES.md): the bundle is unzipped (fork+execvp
  * unzip, entry names validated before extract) into the tool scratch and
@@ -65,7 +69,7 @@
 #define MAX_PATH 1024
 #define MAX_PACKS 256
 
-/* WP608: the registry is the only network source invfs-pack speaks to.
+/* WP608: the registry is the only network source invf-pack speaks to.
  * A bare `install <name>` (no slash) that is not installed locally
  * resolves through <repo>/codecpacks/index.json, downloads the pack's
  * files into the tool scratch, sha256-verifies every file against the
@@ -559,25 +563,25 @@ static void pack_dep_hint(const char *tool)
 
 static void repo_curl_missing(void)
 {
-    fprintf(stderr, "invfs-pack: curl is required to fetch from an "
+    fprintf(stderr, "invf-pack: curl is required to fetch from an "
             "https:// registry but was not found on PATH. "
-            "invfs-pack never installs tools itself; install curl:\n");
+            "invf-pack never installs tools itself; install curl:\n");
     pack_dep_hint("curl");
 }
 
 static void repo_tar_missing(void)
 {
-    fprintf(stderr, "invfs-pack: tar is required to unpack a --release "
+    fprintf(stderr, "invf-pack: tar is required to unpack a --release "
             "tarball but was not found on PATH. "
-            "invfs-pack never installs tools itself; install tar:\n");
+            "invf-pack never installs tools itself; install tar:\n");
     pack_dep_hint("tar");
 }
 
 static void repo_unzip_missing(void)
 {
-    fprintf(stderr, "invfs-pack: unzip is required to unpack a --release "
+    fprintf(stderr, "invf-pack: unzip is required to unpack a --release "
             ".ivpack bundle but was not found on PATH. "
-            "invfs-pack never installs tools itself; install unzip:\n");
+            "invf-pack never installs tools itself; install unzip:\n");
     pack_dep_hint("unzip");
 }
 
@@ -1521,7 +1525,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         snprintf(plat, sizeof plat, "%s", platdef);
     }
     if (strstr(plat, "/") != NULL || strstr(plat, "..") != NULL) {
-        fprintf(stderr, "invfs-pack: bad --platform: %s\n", plat);
+        fprintf(stderr, "invf-pack: bad --platform: %s\n", plat);
         return -1;
     }
     if (o->rel_tag && o->rel_tag[0])
@@ -1529,14 +1533,14 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     else
         snprintf(tag, sizeof tag, "v%s", best->version);
     if (strstr(tag, "/") != NULL || strstr(tag, "..") != NULL) {
-        fprintf(stderr, "invfs-pack: bad --release-tag: %s\n", tag);
+        fprintf(stderr, "invf-pack: bad --release-tag: %s\n", tag);
         return -1;
     }
     if (snprintf(tarball, sizeof tarball, "%s-%s-%s.tar.gz", best->name,
                  best->version, plat) >= (int)sizeof tarball ||
         snprintf(top, sizeof top, "%s/%s", best->name,
                  best->version) >= (int)sizeof top) {
-        fprintf(stderr, "invfs-pack: release name too long: %s %s\n",
+        fprintf(stderr, "invf-pack: release name too long: %s %s\n",
                 best->name, best->version);
         return -1;
     }
@@ -1550,20 +1554,20 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         if (snprintf(asset_rel, sizeof asset_rel,
                      "releases/download/%s/%s", tag,
                      tarball) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
     } else {
         char base[512];
         if (snprintf(base, sizeof base, "%s/releases/download/%s",
                      DEFAULT_RELEASE_BASE, tag) >= (int)sizeof base) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
         repo_resolve(&ar, base);
         if (snprintf(asset_rel, sizeof asset_rel, "%s",
                      tarball) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
     }
@@ -1571,12 +1575,12 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
            best->version, tag, tarball, ar.base);
     /* the tarball plus its unpacked tree: size like any tool job */
     if (tool_tmpdir(scratch, sizeof scratch, 1 << 20) != 0) {
-        fprintf(stderr, "invfs-pack: no scratch available for the fetch\n");
+        fprintf(stderr, "invf-pack: no scratch available for the fetch\n");
         return -1;
     }
     if (snprintf(stage_top_out, stage_cap, "%s", scratch) >=
         (int)stage_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -1586,7 +1590,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         if (nl > 10 && strcmp(best->name + nl - 10, ".codecpack") == 0) {
             if (snprintf(dstname_out, dst_cap, "%s", best->name) >=
                 (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         best->name);
                 rmtree(scratch);
                 stage_top_out[0] = 0;
@@ -1595,7 +1599,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         } else {
             if (snprintf(dstname_out, dst_cap, "%s.codecpack",
                          best->name) >= (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         best->name);
                 rmtree(scratch);
                 stage_top_out[0] = 0;
@@ -1609,7 +1613,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         snprintf(tbpath, sizeof tbpath, "%s/pack.tar.gz",
                  scratch) >= (int)sizeof tbpath ||
         pack_mkdir_p(dl) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage under %s\n", scratch);
+        fprintf(stderr, "invf-pack: cannot stage under %s\n", scratch);
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -1620,7 +1624,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
                 *missing = 1;
             repo_curl_missing();
         } else {
-            fprintf(stderr, "invfs-pack: cannot fetch %s/%s\n"
+            fprintf(stderr, "invf-pack: cannot fetch %s/%s\n"
                     "  (release asset: check --release-tag/--platform, "
                     "or no release was ever published for this version)\n",
                     ar.base, asset_rel);
@@ -1642,7 +1646,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
                     *missing = 1;
                 repo_tar_missing();
             } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot list "
+                fprintf(stderr, "invf-pack: REFUSED: cannot list "
                         "release tarball for %s %s (corrupt "
                         "download?)\n", best->name, best->version);
             }
@@ -1658,7 +1662,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
             if (!*e)
                 continue;
             if (tar_entry_ok(e, top) != 0) {
-                fprintf(stderr, "invfs-pack: REFUSED: release tarball "
+                fprintf(stderr, "invf-pack: REFUSED: release tarball "
                         "for %s %s escapes %s: %s\n", best->name,
                         best->version, top, e);
                 free(entries);
@@ -1670,7 +1674,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         }
         free(entries);
         if (!any) {
-            fprintf(stderr, "invfs-pack: REFUSED: empty release tarball "
+            fprintf(stderr, "invf-pack: REFUSED: empty release tarball "
                     "for %s %s\n", best->name, best->version);
             rmtree(scratch);
             stage_top_out[0] = 0;
@@ -1682,7 +1686,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
                     *missing = 1;
                 repo_tar_missing();
             } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot unpack "
+                fprintf(stderr, "invf-pack: REFUSED: cannot unpack "
                         "release tarball for %s %s (corrupt "
                         "download?)\n", best->name, best->version);
             }
@@ -1693,7 +1697,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     }
     if (snprintf(topdir, sizeof topdir, "%s/%s", dl, top) >=
         (int)sizeof topdir) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -1701,7 +1705,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     {
         struct stat st;
         if (stat(topdir, &st) != 0 || !S_ISDIR(st.st_mode)) {
-            fprintf(stderr, "invfs-pack: REFUSED: release tarball for "
+            fprintf(stderr, "invf-pack: REFUSED: release tarball for "
                     "%s %s has no %s/ tree\n", best->name,
                     best->version, top);
             rmtree(scratch);
@@ -1718,7 +1722,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
                 *missing = 1;
             repo_curl_missing();
         } else {
-            fprintf(stderr, "invfs-pack: cannot fetch %s/%s to verify "
+            fprintf(stderr, "invf-pack: cannot fetch %s/%s to verify "
                     "the release tarball\n", raw->base,
                     best->sha256_rel);
         }
@@ -1728,7 +1732,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     }
     rels = (char (*)[256])malloc(sizeof *rels * MAX_REL_FILES);
     if (!rels) {
-        fprintf(stderr, "invfs-pack: out of memory\n");
+        fprintf(stderr, "invf-pack: out of memory\n");
         free(shtext);
         rmtree(scratch);
         stage_top_out[0] = 0;
@@ -1763,7 +1767,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         if (strcmp(rel, "sha256") == 0)
             continue; /* the listing itself: transport, not content */
         if (!rel[0] || strstr(rel, "..") != NULL) {
-            fprintf(stderr, "invfs-pack: bad path in sha256 listing: %s\n",
+            fprintf(stderr, "invf-pack: bad path in sha256 listing: %s\n",
                     rel);
             free(shtext);
             free(rels);
@@ -1772,7 +1776,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (!hex64_ok(expect)) {
-            fprintf(stderr, "invfs-pack: bad sha256 line for %s\n", rel);
+            fprintf(stderr, "invf-pack: bad sha256 line for %s\n", rel);
             free(shtext);
             free(rels);
             rmtree(scratch);
@@ -1781,7 +1785,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         }
         if (snprintf(dest, sizeof dest, "%s/%s", topdir,
                      rel) >= (int)sizeof dest) {
-            fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
+            fprintf(stderr, "invf-pack: path too long: %s\n", rel);
             free(shtext);
             free(rels);
             rmtree(scratch);
@@ -1789,7 +1793,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-            fprintf(stderr, "invfs-pack: REFUSED: %s %s/%s is missing "
+            fprintf(stderr, "invf-pack: REFUSED: %s %s/%s is missing "
                     "from the release tarball (tampered pack?)\n",
                     best->name, best->version, rel);
             free(shtext);
@@ -1800,7 +1804,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         }
         if (r256_file(dest, got) != 0 ||
             strcasecmp(expect, got) != 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
+            fprintf(stderr, "invf-pack: REFUSED: sha256 mismatch for "
                     "%s %s/%s (tampered pack?)\n", best->name,
                     best->version, rel);
             free(shtext);
@@ -1815,7 +1819,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
     }
     free(shtext);
     if (files == 0) {
-        fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing for "
+        fprintf(stderr, "invf-pack: REFUSED: empty sha256 listing for "
                 "'%s' (nothing verified)\n", best->name);
         free(rels);
         rmtree(scratch);
@@ -1835,12 +1839,12 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
         rc = extras_walk(topdir, &cx);
         if (rc == -2) {
             if (cx.nonregular)
-                fprintf(stderr, "invfs-pack: REFUSED: release tarball "
+                fprintf(stderr, "invf-pack: REFUSED: release tarball "
                         "for %s %s carries a non-regular file %s "
                         "(tampered pack?)\n", best->name, best->version,
                         cx.badrel);
             else
-                fprintf(stderr, "invfs-pack: REFUSED: release tarball "
+                fprintf(stderr, "invf-pack: REFUSED: release tarball "
                         "for %s %s carries unlisted file %s (tampered "
                         "pack?)\n", best->name, best->version,
                         cx.badrel);
@@ -1850,7 +1854,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (rc != 0) {
-            fprintf(stderr, "invfs-pack: cannot scan unpacked release "
+            fprintf(stderr, "invf-pack: cannot scan unpacked release "
                     "for %s %s\n", best->name, best->version);
             free(rels);
             rmtree(scratch);
@@ -1863,7 +1867,7 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
      * tree before the install handoff, exactly like the raw path. */
     if (snprintf(shpath, sizeof shpath, "%s/sha256",
                  topdir) >= (int)sizeof shpath) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -1873,20 +1877,20 @@ static int repo_fetch_tarball(const reg_pack *best, pack_repo *raw,
      * later rmtree only ever sees the verified tree */
     unlink(tbpath);
     if (rename(topdir, staged) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage release pack\n");
+        fprintf(stderr, "invf-pack: cannot stage release pack\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
     }
     if (!is_codecpack(staged)) {
-        fprintf(stderr, "invfs-pack: fetched '%s' has no manifest (not a "
+        fprintf(stderr, "invf-pack: fetched '%s' has no manifest (not a "
                 ".codecpack)\n", best->name);
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
     }
     if (snprintf(src_out, src_cap, "%s", staged) >= (int)src_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -1950,12 +1954,12 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
     else
         snprintf(tag, sizeof tag, "%s", DEFAULT_IVPACK_TAG);
     if (strstr(tag, "/") != NULL || strstr(tag, "..") != NULL) {
-        fprintf(stderr, "invfs-pack: bad --release-tag: %s\n", tag);
+        fprintf(stderr, "invf-pack: bad --release-tag: %s\n", tag);
         return -1;
     }
     if (snprintf(asset, sizeof asset, "%s-%s.ivpack", best->name,
                  best->version) >= (int)sizeof asset) {
-        fprintf(stderr, "invfs-pack: release name too long: %s %s\n",
+        fprintf(stderr, "invf-pack: release name too long: %s %s\n",
                 best->name, best->version);
         return -1;
     }
@@ -1968,32 +1972,32 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         if (snprintf(asset_rel, sizeof asset_rel,
                      "releases/download/%s/%s", tag,
                      asset) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
     } else {
         char base[512];
         if (snprintf(base, sizeof base, "%s/releases/download/%s",
                      DEFAULT_RELEASE_BASE, tag) >= (int)sizeof base) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
         repo_resolve(&ar, base);
         if (snprintf(asset_rel, sizeof asset_rel, "%s",
                      asset) >= (int)sizeof asset_rel) {
-            fprintf(stderr, "invfs-pack: release path too long\n");
+            fprintf(stderr, "invf-pack: release path too long\n");
             return -1;
         }
     }
     printf("fetching %s %s release %s/%s from %s\n", best->name,
            best->version, tag, asset, ar.base);
     if (tool_tmpdir(scratch, sizeof scratch, 1 << 20) != 0) {
-        fprintf(stderr, "invfs-pack: no scratch available for the fetch\n");
+        fprintf(stderr, "invf-pack: no scratch available for the fetch\n");
         return -1;
     }
     if (snprintf(stage_top_out, stage_cap, "%s", scratch) >=
         (int)stage_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -2003,7 +2007,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         if (nl > 10 && strcmp(best->name + nl - 10, ".codecpack") == 0) {
             if (snprintf(dstname_out, dst_cap, "%s", best->name) >=
                 (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         best->name);
                 rmtree(scratch);
                 stage_top_out[0] = 0;
@@ -2012,7 +2016,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         } else {
             if (snprintf(dstname_out, dst_cap, "%s.codecpack",
                          best->name) >= (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         best->name);
                 rmtree(scratch);
                 stage_top_out[0] = 0;
@@ -2026,7 +2030,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         snprintf(zbpath, sizeof zbpath, "%s/pack.ivpack",
                  scratch) >= (int)sizeof zbpath ||
         pack_mkdir_p(dl) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage under %s\n", scratch);
+        fprintf(stderr, "invf-pack: cannot stage under %s\n", scratch);
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -2059,7 +2063,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                     *missing = 1;
                 repo_unzip_missing();
             } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot list "
+                fprintf(stderr, "invf-pack: REFUSED: cannot list "
                         ".ivpack bundle for %s %s (corrupt "
                         "download?)\n", best->name, best->version);
             }
@@ -2075,7 +2079,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             if (!*e)
                 continue;
             if (zip_entry_ok(e) != 0) {
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
+                fprintf(stderr, "invf-pack: REFUSED: .ivpack bundle "
                         "for %s %s escapes the pack dir: %s\n", best->name,
                         best->version, e);
                 free(entries);
@@ -2087,7 +2091,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         }
         free(entries);
         if (!any) {
-            fprintf(stderr, "invfs-pack: REFUSED: empty .ivpack bundle "
+            fprintf(stderr, "invf-pack: REFUSED: empty .ivpack bundle "
                     "for %s %s\n", best->name, best->version);
             rmtree(scratch);
             stage_top_out[0] = 0;
@@ -2099,7 +2103,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                     *missing = 1;
                 repo_unzip_missing();
             } else {
-                fprintf(stderr, "invfs-pack: REFUSED: cannot unpack "
+                fprintf(stderr, "invf-pack: REFUSED: cannot unpack "
                         ".ivpack bundle for %s %s (corrupt "
                         "download?)\n", best->name, best->version);
             }
@@ -2111,14 +2115,14 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
     /* the bundle's own sha256 covers every other entry: verify first */
     if (snprintf(shpath, sizeof shpath, "%s/sha256",
                  dl) >= (int)sizeof shpath) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
     }
     shtext = pack_read_file(shpath, &shlen);
     if (!shtext) {
-        fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle for %s %s "
+        fprintf(stderr, "invf-pack: REFUSED: .ivpack bundle for %s %s "
                 "has no sha256 listing (tampered pack?)\n", best->name,
                 best->version);
         rmtree(scratch);
@@ -2127,7 +2131,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
     }
     brels = (char (*)[256])malloc(sizeof *brels * MAX_REL_FILES);
     if (!brels) {
-        fprintf(stderr, "invfs-pack: out of memory\n");
+        fprintf(stderr, "invf-pack: out of memory\n");
         free(shtext);
         rmtree(scratch);
         stage_top_out[0] = 0;
@@ -2162,7 +2166,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         if (strcmp(rel, "sha256") == 0)
             continue; /* the listing itself: transport, not content */
         if (!rel[0] || zip_entry_ok(rel) != 0) {
-            fprintf(stderr, "invfs-pack: bad path in .ivpack sha256 "
+            fprintf(stderr, "invf-pack: bad path in .ivpack sha256 "
                     "listing: %s\n", rel);
             free(shtext);
             free(brels);
@@ -2171,7 +2175,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (!hex64_ok(expect)) {
-            fprintf(stderr, "invfs-pack: bad sha256 line for %s\n", rel);
+            fprintf(stderr, "invf-pack: bad sha256 line for %s\n", rel);
             free(shtext);
             free(brels);
             rmtree(scratch);
@@ -2180,7 +2184,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         }
         if (snprintf(dest, sizeof dest, "%s/%s", dl,
                      rel) >= (int)sizeof dest) {
-            fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
+            fprintf(stderr, "invf-pack: path too long: %s\n", rel);
             free(shtext);
             free(brels);
             rmtree(scratch);
@@ -2188,7 +2192,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-            fprintf(stderr, "invfs-pack: REFUSED: %s %s/%s is missing "
+            fprintf(stderr, "invf-pack: REFUSED: %s %s/%s is missing "
                     "from the .ivpack bundle (tampered pack?)\n",
                     best->name, best->version, rel);
             free(shtext);
@@ -2199,7 +2203,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         }
         if (r256_file(dest, got) != 0 ||
             strcasecmp(expect, got) != 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
+            fprintf(stderr, "invf-pack: REFUSED: sha256 mismatch for "
                     "%s %s/%s (tampered pack?)\n", best->name,
                     best->version, rel);
             free(shtext);
@@ -2214,7 +2218,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
     }
     free(shtext);
     if (bfiles == 0) {
-        fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing in "
+        fprintf(stderr, "invf-pack: REFUSED: empty sha256 listing in "
                 ".ivpack bundle for '%s' (nothing verified)\n", best->name);
         free(brels);
         rmtree(scratch);
@@ -2234,12 +2238,12 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         rc = extras_walk(dl, &cx);
         if (rc == -2) {
             if (cx.nonregular)
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
+                fprintf(stderr, "invf-pack: REFUSED: .ivpack bundle "
                         "for %s %s carries a non-regular file %s "
                         "(tampered pack?)\n", best->name, best->version,
                         cx.badrel);
             else
-                fprintf(stderr, "invfs-pack: REFUSED: .ivpack bundle "
+                fprintf(stderr, "invf-pack: REFUSED: .ivpack bundle "
                         "for %s %s carries unlisted file %s (tampered "
                         "pack?)\n", best->name, best->version,
                         cx.badrel);
@@ -2249,7 +2253,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             return -1;
         }
         if (rc != 0) {
-            fprintf(stderr, "invfs-pack: cannot scan unpacked .ivpack "
+            fprintf(stderr, "invf-pack: cannot scan unpacked .ivpack "
                     "for %s %s\n", best->name, best->version);
             free(brels);
             rmtree(scratch);
@@ -2275,7 +2279,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                     *missing = 1;
                 repo_curl_missing();
             } else {
-                fprintf(stderr, "invfs-pack: cannot fetch %s/%s to verify "
+                fprintf(stderr, "invf-pack: cannot fetch %s/%s to verify "
                         "the .ivpack bundle\n", raw->base,
                         best->sha256_rel);
             }
@@ -2315,7 +2319,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                 continue; /* v1.1.0 ships no sig sidecar: the WP203
                            * gate below takes the missing-signature path */
             if (!rel[0] || zip_entry_ok(rel) != 0) {
-                fprintf(stderr, "invfs-pack: bad path in sha256 "
+                fprintf(stderr, "invf-pack: bad path in sha256 "
                         "listing: %s\n", rel);
                 free(rshtext);
                 rmtree(scratch);
@@ -2323,7 +2327,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                 return -1;
             }
             if (!hex64_ok(expect)) {
-                fprintf(stderr, "invfs-pack: bad sha256 line for %s\n",
+                fprintf(stderr, "invf-pack: bad sha256 line for %s\n",
                         rel);
                 free(rshtext);
                 rmtree(scratch);
@@ -2332,14 +2336,14 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             }
             if (snprintf(dest, sizeof dest, "%s/%s", dl,
                          rel) >= (int)sizeof dest) {
-                fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
+                fprintf(stderr, "invf-pack: path too long: %s\n", rel);
                 free(rshtext);
                 rmtree(scratch);
                 stage_top_out[0] = 0;
                 return -1;
             }
             if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-                fprintf(stderr, "invfs-pack: REFUSED: %s %s/%s is missing "
+                fprintf(stderr, "invf-pack: REFUSED: %s %s/%s is missing "
                         "from the .ivpack bundle (tampered pack?)\n",
                         best->name, best->version, rel);
                 free(rshtext);
@@ -2349,7 +2353,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
             }
             if (r256_file(dest, got) != 0 ||
                 strcasecmp(expect, got) != 0) {
-                fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
+                fprintf(stderr, "invf-pack: REFUSED: sha256 mismatch for "
                         "%s %s/%s (tampered pack?)\n", best->name,
                         best->version, rel);
                 free(rshtext);
@@ -2361,7 +2365,7 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
         }
         free(rshtext);
         if (rfiles == 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing for "
+            fprintf(stderr, "invf-pack: REFUSED: empty sha256 listing for "
                     "'%s' (nothing verified)\n", best->name);
             rmtree(scratch);
             stage_top_out[0] = 0;
@@ -2376,20 +2380,20 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
      * later rmtree only ever sees the verified tree */
     unlink(zbpath);
     if (rename(dl, staged) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage .ivpack pack\n");
+        fprintf(stderr, "invf-pack: cannot stage .ivpack pack\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
     }
     if (!is_codecpack(staged)) {
-        fprintf(stderr, "invfs-pack: fetched '%s' has no manifest (not a "
+        fprintf(stderr, "invf-pack: fetched '%s' has no manifest (not a "
                 ".codecpack)\n", best->name);
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
     }
     if (snprintf(src_out, src_cap, "%s", staged) >= (int)src_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         rmtree(scratch);
         stage_top_out[0] = 0;
         return -1;
@@ -2425,7 +2429,7 @@ static int repo_fetch_release(const reg_pack *best, pack_repo *raw,
             snprintf(tag, sizeof tag, "%s", o->rel_tag);
         else
             snprintf(tag, sizeof tag, "%s", DEFAULT_IVPACK_TAG);
-        fprintf(stderr, "invfs-pack: no .ivpack asset for %s %s under "
+        fprintf(stderr, "invf-pack: no .ivpack asset for %s %s under "
                 "tag %s; falling back to the release tarball\n",
                 best->name, best->version, tag);
         rc = repo_fetch_tarball(best, raw, repo_spec, o, src_out, src_cap,
@@ -2476,19 +2480,19 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         if (miss)
             repo_curl_missing();
         else
-            fprintf(stderr, "invfs-pack: registry unreachable: no "
+            fprintf(stderr, "invf-pack: registry unreachable: no "
                     "codecpacks/index.json under %s%s\n", r.http ? "" : "file://", r.base);
         return -1;
     }
     best = repo_pick(packs, npacks, name, o ? o->want_ver : NULL);
     if (o && o->want_ver && *o->want_ver && !best) {
-        fprintf(stderr, "invfs-pack: pack '%s' version '%s' not found "
+        fprintf(stderr, "invf-pack: pack '%s' version '%s' not found "
                 "in registry %s\n", name, o->want_ver, r.base);
         free(packs);
         return -1;
     }
     if (!best) {
-        fprintf(stderr, "invfs-pack: pack '%s' not found in registry %s\n",
+        fprintf(stderr, "invf-pack: pack '%s' not found in registry %s\n",
                 name, r.base);
         free(packs);
         return -1;
@@ -2505,13 +2509,13 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
            best->version[0] ? best->version : "?", r.base);
     /* stage in the tool scratch (sized like any other tool job) */
     if (tool_tmpdir(scratch, sizeof scratch, 65536) != 0) {
-        fprintf(stderr, "invfs-pack: no scratch available for the fetch\n");
+        fprintf(stderr, "invf-pack: no scratch available for the fetch\n");
         free(packs);
         return -1;
     }
     if (snprintf(stage_top_out, stage_cap, "%s", scratch) >=
         (int)stage_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         free(packs);
         return -1;
     }
@@ -2520,7 +2524,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         if (nl > 10 && strcmp(name + nl - 10, ".codecpack") == 0) {
             if (snprintf(dstname_out, dst_cap, "%s", name) >=
                 (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         name);
                 free(packs);
                 return -1;
@@ -2528,7 +2532,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         } else {
             if (snprintf(dstname_out, dst_cap, "%s.codecpack", name) >=
                 (int)dst_cap) {
-                fprintf(stderr, "invfs-pack: pack name too long: %s\n",
+                fprintf(stderr, "invf-pack: pack name too long: %s\n",
                         name);
                 free(packs);
                 return -1;
@@ -2538,7 +2542,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     if (snprintf(staged, sizeof staged, "%s/%s", scratch,
                  dstname_out) >= (int)sizeof staged ||
         pack_mkdir_p(staged) != 0) {
-        fprintf(stderr, "invfs-pack: cannot stage under %s\n", scratch);
+        fprintf(stderr, "invf-pack: cannot stage under %s\n", scratch);
         free(packs);
         return -1;
     }
@@ -2548,7 +2552,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         const char *slash = strrchr(best->sha256_rel, '/');
         size_t dl = slash ? (size_t)(slash - best->sha256_rel) : 0;
         if (dl == 0 || dl >= sizeof packdir_rel) {
-            fprintf(stderr, "invfs-pack: bad sha256 path in index for "
+            fprintf(stderr, "invf-pack: bad sha256 path in index for "
                     "'%s'\n", name);
             free(packs);
             return -1;
@@ -2558,7 +2562,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     }
     if (snprintf(shpath, sizeof shpath, "%s/sha256", staged) >=
         (int)sizeof shpath) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         free(packs);
         return -1;
     }
@@ -2568,7 +2572,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
                 *missing = 1;
             repo_curl_missing();
         } else {
-            fprintf(stderr, "invfs-pack: cannot fetch %s/%s\n",
+            fprintf(stderr, "invf-pack: cannot fetch %s/%s\n",
                     r.base, best->sha256_rel);
         }
         free(packs);
@@ -2576,7 +2580,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     }
     shtext = pack_read_file(shpath, &shlen);
     if (!shtext) {
-        fprintf(stderr, "invfs-pack: cannot read fetched sha256\n");
+        fprintf(stderr, "invf-pack: cannot read fetched sha256\n");
         free(packs);
         return -1;
     }
@@ -2609,14 +2613,14 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         if (strcmp(rel, "sha256") == 0)
             continue; /* the listing itself: already fetched, not content */
         if (!rel[0] || strstr(rel, "..") != NULL) {
-            fprintf(stderr, "invfs-pack: bad path in sha256 listing: %s\n",
+            fprintf(stderr, "invf-pack: bad path in sha256 listing: %s\n",
                     rel);
             free(shtext);
             free(packs);
             return -1;
         }
         if (!hex64_ok(expect)) {
-            fprintf(stderr, "invfs-pack: bad sha256 line for %s\n", rel);
+            fprintf(stderr, "invf-pack: bad sha256 line for %s\n", rel);
             free(shtext);
             free(packs);
             return -1;
@@ -2625,7 +2629,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
             (int)sizeof full ||
             snprintf(dest, sizeof dest, "%s/%s", staged, rel) >=
             (int)sizeof dest) {
-            fprintf(stderr, "invfs-pack: path too long: %s\n", rel);
+            fprintf(stderr, "invf-pack: path too long: %s\n", rel);
             free(shtext);
             free(packs);
             return -1;
@@ -2635,7 +2639,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
             if (slash && slash != dest) {
                 *slash = 0;
                 if (pack_mkdir_p(dest) != 0) {
-                    fprintf(stderr, "invfs-pack: cannot stage %s\n", rel);
+                    fprintf(stderr, "invf-pack: cannot stage %s\n", rel);
                     free(shtext);
                     free(packs);
                     return -1;
@@ -2649,7 +2653,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
                     *missing = 1;
                 repo_curl_missing();
             } else {
-                fprintf(stderr, "invfs-pack: cannot fetch %s/%s\n",
+                fprintf(stderr, "invf-pack: cannot fetch %s/%s\n",
                         r.base, full);
             }
             free(shtext);
@@ -2658,7 +2662,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
         }
         if (r256_file(dest, got) != 0 ||
             strcasecmp(expect, got) != 0) {
-            fprintf(stderr, "invfs-pack: REFUSED: sha256 mismatch for "
+            fprintf(stderr, "invf-pack: REFUSED: sha256 mismatch for "
                     "%s %s/%s (tampered pack?)\n", best->name,
                     best->version, rel);
             free(shtext);
@@ -2669,7 +2673,7 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
     }
     free(shtext);
     if (files == 0) {
-        fprintf(stderr, "invfs-pack: REFUSED: empty sha256 listing for "
+        fprintf(stderr, "invf-pack: REFUSED: empty sha256 listing for "
                 "'%s' (nothing verified)\n", name);
         free(packs);
         return -1;
@@ -2681,13 +2685,13 @@ static int repo_fetch_pack(const char *name, const char *repo_spec,
      * staged set is exactly the signed set. */
     unlink(shpath);
     if (!is_codecpack(staged)) {
-        fprintf(stderr, "invfs-pack: fetched '%s' has no manifest (not a "
+        fprintf(stderr, "invf-pack: fetched '%s' has no manifest (not a "
                 ".codecpack)\n", name);
         free(packs);
         return -1;
     }
     if (snprintf(src_out, src_cap, "%s", staged) >= (int)src_cap) {
-        fprintf(stderr, "invfs-pack: scratch path too long\n");
+        fprintf(stderr, "invf-pack: scratch path too long\n");
         free(packs);
         return -1;
     }
@@ -3285,7 +3289,7 @@ static void write_source_marker_file(const char *path, const char *kind)
 {
     FILE *f = fopen(path, "w");
     if (!f) {
-        fprintf(stderr, "invfs-pack: warning: cannot record install "
+        fprintf(stderr, "invf-pack: warning: cannot record install "
                 "source in %s: %s\n", path, strerror(errno));
         return;
     }
@@ -3314,7 +3318,7 @@ static int cmd_install_volume(const char *src, const char *dstname,
                                const char *volume, int overwrite,
                                int dry_run, const char *srckind)
 {
-    char stage[] = "/tmp/invfs-pack-XXXXXX";
+    char stage[] = "/tmp/invf-pack-XXXXXX";
     char sub[MAX_PATH], dest[MAX_PATH], import[MAX_PATH];
     char mpath[MAX_PATH + 64];
     int err = 0;
@@ -3445,7 +3449,7 @@ static void resolve_keyring(char *out, size_t cap)
 
 static int cmd_install(const char *name, int overwrite, int dry_run,
                        const char *volume, int skip_sig,
-                       const char *repo_spec, int release,
+                       const char *repo_spec, int release, int release_given,
                        const char *rel_tag, const char *platform)
 {
     char src[MAX_PATH];
@@ -3457,11 +3461,11 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
     int rc;
     stage_top[0] = 0;
     if (!release && ((rel_tag && *rel_tag) || (platform && *platform)))
-        fprintf(stderr, "invfs-pack: note: --release-tag/--platform "
+        fprintf(stderr, "invf-pack: note: --release-tag/--platform "
                 "need --release; ignoring them\n");
     if (strchr(name, '/')) {
-        if (release) {
-            fprintf(stderr, "invfs-pack: --release takes a registry pack "
+        if (release_given) {
+            fprintf(stderr, "invf-pack: --release takes a registry pack "
                     "name, not a path: %s\n", name);
             return 1;
         }
@@ -3475,7 +3479,7 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
         int missing = 0;
         if (split_namever(name, base, sizeof base, want,
                           sizeof want) != 0) {
-            fprintf(stderr, "invfs-pack: bad pack name '%s' "
+            fprintf(stderr, "invf-pack: bad pack name '%s' "
                     "(want <name>[@<version>])\n", name);
             return 1;
         }
@@ -3648,7 +3652,7 @@ static int cmd_sign(const char *keyfile, const char *target)
     char err[512];
     if (!keyfile || !target) {
         fprintf(stderr,
-                "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+                "usage: invf-pack sign --key SECFILE <pack|./path>\n");
         return 2;
     }
     if (resolve_pack_source(target, src, sizeof src, dstname,
@@ -3903,27 +3907,32 @@ static void cmd_use(const char *family, const char *pack)
 static void usage(void)
 {
     fprintf(stderr,
-        "usage: invfs-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n"
-        "       invfs-pack info <pack>\n"
-        "       invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n"
-        "       invfs-pack remove <pack>\n"
-        "       invfs-pack verify [<pack>]\n"
-        "       invfs-pack keygen [--keyring DIR] [name]\n"
-        "       invfs-pack sign --key SECFILE <pack|./path>\n"
-        "       invfs-pack alternatives <family>\n"
-        "       invfs-pack use <family> <pack>\n"
-        "       invfs-pack where [--repo URL]\n"
+        "usage: invf-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n"
+        "       invf-pack info <pack>\n"
+        "       invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n"
+        "       invf-pack remove <pack>\n"
+        "       invf-pack verify [<pack>]\n"
+        "       invf-pack keygen [--keyring DIR] [name]\n"
+        "       invf-pack sign --key SECFILE <pack|./path>\n"
+        "       invf-pack alternatives <family>\n"
+        "       invf-pack use <family> <pack>\n"
+        "       invf-pack where [--repo URL]\n"
         "\n"
         "registry (bare names): `install <name>` (no slash) that is not\n"
-        "installed locally resolves through <repo>/codecpacks/index.json,\n"
-        "downloads into the tool scratch, sha256-verifies every file, and\n"
-        "installs through the same signature gate below. `name@version`\n"
-        "pins the version and always resolves through the registry (never\n"
-        "the local roots); a version that is not in the index fails loud.\n"
-        "--release fetches the pack's .ivpack bundle\n"
-        "<name>-<version>.ivpack from the registry's GitHub\n"
-        "release assets instead of the raw tree (default tag v1.1.0;\n"
-        "--release-tag overrides). The bundle is unzipped into the tool\n"
+        "installed locally installs the runnable release bundle by default:\n"
+        "the pack's .ivpack <name>-<version>.ivpack from the registry's\n"
+        "GitHub release assets (default tag v1.1.0; --release-tag\n"
+        "overrides), tarball fallback with one loud line when the pack\n"
+        "has no .ivpack. `name@version` pins the version and always\n"
+        "resolves through the registry (never the local roots); a version\n"
+        "that is not in the index fails loud. --release is the explicit\n"
+        "spelling of this default. --fetch-source opts into the raw tree\n"
+        "instead (dev/audit: manifest + helper sources, NO binaries -- a\n"
+        "C pack installed this way does not run; production installs use\n"
+        "the default). Both modes resolve through\n"
+        "<repo>/codecpacks/index.json, download into the tool scratch,\n"
+        "sha256-verify every file, and install through the same signature\n"
+        "gate below. The bundle is unzipped into the tool\n"
         "scratch (needs unzip on PATH; entry names are validated before\n"
         "extract, symlinks/special files refused) and the extracted files\n"
         "are verified against the raw-tree sha256 listing plus the same\n"
@@ -3986,12 +3995,12 @@ int main(int argc, char **argv)
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--repo") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack where [--repo URL]\n");
+                    fprintf(stderr, "usage: invf-pack where [--repo URL]\n");
                     return 2;
                 }
                 repo = argv[i];
             } else {
-                fprintf(stderr, "usage: invfs-pack where [--repo URL]\n");
+                fprintf(stderr, "usage: invf-pack where [--repo URL]\n");
                 return 2;
             }
         }
@@ -4006,14 +4015,14 @@ int main(int argc, char **argv)
                 installed_only = 1;
             else if (strcmp(argv[i], "--volume") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
+                    fprintf(stderr, "usage: invf-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
                     return 2;
                 }
                 volume = argv[i];
             }
             else if (strcmp(argv[i], "--repo") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
+                    fprintf(stderr, "usage: invf-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
                     return 2;
                 }
                 repo = argv[i];
@@ -4021,7 +4030,7 @@ int main(int argc, char **argv)
             else if (!family[0])
                 family = argv[i];
             else {
-                fprintf(stderr, "usage: invfs-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
+                fprintf(stderr, "usage: invf-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n");
                 return 2;
             }
         }
@@ -4030,10 +4039,11 @@ int main(int argc, char **argv)
         else
             cmd_list(family, installed_only, repo);
     } else if (strcmp(cmd, "info") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: invfs-pack info <pack>\n"); return 2; }
+        if (argc < 3) { fprintf(stderr, "usage: invf-pack info <pack>\n"); return 2; }
         cmd_info(argv[2]);
     } else if (strcmp(cmd, "install") == 0) {
         int overwrite = 0, dry_run = 0, skip_sig = 0, release = 0;
+        int release_given = 0, fetch_src = 0;
         const char *target = NULL;
         const char *volume = NULL;
         const char *repo = NULL;
@@ -4048,30 +4058,34 @@ int main(int argc, char **argv)
                 skip_sig = 1;
             else if (strcmp(argv[i], "--volume") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n");
+                    fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n");
                     return 2;
                 }
                 volume = argv[i];
             }
             else if (strcmp(argv[i], "--repo") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n");
+                    fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n");
                     return 2;
                 }
                 repo = argv[i];
             }
-            else if (strcmp(argv[i], "--release") == 0)
+            else if (strcmp(argv[i], "--release") == 0) {
                 release = 1;
+                release_given = 1;
+            }
+            else if (strcmp(argv[i], "--fetch-source") == 0)
+                fetch_src = 1;
             else if (strcmp(argv[i], "--release-tag") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n");
+                    fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n");
                     return 2;
                 }
                 rel_tag = argv[i];
             }
             else if (strcmp(argv[i], "--platform") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n");
+                    fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n");
                     return 2;
                 }
                 platform = argv[i];
@@ -4079,19 +4093,29 @@ int main(int argc, char **argv)
             else if (!target)
                 target = argv[i];
             else {
-                fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n");
+                fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n");
                 return 2;
             }
         }
-        if (!target) { fprintf(stderr, "usage: invfs-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT]] <pack[@version]|./path>\n"); return 2; }
-        return cmd_install(target, overwrite, dry_run, volume, skip_sig, repo, release, rel_tag, platform);
+        if (release_given && fetch_src) {
+            fprintf(stderr, "usage: invf-pack install: --release and --fetch-source contradict each other\n");
+            return 2;
+        }
+        /* Release is the default: registry names install runnable bundles
+         * (.ivpack, tarball fallback). --fetch-source opts into raw-tree
+         * sources (dev/audit: manifests + helper sources, no binaries).
+         * --release stays accepted as the explicit default. */
+        if (!release_given)
+            release = !fetch_src;
+        if (!target) { fprintf(stderr, "usage: invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n"); return 2; }
+        return cmd_install(target, overwrite, dry_run, volume, skip_sig, repo, release, release_given, rel_tag, platform);
     } else if (strcmp(cmd, "keygen") == 0) {
         const char *keyring = NULL;
         const char *name = NULL;
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--keyring") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack keygen [--keyring DIR] [name]\n");
+                    fprintf(stderr, "usage: invf-pack keygen [--keyring DIR] [name]\n");
                     return 2;
                 }
                 keyring = argv[i];
@@ -4099,7 +4123,7 @@ int main(int argc, char **argv)
             else if (!name)
                 name = argv[i];
             else {
-                fprintf(stderr, "usage: invfs-pack keygen [--keyring DIR] [name]\n");
+                fprintf(stderr, "usage: invf-pack keygen [--keyring DIR] [name]\n");
                 return 2;
             }
         }
@@ -4110,7 +4134,7 @@ int main(int argc, char **argv)
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "--key") == 0) {
                 if (++i >= argc) {
-                    fprintf(stderr, "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+                    fprintf(stderr, "usage: invf-pack sign --key SECFILE <pack|./path>\n");
                     return 2;
                 }
                 keyfile = argv[i];
@@ -4118,21 +4142,21 @@ int main(int argc, char **argv)
             else if (!target)
                 target = argv[i];
             else {
-                fprintf(stderr, "usage: invfs-pack sign --key SECFILE <pack|./path>\n");
+                fprintf(stderr, "usage: invf-pack sign --key SECFILE <pack|./path>\n");
                 return 2;
             }
         }
         return cmd_sign(keyfile, target);
     } else if (strcmp(cmd, "remove") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: invfs-pack remove <pack>\n"); return 2; }
+        if (argc < 3) { fprintf(stderr, "usage: invf-pack remove <pack>\n"); return 2; }
         cmd_remove(argv[2]);
     } else if (strcmp(cmd, "verify") == 0) {
         return cmd_verify(argc > 2 ? argv[2] : NULL);
     } else if (strcmp(cmd, "alternatives") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: invfs-pack alternatives <family>\n"); return 2; }
+        if (argc < 3) { fprintf(stderr, "usage: invf-pack alternatives <family>\n"); return 2; }
         cmd_alternatives(argv[2]);
     } else if (strcmp(cmd, "use") == 0) {
-        if (argc < 4) { fprintf(stderr, "usage: invfs-pack use <family> <pack>\n"); return 2; }
+        if (argc < 4) { fprintf(stderr, "usage: invf-pack use <family> <pack>\n"); return 2; }
         cmd_use(argv[2], argv[3]);
     } else {
         fprintf(stderr, "unknown command: %s\n", cmd);

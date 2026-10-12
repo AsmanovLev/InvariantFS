@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-pack-volume.sh -- invfs-pack --volume (install/list packs on an
+# test-pack-volume.sh -- invf-pack --volume (install/list packs on an
 # offline volume image) e2e.
 #
 # Leg 1 (install): a script-helper pack installs onto the image; list
@@ -44,24 +44,24 @@ printf '#!/bin/sh\ncp "$1" "$2"\n' > "$WORK/src/.invariantfs/codecpacks/vxp.code
 chmod 755 "$WORK/src/.invariantfs/codecpacks/vxp.codecpack/bin/enc" \
           "$WORK/src/.invariantfs/codecpacks/vxp.codecpack/bin/dec"
 $B/invf-mkfs "$IMG" 1 >/dev/null
-$B/invfs-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invf-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     || fail "install --volume rc=$?"
-$B/invfs-pack list --volume "$IMG" > "$WORK/list.txt" \
+$B/invf-pack list --volume "$IMG" > "$WORK/list.txt" \
     || fail "list --volume rc=$?"
 grep -q "vxp" "$WORK/list.txt" || fail "leg1: vxp not listed"
 grep -q "volume:$IMG" "$WORK/list.txt" || fail "leg1: no volume: source"
-$B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
+$B/invf-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg1: pack count"
 
 echo "== [2] refusals =="
-$B/invfs-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invf-pack install --skip-signature-verification --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     >/dev/null 2>&1 || RC=$?
 [ "${RC:-0}" -ne 0 ] || fail "leg2: duplicate rc=0 without -y"
-$B/invfs-pack install --skip-signature-verification -n --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invf-pack install --skip-signature-verification -n --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     | grep -q "would import" || fail "leg2: -n output"
-$B/invfs-pack install --skip-signature-verification -y --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
+$B/invf-pack install --skip-signature-verification -y --volume "$IMG" "$WORK/src/.invariantfs/codecpacks/vxp.codecpack" \
     >/dev/null || fail "leg2: -y re-import rc=$?"
-$B/invfs-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
+$B/invf-pack list --volume "$IMG" 2>&1 | grep -q "1 pack(s)" \
     || fail "leg2: pack count after -y"
 
 echo "== [3] volume clean, host untouched =="

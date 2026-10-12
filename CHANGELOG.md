@@ -2,6 +2,20 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [Unreleased] (toward v0.6.2)
+
+### Changed
+- `install` defaults to the release bundle (`.ivpack`, tarball fallback);
+  raw-tree sources are now opt-in via `install --fetch-source` (dev/audit:
+  manifests + helper sources, no binaries -- a C pack installed that way
+  does not run).
+- Pack manager renamed `invfs-pack` -> `invf-pack` (one family prefix).
+  Clean break, no compat shim (v0.x): update scripts. Side effect fixed:
+  the old name silently dropped the manager from every install.sh-driven
+  package (deb/rpm/Arch/tarball installs had no pack manager at all).
+- `meta_probe` (mutating debug probe) no longer ships in the release
+  tarball/packages; e2e still builds it for its suites.
+
 ## [v0.6.1] - 2026-10-12
 
 Pack registry fetch (WP608) + per-distro release pipeline.

@@ -133,33 +133,33 @@ do not resolve -- use device paths (the initramfs identifies volumes with
 
 ---
 
-## 9. Codec Packs: `invfs-pack` (signed installs)
+## 9. Codec Packs: `invf-pack` (signed installs)
 
-A codecpack is code the daemon executes, so `invfs-pack install` verifies
+A codecpack is code the daemon executes, so `invf-pack install` verifies
 it first. Signing is ed25519 over the manifest (which carries an
 `integrity` line binding every helper file's bytes), implemented by
 `src/cli/pack_sig.c` over the vendored TweetNaCl in `src/codecs/ed25519.c`:
 
 ```bash
 # One-time: make a signing key (secret is 0600; publish the .pub)
-bin/invfs-pack keygen
+bin/invf-pack keygen
 # -> $HOME/.config/invfs/keys/default.sec + default.pub
 # ($INVFS_KEYRING overrides the keyring dir)
 
 # Sign a pack dir (writes the integrity binding + manifest.sig)
-bin/invfs-pack sign --key ~/.config/invfs/keys/default.sec ./my.codecpack
+bin/invf-pack sign --key ~/.config/invfs/keys/default.sec ./my.codecpack
 
 # Install: signed+trusted installs; BAD signature REFUSES, always, no knob
-bin/invfs-pack install ./my.codecpack
-bin/invfs-pack install --volume volume.img ./my.codecpack
+bin/invf-pack install ./my.codecpack
+bin/invf-pack install --volume volume.img ./my.codecpack
 
 # No signature? The install prompts `Install unsigned pack? [y/N]`.
 # -y answers yes, -n (dry-run) reports and installs nothing,
 # --skip-signature-verification proceeds (scripts).
-bin/invfs-pack install --skip-signature-verification ./legacy.codecpack
+bin/invf-pack install --skip-signature-verification ./legacy.codecpack
 
 # Audit what is installed (SIG-OK / UNSIGNED / BAD per pack)
-bin/invfs-pack verify
+bin/invf-pack verify
 ```
 
 Rules: the gate runs before EITHER target (host root or `--volume`
