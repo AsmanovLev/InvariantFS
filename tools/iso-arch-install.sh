@@ -63,8 +63,12 @@ sudo umount "$MNT"
 
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
-ART=$(ls "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
+ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
 cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/PKGBUILD" "$REPO/tools/iso-guest-arch-setup.sh" "$REPO/bin/busybox-static" "$SERVEDIR/"
+ABASE=$(basename "$ART" .tar.zst)
+# The guest script must never pin a version: point its artifact
+# references at the tree under test (served copy only).
+sed -i "s/invfs-v[0-9.][0-9.]*-x86_64/$ABASE/g" "$SERVEDIR/iso-guest-arch-setup.sh"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
 if [ "$ACCEL" = auto ]; then

@@ -42,6 +42,8 @@ trap 'done_rc=$?; finish' EXIT
   done ) &
 id builder >/dev/null 2>&1 || useradd -m builder
 mkdir -p "$B"
+# NOTE: the version below is a template default -- the host install
+# script rewrites it to the artifact under test before serving.
 for f in PKGBUILD invfs-v0.6.0-x86_64.tar.zst SHA256SUMS; do
     curl -fsS -o "$B/$f" "$SRV/$f" || exit 1
 done

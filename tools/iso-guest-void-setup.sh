@@ -78,6 +78,8 @@ say "proc/sys mounted, /dev/fuse present"
     sleep 60
   done ) &
 mkdir -p "$B"
+# NOTE: the version below is a template default -- the host install
+# script rewrites it to the artifact under test before serving.
 for f in invfs-v0.6.0-x86_64.tar.zst SHA256SUMS; do
     fetch "$SRV/$f" "$B/$f" || exit 1
 done

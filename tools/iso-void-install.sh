@@ -85,8 +85,12 @@ sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-void" "$WORK/initramfs-void.img"
 
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
-ART=$(ls "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
+ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
 cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/tools/iso-guest-void-setup.sh" "$SERVEDIR/"
+ABASE=$(basename "$ART" .tar.zst)
+# The guest script must never pin a version: point its artifact
+# references at the tree under test (served copy only).
+sed -i "s/invfs-v[0-9.][0-9.]*-x86_64/$ABASE/g" "$SERVEDIR/iso-guest-void-setup.sh"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
 if [ "$ACCEL" = auto ]; then
