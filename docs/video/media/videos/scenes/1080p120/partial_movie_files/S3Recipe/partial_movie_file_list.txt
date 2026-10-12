@@ -1,8 +1,0 @@
-# This file records the segment order used by Manim.
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/96b67fa29647db0e2b2268f80beb46522f99cc3c6b0ad7bb7e406faf3a9b2cd0.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/78a93740c93e67f8fe04ca61fa5971ad8e2fd955fc5300230b17d42e1d610233.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/a7d538fe5c18b48053348f731ef77188b24ab4de4b42b9c6d7aa2a6e2983d600.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/80c108c6270d82cd44ab6dcdfb776799f8a9e00382e36271429f404a9744776a.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/23799b7cd086b1041472742e778d4e2da4ecfb02a123f9f0fa2beedf233ad64d.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/e96ae4ea69d92afc3b92e81ba9c965369c20503705ce038e38eca27f245b989b.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/1080p120/partial_movie_files/S3Recipe/ea62b32aa89b3efc232b5aafa8a742a21fe50c1e3b82c9cd7b738811b05155d3.mp4'

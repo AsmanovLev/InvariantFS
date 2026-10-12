@@ -1,7 +1,0 @@
-# This file records the segment order used by Manim.
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/40fc80596f49a08880a7bbc58d63a9586a291370ccaf48dcc1012d222f548b89.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/2cfbca51db71a290f62de4cc1f17f32a0397051ce1d7a89fefdbb9feeb98fe76.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/f5ebf6bfece51ea33eeae9d84d3c1c092be9b35ec5f84f1e210bc9b5bd0a3cf5.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/efa4737b80f1d12bf62b8141ff8b24da243680cfaa807971143568d1c3ca4248.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/086fbf99c2a870473cab4f00e37c81c31c21b73282b8c2d7b98c3850f80de287.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S2Problem/d611e2dd9645b91968d8a31a2acde22527e8babc0f464a132c46abf5fdf5c116.mp4'

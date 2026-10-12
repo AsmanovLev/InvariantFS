@@ -1,5 +1,0 @@
-# This file records the segment order used by Manim.
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S1Hook/7e6001407649ab09e998d0f28e354a1a98be96269ba3660577c25a3d9023336c.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S1Hook/1cccd992cef8cae2be160a5ac4096b81c6c19bba6e53a4ae31044ccea9cb7227.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S1Hook/d37ddbd0f53203535fb53f231bb1ddd8e3ca16dda9204e01657a1dd2ad95b033.mp4'
-file 'file:/home/user/InvariantFS-main/docs/video/media/videos/scenes/720p30/partial_movie_files/S1Hook/5b591d1c14144fb271c56d0c706291d42db7c2ce4b50d64ad5edb878297990e5.mp4'
