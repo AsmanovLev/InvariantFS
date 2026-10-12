@@ -50,6 +50,10 @@ PROBES = [
                    "-p NRestarts -p After --no-pager"),
     ("machine-id", "echo machine-id=$(cat /etc/machine-id 2>&1); ls -l /run/dbus 2>&1; ls -ld /var/lib/dbus 2>&1"),
     ("dbus-bin", "command -v dbus-daemon; dbus-daemon --version 2>&1 | head -2"),
+    # WP611 deliverable: a real bus CLIENT round-trip, not just the unit
+    # state. `systemctl status` can read green while nothing can talk to the
+    # daemon (socket present, daemon wedged); busctl proves the bus answers.
+    ("bus-roundtrip", "busctl --system list --no-pager 2>&1 | head -10"),
     # Is multi-user ACTUALLY unreached, or did systemd complete and merely fail
     # to PRINT it? `list-jobs` came back empty -- no pending jobs -- which is
     # not what a boot waiting on something looks like. The serial log is the

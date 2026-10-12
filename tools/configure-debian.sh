@@ -116,12 +116,16 @@ EOF
 # carrier, no DHCP lease, and not one networking line in the serial log. The
 # wants symlink is what actually starts the service; writing config without it
 # is the systemd equivalent of writing an fstab entry for a unit that is off.
-mkdir -p "$E/etc/systemd/system/sys-subsystem-networking.target.wants"
-ln -sfn /usr/lib/systemd/systemd-networkd.service \
-        "$E/etc/systemd/system/sys-subsystem-networking.target.wants/systemd-networkd.service"
-# sys-subsystem-network.target is the other alias some units hang off; the
-# wants dir is harmless if unused and avoids a "unit not found" on older roots.
-mkdir -p "$E/etc/systemd/system/sys-subsystem-network.target.wants"
+# WP611: enable via the unit's own [Install] section (WantedBy=
+# multi-user.target, unit file at /usr/lib/systemd/system/ on merged-usr
+# Debian). The previous revision symlinked a nonexistent
+# sys-subsystem-networking.target.wants/ dir at a unit path missing the
+# /system/ component, so networkd never started and sshd stayed unreachable.
+rm -rf "$E/etc/systemd/system/sys-subsystem-networking.target.wants" \
+       "$E/etc/systemd/system/sys-subsystem-network.target.wants"
+mkdir -p "$E/etc/systemd/system/multi-user.target.wants"
+ln -sfn /usr/lib/systemd/system/systemd-networkd.service \
+        "$E/etc/systemd/system/multi-user.target.wants/systemd-networkd.service"
 
 # --- sshd (optional; the harness uses it to assert the root is alive) -------
 if [ "$WITH_SSHD" = "sshd" ]; then
@@ -140,8 +144,15 @@ if [ "$WITH_SSHD" = "sshd" ]; then
 PermitRootLogin yes
 PasswordAuthentication yes
 EOF
-    # root must have a password the harness can use: sshpass -p root
-    sed -i 's/^root:[^:]*:/root:root:/' "$E/etc/shadow" 2>/dev/null || true
+    # root must have a password the harness can use: sshpass -p root.
+    # WP611: this must be a real crypt(3) hash. Writing the literal word
+    # "root" into the hash field (sed 's/^root:[^:]*:/root:root:/') locks
+    # the account, because crypt("root") never equals "root" -- every
+    # password login fails and sshd looks dead when the guest is fine.
+    HASH="$(openssl passwd -6 root 2>/dev/null || python3 -c 'import crypt; print(crypt.crypt("root", crypt.mksalt(crypt.METHOD_SHA512)))')"
+    [ -n "$HASH" ] || { echo "configure-debian: cannot hash a root password" >&2; exit 1; }
+    awk -F: -v h="$HASH" 'BEGIN{OFS=":"} /^root:/{$2=h} {print}' "$E/etc/shadow" > "$E/etc/shadow.new" \
+        && cat "$E/etc/shadow.new" > "$E/etc/shadow" && rm -f "$E/etc/shadow.new"
 fi
 
 # --- the one thing that makes this root a filesystem test -------------------

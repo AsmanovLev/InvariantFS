@@ -87,6 +87,10 @@ note() { echo "note: $*"; }
 if [ -n "${INVFS_DEB_VOLUME:-}" ]; then
     [ -f "$INVFS_DEB_VOLUME" ] || fail "no such volume: $INVFS_DEB_VOLUME"
     RAW="$INVFS_DEB_VOLUME"
+    # WP611: IMG was assigned from the default RAW at the top, so a reuse
+    # run kept pointing the offline checks at $WORK/deb.img (which may not
+    # even exist) instead of the reused volume. Keep them in step here.
+    IMG="$RAW"
     say "REUSING $RAW (INVFS_DEB_VOLUME set -- skipping mkfs+import)"
 else
 if [ "$MODE" = multi ]; then
