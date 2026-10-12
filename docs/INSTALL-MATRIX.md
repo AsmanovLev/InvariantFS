@@ -63,7 +63,7 @@ recipe does not change the artifact, which is checked below.
 | target | install recipe | format | native tooling | built/run here? |
 |---|---|---|---|---|
 | **Arch Linux** | `packaging/PKGBUILD` | makepkg | `makepkg -si` | recipe's `package()` executed against the artifact; `makepkg` itself **not installed on this Debian host** |
-| **Gentoo Linux** | `packaging/gentoo/invfs-0.6.0.ebuild` (EAPI 8) | portage | `emerge sys-apps/invfs` | ebuild's `src_install()` executed against the artifact — see below; `ebuild`/`portage` **not installed here and no Gentoo host exists on this machine** |
+| **Gentoo Linux** | `packaging/gentoo/invfs-*.ebuild` (EAPI 8, one per release — the tree keeps the current) | portage | `emerge sys-apps/invfs` | ebuild's `src_install()` executed against the artifact — see below; `ebuild`/`portage` **not installed here and no Gentoo host exists on this machine** |
 | **Void Linux** | `packaging/void/template` | xbps-src | `xbps-src` + `xbps-install` | template's `do_install()` executed against the artifact; `xbps-src` **not available in Debian** |
 | **Debian** | `packaging/debian/` | `.deb` | `dpkg-buildpackage` + `apt`/`dpkg` | **built, then installed in a clean VM and exercised** — see §3 |
 
