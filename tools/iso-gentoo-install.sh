@@ -59,9 +59,30 @@ Q=$(ps -eo pid,args | grep "[i]nvfs-serve.sh" | awk '{print $1}' || true)
 [ -n "$Q" ] && { kill -KILL $Q 2>/dev/null; note "killed stray server: $Q"; }
 sleep 1
 
+# fetch_verify <url> <dest> <sha512-line>: a completed-but-corrupt
+# download (seen live: right size, wrong hash) must retry, not fail the
+# whole job on runner-network luck. Verifies after every attempt.
+fetch_verify() {
+    _url=$1; _dest=$2; _sum=$3
+    _try=1
+    while [ $_try -le 3 ]; do
+        rm -f "$_dest"
+        if curl -fsSL -o "$_dest" "$_url"; then
+            if ( cd "$(dirname "$_dest")" && echo "$_sum" | sha512sum -c - ); then
+                return 0
+            fi
+            note "attempt $_try: checksum mismatch, redownloading"
+        else
+            note "attempt $_try: download failed, retrying"
+        fi
+        _try=$((_try + 1))
+        sleep 10
+    done
+    return 1
+}
 if [ ! -f "$ISO" ]; then
     note "downloading $ISO_URL"
-    curl -fsSL -o "$ISO" "$ISO_URL" || fail "ISO download failed"
+    fetch_verify "$ISO_URL" "$ISO" "$ISO_SHA512" || fail "ISO download failed"
 fi
 ( cd "$WORK" && echo "$ISO_SHA512" | sha512sum -c - ) || fail "ISO checksum mismatch"
 note "ISO verified: $(basename "$ISO")"
@@ -96,7 +117,7 @@ STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage
 STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac74c521b630386baed747e3c32b44b96fd4db143adb72738c0dc68dabfc8d6c8e  stage3.tar.xz"
 if [ ! -f "$SERVEDIR/stage3.tar.xz" ]; then
     note "downloading stage3 $STAGE3_VER"
-    curl -fsSL -o "$SERVEDIR/stage3.tar.xz" "$STAGE3_URL" || fail "stage3 download failed"
+    fetch_verify "$STAGE3_URL" "$SERVEDIR/stage3.tar.xz" "$STAGE3_SHA512" || fail "stage3 download failed"
 fi
 ( cd "$SERVEDIR" && echo "$STAGE3_SHA512" | sha512sum -c - ) || fail "stage3 checksum mismatch"
 note "stage3 staged: $(du -h "$SERVEDIR/stage3.tar.xz" | cut -f1)"
