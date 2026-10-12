@@ -164,6 +164,9 @@ UNIT_SCRATCH ?= $(if $(INVFS_UNIT_SCRATCH),$(INVFS_UNIT_SCRATCH),/tmp)
 # wp/dirs-free-before-publish needs cross-process state, and $(TESTISO) gives
 # every command a private /tmp. build/ is gitignored and per-worktree.
 FRB_T := $(CURDIR)/build/frbtest
+# WP610 (handler doom verdict) needs the same cross-process property: one
+# process per fault leg, shared image under build/. See HD_T legs below.
+HD_T := $(CURDIR)/build/hdtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-fuse invf-import invf-sweep \
@@ -265,7 +268,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
 table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
 read_named_test sweep_report_bang_test sweep_tree_bang_test \
-crc32c_test
+crc32c_test handler_doom_test
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
@@ -1435,6 +1438,36 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # The suite asserts the rollback (rc!=0, name present, bit-exact, fsck OK)
 # on both the last-link and the hardlink path, plus untouched success paths.
 	$(TESTENV) $(TESTISO) bash tools/test-unlink-rollback.sh
+# WP610: the six namespace mutators WP606/607 did not wrap (mkdir, mknod,
+# symlink, link, rmdir, truncate) fail clean. Verdict, proven per handler
+# in src/cli/handler_doom_test.c: every delta failure inside
+# vol_delta_append dooms inline (WP606), none of the six engines reads
+# after staging (the rename GHOST shape), the commit stages delta only at
+# commit time, and the sole net-growth path (hardlink compensation)
+# stages a byte-identical null record — so all six are left unwrapped
+# (a FUSE doom would endanger ensure_path parents + innocent pending)
+# and these legs are the proof: each faults its op mid-way and asserts
+# vol_delta_pending() back at baseline, the namespace unchanged, and
+# byte-exact survivors. `verify` reopens clean after the whole sequence;
+# tools/test-handler-doom.sh adds the fsck-OK half under run-e2e.sh.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) hookctl
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) setup
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) mkdir_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) mkdir_eexist
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) mknod_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) symlink_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) symlink_store
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) link_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) link_ok
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) rmdir_full
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) rmdir_missing
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) rmdir_ok
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) truncate_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) truncate_store
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) truncate_ok
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) resize_put
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) resize_ok
+	$(TESTENV) $(TESTISO) $(OUT)/invf-handler_doom_test $(HD_T) verify
 	$(TESTENV) $(TESTISO) $(OUT)/invf-deflate_repro_test
 # WP203: pack signatures v1 — RFC 8032 vectors, round trip, malformed
 # sidecars, gate matrix. Pure unit (fixture dirs under argv /tmp), so
@@ -1530,6 +1563,10 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dynzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-imagelock.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-put-failure.sh
+# WP610: mkdir/mknod/symlink/link/rmdir/truncate fail clean (no retained
+# delta records, namespaces unchanged, survivors byte-exact, fsck OK).
+# Offline image suite (phase binary + fsck), no FUSE/dm/root needed.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-handler-doom.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-verify-size.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
