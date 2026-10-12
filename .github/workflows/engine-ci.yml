@@ -101,12 +101,16 @@ jobs:
               esac
             done;; esac
           fi
+          # Outputs are the literal strings true/false: the job ifs
+          # compare against 'true', and 0/1 never equals it (shipped once:
+          # every scoped job silently skipped and the run went "green").
+          t() { [ "$1" = 1 ] && echo true || echo false; }
           {
-            echo "full=$FULL"; echo "deb=$DEB"; echo "rpm=$RPM"
-            echo "arch=$ARCH"; echo "gentoo=$GEN"; echo "void=$VOID"
-            echo "boot_arch=$BA"; echo "boot_void=$BV"
-            echo "boot_debian=$BD"; echo "boot_fedora=$BF"
-            echo "iso_arch=$IA"; echo "iso_void=$IV"; echo "iso_gentoo=$IG"
+            echo "full=$(t "$FULL")"; echo "deb=$(t "$DEB")"; echo "rpm=$(t "$RPM")"
+            echo "arch=$(t "$ARCH")"; echo "gentoo=$(t "$GEN")"; echo "void=$(t "$VOID")"
+            echo "boot_arch=$(t "$BA")"; echo "boot_void=$(t "$BV")"
+            echo "boot_debian=$(t "$BD")"; echo "boot_fedora=$(t "$BF")"
+            echo "iso_arch=$(t "$IA")"; echo "iso_void=$(t "$IV")"; echo "iso_gentoo=$(t "$IG")"
           } >> "$GITHUB_OUTPUT"
           echo "scope: full=$FULL deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID"
 
