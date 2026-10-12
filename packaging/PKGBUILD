@@ -41,7 +41,7 @@ source=("invfs-v$pkgver-$arch.tar.zst")
 # paste ONLY the hash -- a filename in this array fails the build with
 # '<name> is not a valid integrity check' (caught by the ISO install test,
 # which really runs makepkg; CI's arch leg only ever ran package()).
-sha256sums=('3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7')
+sha256sums=('24a5abc0142e5ff92435be42c4e9a46ebb1b9c06a7597d02deefa825b866a1c2')
 
 # makepkg-only needs: the artifact ships compiled, so there is nothing to
 # strip or debug-package (and both would rewrite the checksummed bytes);

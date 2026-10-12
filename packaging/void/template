@@ -21,8 +21,8 @@
 pkgname=invfs
 # Test hook: the packaging suite overrides this to the artifact under
 # test (INVFS_TEMPLATE_VERSION); real xbps-src builds use the default.
-# Re-pin on every release (with the distfile hash below) after publish.
-version=${INVFS_TEMPLATE_VERSION:-0.6.0}
+# Re-pin version + checksum below on every release, after publish.
+version=${INVFS_TEMPLATE_VERSION:-0.6.2}
 revision=1
 _artifact="invfs-v${version}-x86_64"
 # No build_style: the artifact is prebuilt, so there is nothing to
@@ -51,7 +51,7 @@ distfiles="
 # $checksum, not the legacy $sha256sums). CI re-pins this to the
 # HEAD-built artifact; the SHA256SUMS provenance chain (dist/SHA256SUMS ->
 # .sig -> author pubkey) is verified by packaging/bootstrap.sh, not fetched.
-checksum="3fc20b159cc9d6abf691f2e9260dc8af60b3b4926ea49f54b41b9f55a47037b7"
+checksum="24a5abc0142e5ff92435be42c4e9a46ebb1b9c06a7597d02deefa825b866a1c2"
 
 do_install() {
 	vmkdir "$PKGDESTDIR"

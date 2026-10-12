@@ -30,12 +30,8 @@ S="${WORKDIR}"
 
 # Pinned digest of the release artifact, as portage wants it
 # (`make release-sums` prints the pair; re-pin on every release).
-# NOTE: BLAKE2B/SIZE below are carried from 0.6.0 until the v0.6.2
-# publish; re-pin from the published SHA256SUMS, then drop this note.
-# The digest is fail-closed in portage (mismatch refuses), and this
-# suite runs src_install() directly without consulting it.
-BLAKE2B="610ade57e603b4e005948642ab9ec1ce4342603fc983167592284dd295451d44"
-SIZE="1383575"
+BLAKE2B="fd540903831898dbdee4a8dbd3883345b4190569d3741b96beeb8bc94d1e88b2f0ad2afba73e14126c69ee4ccbc1ebd7be818e91004e24244ad104e74a9e6595"
+SIZE="1446467"
 
 DESCRIPTION="Semantic content-addressed filesystem with a bit-exactness invariant"
 HOMEPAGE="https://github.com/AsmanovLev/InvariantFS"
