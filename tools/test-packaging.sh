@@ -268,7 +268,12 @@ stage_void() {
     PKGDESTDIR="$d/pkg"
     # the ONLY thing stubbed: xbps-src's vmkdir. do_install does not call it.
     vmkdir() { mkdir -p "$1"; }
+    # version rides the artifact under test, not the committed template:
+    # the template's version= is re-pinned at release time (post-publish
+    # hashes); INVFS_TEMPLATE_VERSION overrides it to exercise do_install().
+    _tver=$(echo "$VFILE" | sed 's/^v//')
     ( set -e
+      INVFS_TEMPLATE_VERSION="$_tver"
       . "$REPO/packaging/void/template"
       do_install
     ) > "$d/log" 2>&1
@@ -581,11 +586,11 @@ sig_setup() {
         "InvFS Test Bad <bad@localhost>" ed25519 sign never >/dev/null 2>&1
     gpg --armor --export good@localhost > "$SIGDIR/good.pub" 2>/dev/null
     gpg --armor --export bad@localhost  > "$SIGDIR/bad.pub"  2>/dev/null
-    mkdir -p "$SIGDIR/pub/v0.6.0"
-    cp "$ART" "$SUM" "$SIGDIR/pub/v0.6.0/"
+    mkdir -p "$SIGDIR/pub/${VER}"
+    cp "$ART" "$SUM" "$SIGDIR/pub/${VER}/"
     gpg --batch --yes --local-user good@localhost \
-        --output "$SIGDIR/pub/v0.6.0/SHA256SUMS.sig" \
-        --detach-sign "$SIGDIR/pub/v0.6.0/SHA256SUMS" >/dev/null 2>&1
+        --output "$SIGDIR/pub/${VER}/SHA256SUMS.sig" \
+        --detach-sign "$SIGDIR/pub/${VER}/SHA256SUMS" >/dev/null 2>&1
     return 0
 }
 
@@ -599,7 +604,7 @@ sig_case() {
     # DESTDIR so the case runs unprivileged: --prefix outside $HOME would
     # (correctly) demand root, which would make this a test of sudo rather
     # than of signature verification.
-    set -- --release --version v0.6.0 --prefix /usr --yes "$@"
+    set -- --release --version ${VER} --prefix /usr --yes "$@"
     [ -n "$key" ] && set -- --pubkey "$key" "$@"
     out=$(env INVFS_CACHE_DIR="$d/cache" INVFS_RELEASE_BASE="http://127.0.0.1:$SIGPORT" \
           DESTDIR="$d/root" PREFIX=/usr \
@@ -658,7 +663,7 @@ sig_tests() {
 
     # negative: tamper the artifact AFTER signing -- sha256 must catch it
     sig_case tampered "$SIGDIR/good.pub"
-    d="$SIGDIR/pub/v0.6.0"
+    d="$SIGDIR/pub/${VER}"
     cp "$d/$ARTBASE" /tmp/.sigcase.bak 2>/dev/null
     printf 'x' >> "$d/$ARTBASE"
     sig_case tampered2 "$SIGDIR/good.pub"
