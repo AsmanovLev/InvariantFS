@@ -18,9 +18,9 @@ SRV="${SRV:-http://10.0.2.2:8002}"
 VOL=""   # resolved below: invfsvol= cmdline, else only writable disk
 B=/root/pkg
 # Pinned stage3 (policy: reproducible inputs; bump with checksum together).
-STAGE3_VER="20261004T164559Z"
+STAGE3_VER="20261011T170049Z"
 STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
-STAGE3_SHA512="2cf0030d683481ef9a5aac737b636abb3532c88a15972709811423564945ef8694685003dccb5c78e453633b792af2af27c504f0a0e69101bd472b26d892aea8  stage3-amd64-openrc-$STAGE3_VER.tar.xz"
+STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac65aef8e28159c6657146a9a07bafd39e127d8b53270262123f2320c6f0c0e68c9d55da648866a4f57c  stage3-amd64-openrc-$STAGE3_VER.tar.xz"
 say() { echo "iso-setup: $*"; }
 done_rc=1
 STATS=""
