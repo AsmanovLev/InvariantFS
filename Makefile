@@ -16,7 +16,18 @@ VERSION_GIT := $(shell git describe --always --tags 2>/dev/null | sed 's/-.*//')
 # "version  (build ...)" with no version at all. Fall back to that header's
 # own value instead, which is the canonical one.
 VERSION := $(if $(VERSION_GIT),$(VERSION_GIT),$(shell sed -n 's/^#define INVFS_VERSION_STRING "\(.*\)"/\1/p' $(SRC)/core/invarifs.h | head -1))
+# Reproducible builds: the date stamped into binaries comes from the
+# commit hash, not the wall clock. SOURCE_DATE_EPOCH wins when set
+# (the distro/CI convention); otherwise the current commit's timestamp
+# is used, so the same commit always builds the same bytes; wall clock
+# is the last resort (dirty tree with no git).
+EPOCH_DEFAULT := $(shell git log -1 --format=%ct 2>/dev/null)
+SOURCE_DATE_EPOCH ?= $(EPOCH_DEFAULT)
+ifeq ($(strip $(SOURCE_DATE_EPOCH)),)
 BUILD_DATE := $(shell date '+%Y-%m-%d')
+else
+BUILD_DATE := $(shell date -u -d '@$(SOURCE_DATE_EPOCH)' '+%Y-%m-%d')
+endif
 AUTHOR_NAME := Lev_Asmanov
 AUTHOR_EMAIL := asmanovlev@gmail.com
 LICENSE := GPL-2.0-only
@@ -1669,7 +1680,7 @@ flakey:
 ARCH ?= $(shell uname -m)
 RELEASE_VERSION ?= $(VERSION)
 RELEASE_NAME := invfs-$(RELEASE_VERSION)-$(ARCH)
-DIST := dist
+DIST ?= dist
 RELEASE_DIR := $(DIST)/$(RELEASE_NAME)
 SIGNING_KEY ?=
 
@@ -1718,10 +1729,13 @@ release: unflag all helpers
 	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
 	cp -a tools/sbin $(RELEASE_DIR)/tools/sbin
 	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
-# owner/mtime pinned so a rebuild of the same tree is byte-identical
+# owner/mtime pinned so a rebuild of the same tree is byte-identical.
+# zstd runs single-threaded on purpose: multi-threaded output depends on
+# the worker count, so -T0 would make the same tree hash differently on
+# different machines. The tarball is small; -T1 costs seconds.
 	tar --sort=name --owner=0 --group=0 --numeric-owner \
-	    --mtime='@0' -C $(DIST) -cf - $(RELEASE_NAME) \
-		| zstd -q -T0 -19 -f -o $(DIST)/$(RELEASE_NAME).tar.zst
+	    --mtime='@$(if $(strip $(SOURCE_DATE_EPOCH)),$(SOURCE_DATE_EPOCH),0)' -C $(DIST) -cf - $(RELEASE_NAME) \
+		| zstd -q --threads=1 -19 -f -o $(DIST)/$(RELEASE_NAME).tar.zst
 	( cd $(DIST) && sha256sum $(RELEASE_NAME).tar.zst > SHA256SUMS )
 # detach-sign SHA256SUMS (which pins the artifact) -- never the tarball
 # directly, so one signature covers every file published under the tag.
@@ -1778,6 +1792,19 @@ release-sums: release
 	echo; echo "(printed, not written: a digest of the tarball cannot live inside"; \
 	echo " the tree the tarball is built from -- writing it there would change the"; \
 	echo " tarball on the next run and make every release un-reproducible)"
+
+# Reproducibility proof: build the release twice into separate staging
+# dirs and require byte-identical tarballs. Green means the same commit
+# always yields the same bytes, whatever the wall clock or core count.
+# (The shared ./build objects are inputs to both runs; same flags and
+# same epoch, so sharing them weakens nothing.)
+release-verify:
+	rm -rf /tmp/invfs-repro-a /tmp/invfs-repro-b
+	@$(MAKE) release DIST=/tmp/invfs-repro-a RELEASE_VERSION='$(RELEASE_VERSION)' >/tmp/invfs-repro-a.log 2>&1 || { tail -n 20 /tmp/invfs-repro-a.log; exit 1; }
+	@$(MAKE) release DIST=/tmp/invfs-repro-b RELEASE_VERSION='$(RELEASE_VERSION)' >/tmp/invfs-repro-b.log 2>&1 || { tail -n 20 /tmp/invfs-repro-b.log; exit 1; }
+	@cmp /tmp/invfs-repro-a/$(RELEASE_NAME).tar.zst /tmp/invfs-repro-b/$(RELEASE_NAME).tar.zst && \
+	    test "$$(cut -d' ' -f1 /tmp/invfs-repro-a/SHA256SUMS)" = "$$(cut -d' ' -f1 /tmp/invfs-repro-b/SHA256SUMS)" && \
+	    echo "release-verify: PASS ($(RELEASE_NAME).tar.zst identical)"
 
 # ---- docs -----------------------------------------------------------------
 # ctags index (impl_docs/FUNCTIONS.md, TYPES.md, functions/, types/) plus the

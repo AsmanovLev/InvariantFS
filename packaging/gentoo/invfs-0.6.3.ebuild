@@ -29,7 +29,8 @@ MY_PN="invfs-v${PV}-x86_64"
 S="${WORKDIR}"
 
 # Pinned digest of the release artifact, as portage wants it
-# (`make release-sums` prints the pair; re-pin on every release).
+# (`make release-sums` prints the pair; the release.yml repin job
+# writes it back automatically after publish).
 BLAKE2B="fd540903831898dbdee4a8dbd3883345b4190569d3741b96beeb8bc94d1e88b2f0ad2afba73e14126c69ee4ccbc1ebd7be818e91004e24244ad104e74a9e6595"
 SIZE="1446467"
 

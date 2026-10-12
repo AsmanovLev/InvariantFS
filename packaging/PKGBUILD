@@ -19,8 +19,8 @@
 # signature over the tarball and add it to source=() plus validpgpkeys=;
 # see docs/INSTALL-MATRIX.md.
 #
-# `make release` prints the line to paste here after each release:
-#     make release-sums
+# `make release-sums` prints the line (and the release.yml repin job
+# writes it back automatically after publish):
 pkgname=invfs
 pkgver=0.6.3
 pkgrel=1

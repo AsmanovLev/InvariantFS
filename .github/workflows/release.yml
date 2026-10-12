@@ -163,6 +163,9 @@ jobs:
     if: github.event_name == 'push'
     needs: [tarball, deb, arch, rpm]
     runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -217,3 +220,60 @@ jobs:
           else
             gh release create "$TAG" assets/* --title "$TAG" --notes-file assets/RELEASE-NOTES.txt
           fi
+      - name: attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: assets/*.tar.zst
+
+  repro:
+    # Bit-reproducibility proof: the same tag must always yield the same
+    # bytes. Fails the release if the two builds differ.
+    needs: tarball
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev python3
+      - name: double build + compare
+        run: make release-verify RELEASE_VERSION="$TAG"
+
+  repin:
+    # The target-native recipes pin the artifact digest; after publish,
+    # write the real hashes back into the tree so the next tag starts
+    # honest. Replaces the manual ab59373-style re-pin. Pushes to main;
+    # engine-ci re-runs on it, release.yml does not (tag-only trigger).
+    needs: [publish]
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist-tarball
+          path: repin-dl
+      - name: re-pin hashes + push
+        run: |
+          set -eu
+          VER="${TAG#v}"
+          F=$(echo repin-dl/*.tar.zst)
+          SHA=$(sha256sum "$F" | cut -d' ' -f1)
+          B2=$(b2sum -l 256 "$F" | cut -d' ' -f1)
+          SZ=$(wc -c < "$F" | tr -d ' ')
+          EB="packaging/gentoo/invfs-$VER.ebuild"
+          [ -f "$EB" ] || { echo "repin: $EB missing (copy the previous ebuild first)" >&2; exit 1; }
+          sed -i "s/^sha256sums=(.*)/sha256sums=('$SHA')/" packaging/PKGBUILD
+          sed -i "s/^BLAKE2B=.*/BLAKE2B=\"$B2\"/; s/^SIZE=.*/SIZE=\"$SZ\"/" "$EB"
+          sed -i "s/^checksum=.*/checksum=\"$SHA\"/" packaging/void/template
+          git diff --exit-code --quiet && { echo "repin: already current"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add packaging/PKGBUILD "$EB" packaging/void/template
+          git commit -m "packaging: re-pin $VER hashes from published artifacts (automated)"
+          git pull --rebase origin main
+          git push origin HEAD:main
