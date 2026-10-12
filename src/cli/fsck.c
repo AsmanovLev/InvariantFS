@@ -31,6 +31,7 @@ int main(int argc, char **argv)
     const char *img = NULL;
     int fix = 0, quiet = 0, repair = 0, i;
     int discard_reachable = 0, list_damaged = 0;
+    int cut = 0, dry = 0;
     int err = 0;
     invfs_volume *v;
     invfs_fsck_report rep;
@@ -52,9 +53,19 @@ int main(int argc, char **argv)
                 "      read back fully: damaged<TAB><id><TAB><name><TAB>"
                 "<reason><TAB><size>. Reasons: torn-recipe, torn-xattr,\n"
                 "      torn-row, recipe-corrupt, recipe-missing,\n"
-                "      recipe-incoherent. Empty list\n"
+                "      recipe-incoherent, segment-torn. Empty list\n"
                 "      with an OK verdict means nothing is damaged. Exit\n"
-                "      code unchanged.\n");
+                "      code unchanged.\n"
+                "  --cut  explicit salvage for torn data segments (WP613):\n"
+                "      rewrite each cuttable file's recipe to its\n"
+                "      provably-good leading prefix and verify the\n"
+                "      survivors byte-exact. Every dropped span is named\n"
+                "      (inode + byte range + seg + pba). Files with no\n"
+                "      good leading span are left EIO, never emptied.\n"
+                "      Standalone: combines only with --dry-run, -q and\n"
+                "      --list-damaged, never with -f.\n"
+                "  --dry-run  with --cut: print what would be cut and\n"
+                "      change nothing.\n");
             return 2;
         }
         if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
@@ -70,6 +81,10 @@ int main(int argc, char **argv)
             discard_reachable = 1;
         else if (strcmp(argv[i], "--list-damaged") == 0)
             list_damaged = 1;
+        else if (strcmp(argv[i], "--cut") == 0)
+            cut = 1;
+        else if (strcmp(argv[i], "--dry-run") == 0)
+            dry = 1;
         else if (strcmp(argv[i], "-q") == 0)
             quiet = 1;
         else
@@ -78,7 +93,26 @@ int main(int argc, char **argv)
     if (!img) {
         fprintf(stderr,
             "usage: invf-fsck <image> [-f|--fix] [--repair] [-q]\n"
-            "                [--discard-reachable] [--list-damaged]\n");
+            "                [--discard-reachable] [--list-damaged]\n"
+            "                [--cut [--dry-run]]\n");
+        return 2;
+    }
+    /* WP613: --cut is a standalone salvage mode (the --heal shape): it
+     * rewrites recipes, so it never combines with the metadata repair
+     * flags; --dry-run without --cut would parse, do nothing, and leave
+     * the operator believing a plan was printed. */
+    if (cut && (fix || repair || discard_reachable)) {
+        fprintf(stderr, "invf-fsck: --cut is a standalone mode (only "
+                        "--dry-run, -q and --list-damaged may combine "
+                        "with it); it never combines with -f/--repair/"
+                        "--discard-reachable.\n");
+        return 2;
+    }
+    if (dry && !cut) {
+        fprintf(stderr, "invf-fsck: --dry-run only means something with "
+                        "--cut: it is the plan that changes nothing. Run "
+                        "`invf-fsck <image> --cut --dry-run` if that is "
+                        "what you want.\n");
         return 2;
     }
     /* The flag is a decision to destroy data, so it is only meaningful
@@ -96,6 +130,82 @@ int main(int argc, char **argv)
     if (!v) {
         fprintf(stderr, "invf-fsck: cannot open %s (err %d)\n", img, err);
         return 1;
+    }
+
+    /* WP613 --cut: explicit torn-segment salvage, no metadata scan runs
+     * first. Detection (the read path failing + the segment probe) prints
+     * the plan; without --dry-run the cuttable files are rewritten to
+     * their provably-good prefix through the delta path and verified
+     * byte-exact, then flushed (an unflushed cut is not a cut -- the same
+     * durability rule as --heal). Uncuttable files are named and left
+     * EIO. Re-run `invf-fsck --list-damaged` afterwards for the ledger. */
+    if (cut) {
+        invfs_content_cut_report crep;
+        int crc;
+        if (vol_degraded(v)) {
+            fprintf(stderr, "invf-fsck: %s: DEGRADED volume (dev0 absent) -- "
+                            "report mode only; reattach dev0 to cut\n", img);
+            vol_close(v);
+            return 1;
+        }
+        memset(&crep, 0, sizeof crep);
+        crc = vol_content_cut(v, dry, &crep);
+        if (crc != 0) {
+            fprintf(stderr, "invf-fsck: %s: content-cut walk failed -- no "
+                            "complete plan exists, the volume is untouched\n",
+                    img);
+            vol_close(v);
+            return 1;
+        }
+        if (!dry && crep.cut) {
+            if (vol_flush(v) != 0) {
+                fprintf(stderr,
+                        "FATAL: the flush after --cut failed -- the recipes "
+                        "just rewritten are NOT durable.\n");
+                vol_close(v);
+                return 1;
+            }
+        }
+        if (!quiet)
+            printf("[cut] scanned %llu, clean %llu, torn %llu, "
+                   "%s %llu, uncut %llu, verify-failed %llu "
+                   "(%llu bytes kept, %llu dropped)\n",
+                   (unsigned long long)crep.scanned,
+                   (unsigned long long)crep.clean,
+                   (unsigned long long)crep.torn,
+                   dry ? "would-cut" : "cut",
+                   (unsigned long long)(dry ? crep.would_cut : crep.cut),
+                   (unsigned long long)(crep.nuncut),
+                   (unsigned long long)crep.verify_failed,
+                   (unsigned long long)crep.cut_bytes,
+                   (unsigned long long)crep.drop_bytes);
+        if (list_damaged) {
+            invfs_damaged_file dmg[INVFS_DMG_MAX];
+            int nd, k;
+            memset(dmg, 0, sizeof dmg);
+            nd = vol_damaged_files(v, dmg, INVFS_DMG_MAX);
+            if (nd < 0) {
+                fprintf(stderr, "invf-fsck: damaged-partial: the "
+                                "damage walk could not complete, so no "
+                                "complete list exists\n");
+            } else {
+                for (k = 0; k < nd; k++)
+                    printf("damaged\t%llu\t%s\t%s\t%llu\n",
+                           (unsigned long long)dmg[k].id,
+                           dmg[k].name,
+                           vol_damaged_kind(dmg[k].kind),
+                           (unsigned long long)dmg[k].size);
+            }
+        }
+        vol_close(v);
+        /* The fsck vocabulary: 0 = every torn file salvaged (or a dry
+         * plan printed), 3 = damage remains (named above), 1 = the
+         * operation itself failed. */
+        if (dry)
+            return 0;
+        if (crep.verify_failed)
+            return 1;
+        return crep.nuncut ? 3 : 0;
     }
 
     /* WP25: a degraded mount (dev0 absent) is read-only -- report mode
@@ -240,6 +350,14 @@ int main(int argc, char **argv)
                             "from the original image; the other files on "
                             "this volume are unaffected and readable.\n", img,
                     (unsigned long long)rep.recipe_bad);
+            fprintf(stderr, "invf-fsck: %s: note: offenders listed as "
+                            "segment-torn above (a data segment that no "
+                            "longer decodes under a sound recipe) have an "
+                            "explicit salvage path: `invf-fsck %s --cut "
+                            "--dry-run` prints the provably-good prefix "
+                            "each file would keep; without --dry-run it "
+                            "rewrites those recipes and verifies the "
+                            "survivors byte-exact.\n", img, img);
         }
         if (!quiet) {
             printf("InvariantFS fsck: %s\n", img);

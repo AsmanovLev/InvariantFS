@@ -1784,6 +1784,11 @@ enum {
 };
 int vol_recipe_coherence(const char *name, const invfs_inode *in,
                          const uint8_t *blob, size_t blen);
+/* WP613: read-only segment-tear probe for the recipe audit and the cut
+ * walk (src/core/vol_cut.c). 1 = the payload entry still decodes to
+ * exactly its claimed length, 0 = torn, -1 = not a payload entry here
+ * (TEXT/WINDOW_SRC/zero pba -- skipped, never a verdict). */
+int vol_cut_span_ok(invfs_volume *v, const invfs_ast_block_entry *e);
 int vol_free_recipe_blocks(invfs_volume *v,
                              const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
                              uint64_t keep_pba);

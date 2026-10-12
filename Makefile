@@ -41,7 +41,7 @@ FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
 CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair \
-           vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone \
+           vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
             vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
@@ -252,7 +252,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
              sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
-             nlink_test recipe_fsck_test doubleown_test cpack_guard_test orphan_test rt_slot_test anchor_test \
+             nlink_test recipe_fsck_test doubleown_test contentcut_test cpack_guard_test orphan_test rt_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test seal_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
              lane_release_test pbaref_test v2_open_test \
@@ -822,7 +822,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-cpack_map_conc_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
       $(OUT)/invf-window_test $(OUT)/invf-nlink_test \
-      $(OUT)/invf-recipe_fsck_test $(OUT)/invf-doubleown_test $(OUT)/invf-fsck_liveness_test \
+      $(OUT)/invf-recipe_fsck_test $(OUT)/invf-doubleown_test $(OUT)/invf-contentcut_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
@@ -1195,6 +1195,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-doubleown_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-contentcut_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-fsck_liveness_test /tmp
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
@@ -1433,13 +1434,18 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # by 17 per orphaned segment and nothing ever gives them back.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
 # WP612: sweep-lane superseded frees ride retire-on-fence (the WP607 shape
-# for the offline lanes). A TAR-heavy corpus is swept twice: sweep #1 must
-# RECLAIM through the retire drain (free blocks rise; a drain that never
-# ran strands the superseded segments), every file must invf-cat
+# for the offline lanes). A TAR-heavy corpus is swept twice: sweep #1 pins
+# (savepoint window, AGENTS.md 2.5 -- no rise expected), sweep #2 must
+# discharge the window (free rises substantially); every file must invf-cat
 # byte-identical (no dangling live recipe), fsck must stay clean, and
-# sweep #2 must be stable (no per-sweep leak beyond the documented
-# one-sweep savepoint lag).
+# unclaimed must not grow across the pair.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-lane-retire.sh
+# WP613: torn-segment salvage is explicit and loud. Multi-segment big1 +
+# single-segment single are torn (payload byte vs framed CRC): both read
+# EIO, verify names them, fsck ledger names 2x segment-torn; --cut
+# --dry-run plans without mutating; --cut salvages big1 to its exact
+# 128 KiB prefix, refuses to empty single, control stays bit-exact.
+	$(TESTENV) $(TESTISO) bash tools/test-contentcut.sh
 # WP604: a vol_unlink that fails must not mutate (rc==0 iff the namespace
 # changed). Sealed volume, one post-seal write, then a fault-armed unlink:
 # pre-fix the recipe-free failure returned -1 with the dirent already gone.

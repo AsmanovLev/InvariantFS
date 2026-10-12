@@ -5910,11 +5910,31 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
              * refuses it), and until WP303 nothing asked. Sharing alone
              * is not incoherence: dedupe leaves two agreeing rows on one
              * blob, and those stay clean. */
-            if (vol_recipe_coherence(name, &in, blob, blen) == INVFS_COH_OK) {
-                free(blob);
-                return 0;
+            if (vol_recipe_coherence(name, &in, blob, blen) != INVFS_COH_OK)
+                kind = INVFS_RECIPE_BAD_INCOHERENT;
+            else {
+                /* WP613: one layer down -- a coherent recipe whose DATA
+                 * segment no longer decodes is the same unreadable file
+                 * (the read path serves EIO), and until now it was
+                 * silent. Probe every payload entry; TEXT batches are
+                 * registry-owned and WINDOW_SRC entries are references,
+                 * so neither is probed here (vol_cut_span_ok reports -1
+                 * for both -- skipped, never a verdict). The first torn
+                 * span verdicts the file; the cut walk names the rest. */
+                size_t si;
+                kind = 0;
+                for (si = 0; si < n_ents; si++) {
+                    int ok = vol_cut_span_ok(v, &ents[si]);
+                    if (ok == 0) {
+                        kind = INVFS_RECIPE_BAD_SEGMENT;
+                        break;
+                    }
+                }
+                if (kind == 0) {
+                    free(blob);
+                    return 0;
+                }
             }
-            kind = INVFS_RECIPE_BAD_INCOHERENT;
         } else {
             kind = INVFS_RECIPE_BAD_CORRUPT;
         }

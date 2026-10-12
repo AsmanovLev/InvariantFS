@@ -919,6 +919,7 @@ const char *vol_damaged_kind(uint32_t kind)
     case INVFS_DMG_RECIPE_CORRUPT: return "recipe-corrupt";
     case INVFS_DMG_RECIPE_MISSING: return "recipe-missing";
     case INVFS_DMG_RECIPE_INCOHERENT: return "recipe-incoherent";
+    case INVFS_DMG_SEGMENT_TORN: return "segment-torn";
     default:                       return "unknown";
     }
 }
@@ -1016,7 +1017,9 @@ int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap)
             o->kind = (f->kind == INVFS_RECIPE_BAD_CORRUPT)
                      ? INVFS_DMG_RECIPE_CORRUPT
                      : (f->kind == INVFS_RECIPE_BAD_INCOHERENT)
-                     ? INVFS_DMG_RECIPE_INCOHERENT : INVFS_DMG_RECIPE_MISSING;
+                     ? INVFS_DMG_RECIPE_INCOHERENT
+                     : (f->kind == INVFS_RECIPE_BAD_SEGMENT)
+                     ? INVFS_DMG_SEGMENT_TORN : INVFS_DMG_RECIPE_MISSING;
             snprintf(o->name, sizeof o->name, "%s", f->name);
         }
     }
@@ -1455,6 +1458,67 @@ static void fsck_incoherent_note(invfs_volume *v, invfs_fsck_report *rep,
     fsck_note(rep, b);
 }
 
+/* WP613: detail for one segment-torn fault. Re-derives the first torn
+ * span with the same probe the audit ran (vol_cut_span_ok) and names it:
+ * inode + name, seg index + pba, the byte range it covers, and the
+ * provably-good prefix before it -- which is exactly what `invf-fsck
+ * --cut` would keep. A file whose spans all probe good but whose read
+ * still fails never reaches this note (the audit verdicts SEGMENT only
+ * on a failing probe); such files are another kind's beat. */
+static void fsck_segment_note(invfs_volume *v, invfs_fsck_report *rep,
+                              const invfs_recipe_fault *f)
+{
+    char b[1024];
+    invfs_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+
+    if (vol_inode_get(v, f->id, &in) == 1 &&
+        vol_recipe_load(v, in.recipe_addr, &blob, &blen) == 0 && blob) {
+        invfs_ast_hdr ah;
+        const invfs_ast_block_entry *ents = NULL;
+        size_t n_ents = 0, i;
+        if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
+            ents) {
+            for (i = 0; i < n_ents; i++) {
+                if (vol_cut_span_ok(v, &ents[i]) == 0) {
+                    snprintf(b, sizeof b,
+                             "inode %llu (%s): data segment %zu (pba %llu, "
+                             "bytes [%llu, %llu) of %llu) no longer "
+                             "decodes -- the framed CRC or the "
+                             "length-exact decode fails, so the read "
+                             "path serves EIO for the whole file. The "
+                             "first %llu byte(s) still decode; "
+                             "`invf-fsck --cut` would keep exactly "
+                             "those and name the rest. Uncut, this file "
+                             "is intact-but-unreadable: nothing is lost "
+                             "beyond the torn span.",
+                             (unsigned long long)f->id,
+                             f->name[0] ? f->name : "no name resolves to it",
+                             i, (unsigned long long)ents[i].pba,
+                             (unsigned long long)ents[i].file_offset,
+                             (unsigned long long)(ents[i].file_offset +
+                                                  ents[i].length),
+                             (unsigned long long)in.size,
+                             (unsigned long long)ents[i].file_offset);
+                    free(blob);
+                    fsck_note(rep, b);
+                    return;
+                }
+            }
+        }
+    }
+    free(blob);
+    snprintf(b, sizeof b,
+             "inode %llu (%s): a data segment underneath its recipe no "
+             "longer decodes (the audit naming it could not be re-derived "
+             "here) -- the file reads EIO; `invf-fsck --cut` will probe it "
+             "again.",
+             (unsigned long long)f->id,
+             f->name[0] ? f->name : "no name resolves to it");
+    fsck_note(rep, b);
+}
+
 static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
 {
     invfs_recipe_audit a;
@@ -1489,6 +1553,10 @@ static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
         char b[512];
         if (f->kind == INVFS_RECIPE_BAD_INCOHERENT) {
             fsck_incoherent_note(v, rep, f, have_own ? &oc : NULL);
+            continue;
+        }
+        if (f->kind == INVFS_RECIPE_BAD_SEGMENT) {
+            fsck_segment_note(v, rep, f);
             continue;
         }
         snprintf(b, sizeof b,

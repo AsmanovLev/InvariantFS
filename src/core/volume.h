@@ -570,11 +570,14 @@ int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
  * it without overlapping, and the entries must cover exactly the row's
  * size -- vol_read_inode and vol_decode_ast_entries refuse anything else,
  * so a row that disagrees is an unreadable file fsck used to call clean).
- * The segment DECODE is deliberately not part of it --
- * that reads every byte and is `invf-verify --deep`'s job; this is the
- * metadata pass, and it must stay one.
+ * WP613 extends the audit one layer down: a coherent recipe whose DATA
+ * segment no longer decodes (torn write, dm chaos -- the framed CRC or
+ * the length-exact decode fails) is named SEGMENT, because the read path
+ * refuses the file exactly as it refuses a missing blob. The probe is
+ * still metadata-cheap (framed read + decode per payload entry, no
+ * transcoder stack); the full byte walk stays `invf-verify`'s job.
  *
- * Detected and reported, never repaired: a recipe blob is addressed by the
+ * Detected and reported, never repaired by -f: a recipe blob is addressed by the
  * hash of its own contents, so there is nothing left to rebuild it from.
  * See the -f contract in src/cli/fsck.c.
  *
@@ -591,10 +594,18 @@ int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
  *                             incoherence: dedupe legitimately leaves two
  *                             rows on one blob, so a shared blob whose
  *                             rows all agree stays clean.
+ *   INVFS_RECIPE_BAD_SEGMENT the blob loads, parses and coheres, but a
+ *                             data segment underneath it no longer
+ *                             decodes (WP613): the read path serves EIO
+ *                             for the file. TEXT-batch and WINDOW_SRC
+ *                             entries own no segment here and are never
+ *                             probed. Repair is the explicit
+ *                             `invf-fsck --cut`, never -f.
  */
 #define INVFS_RECIPE_BAD_MISSING 1
 #define INVFS_RECIPE_BAD_CORRUPT 2
 #define INVFS_RECIPE_BAD_INCOHERENT 3
+#define INVFS_RECIPE_BAD_SEGMENT 4
 #define INVFS_RECIPE_BAD_MAX 16
 typedef struct {
     uint64_t id;             /* the inode whose content is unreadable */
@@ -618,8 +629,9 @@ int vol_recipe_audit(invfs_volume *v, invfs_recipe_audit *out);
 /* ---- damage ledger (WP-J): per-file damage enumeration, read-only ----
  * One row per live file the volume cannot read back fully, as named by the
  * same walks fsck runs: quarantined key ranges blocking live rows (torn-*)
- * plus unloadable recipe blobs. Content-tear (segment CRC) is verify's
- * beat, not fsck's -- suites union both lists for the full ledger.
+ * plus unloadable recipe blobs, plus torn data segments (WP613: a coherent
+ * recipe whose segment no longer decodes -- segment-torn; verify's byte
+ * walk and this ledger must agree on it, suites union both lists).
  * Kinds are stable strings via vol_damaged_kind(). At most `cap` rows;
  * returns stored count, or -1 when any walk failed OR the list truncated
  * (caller must treat -1 as PARTIAL: an incomplete ledger proves nothing
@@ -631,9 +643,12 @@ enum {
     INVFS_DMG_TORN_ROW    = 2,  /* a resolving name needs a row in quarantine */
     INVFS_DMG_RECIPE_CORRUPT = 3, /* blob loads but does not parse */
     INVFS_DMG_RECIPE_MISSING = 4, /* blob absent/shadowed/hash-mismatched */
-    INVFS_DMG_RECIPE_INCOHERENT = 5 /* blob loads+parses but the row and the
+    INVFS_DMG_RECIPE_INCOHERENT = 5, /* blob loads+parses but the row and the
                                       * recipe disagree (WP303): the read
                                       * path refuses the file */
+    INVFS_DMG_SEGMENT_TORN = 6 /* coherent recipe, but a data segment
+                                      * underneath it no longer decodes
+                                      * (WP613): the read path serves EIO */
 };
 typedef struct {
     uint64_t id;
@@ -643,6 +658,46 @@ typedef struct {
 } invfs_damaged_file;
 const char *vol_damaged_kind(uint32_t kind);
 int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap);
+
+/* ---- WP613: explicit content-cut for torn data segments ----
+ * A torn data segment (framed CRC or length-exact decode fails) makes the
+ * read path serve EIO for the whole file. vol_content_cut salvages the
+ * provably-good leading prefix: it rewrites the row to a prefix recipe
+ * (fresh blob under its own hash + delta-published row, caller flushes),
+ * verifies the cut file reads back byte-identical to the decoded prefix,
+ * and names every dropped span (inode + byte range + seg + pba).
+ * Explicit only (invf-fsck --cut, never default); dry=1 plans changes
+ * nothing. Files with no good leading span, or unreadable with all spans
+ * decoding, are UNCUTTABLE and left EIO. See src/core/vol_cut.c. */
+#define INVFS_CUT_MAX 32
+typedef struct {
+    uint64_t id;
+    uint64_t kept;       /* surviving prefix bytes (new file size) */
+    uint64_t dropped;    /* bytes given up (row_size - kept) */
+    uint64_t bad_off;    /* byte offset of the first torn span */
+    uint64_t bad_len;    /* its length */
+    uint64_t bad_pba;    /* its segment address */
+    uint32_t bad_seg;    /* its recipe entry index */
+    int cut;             /* 1 = cut + verified, 0 = named but untouched */
+    char name[192];
+} invfs_cut_row;
+typedef struct {
+    uint64_t scanned;      /* live content inodes walked */
+    uint64_t clean;        /* read back whole */
+    uint64_t torn;         /* EIO with a resolvable coherent recipe */
+    uint64_t other_bad;    /* EIO at the recipe layer (other kinds' beat) */
+    uint64_t cut;          /* rows rewritten + verified */
+    uint64_t would_cut;    /* dry-run plan count */
+    uint64_t verify_failed;/* row published but re-read mismatched */
+    uint64_t cut_bytes;    /* surviving bytes kept */
+    uint64_t drop_bytes;   /* bytes named as dropped */
+    uint64_t ncut;         /* rows[] with cut=1 */
+    uint64_t nuncut;       /* rows[] with cut=0 */
+    uint64_t n;            /* rows stored */
+    invfs_cut_row rows[INVFS_CUT_MAX];
+} invfs_content_cut_report;
+int vol_content_cut(invfs_volume *v, int dry,
+                    invfs_content_cut_report *rep);
 
 /* ---- WP-M14: v3 fold (merge delta into base, atomic publish, reset) --
  * Fold applies every live delta record to a COW copy of the base B+-tree,
