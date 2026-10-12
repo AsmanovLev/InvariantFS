@@ -69,8 +69,8 @@ elif [ "$MODE" = final ]; then
     DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 final_mixed.mp4)
     echo "final duration: $DUR s"
     ffmpeg -hide_banner -y -i final_mixed.mp4 \
-        -c:v libsvtav1 -preset 8 -crf 40 -r 120 -s 1920x1080 -g 600 \
-        -pix_fmt yuv420p -c:a aac -b:a 160k -ar 48000 \
+        -c:v libsvtav1 -preset 6 -crf 30 -r 120 -s 1920x1080 -g 600 \
+        -pix_fmt yuv420p -c:a libopus -b:a 64k -vbr on -ar 48000 \
         -movflags +faststart invfs-overview.mp4
     echo "FINAL -> invfs-overview.mp4"
 else
