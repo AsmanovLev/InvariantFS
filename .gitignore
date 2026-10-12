@@ -44,6 +44,12 @@ tools/codecpacks/*/bin/
 # generated video artifacts (regenerable: video/gen-overview.py + build.sh)
 video/frames/
 video/*.mp4
+docs/video/*.mp4
+docs/video/media/
+docs/video/sfx/
+docs/video/*_base.mp4
+docs/video/*_silent.mp4
+docs/video/*_mixed.mp4
 video/filter.txt
 
 # local staging/VM trees (never track)
