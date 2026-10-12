@@ -114,7 +114,7 @@ note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 # STAGE3_VER/URL/SHA512 -- bump together (guest re-verifies authoritatively).
 STAGE3_VER="20261011T170049Z"
 STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
-STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac74c521b630386baed747e3c32b44b96fd4db143adb72738c0dc68dabfc8d6c8e  stage3.tar.xz"
+STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac65aef8e28159c6657146a9a07bafd39e127d8b53270262123f2320c6f0c0e68c9d55da648866a4f57c  stage3.tar.xz"
 if [ ! -f "$SERVEDIR/stage3.tar.xz" ]; then
     note "downloading stage3 $STAGE3_VER"
     fetch_verify "$STAGE3_URL" "$SERVEDIR/stage3.tar.xz" "$STAGE3_SHA512" || fail "stage3 download failed"
