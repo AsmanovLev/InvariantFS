@@ -5,7 +5,8 @@
  * `make test` tier; tools/test-ivpacks.sh owns the image round trips, the
  * .ivpack bundle checks and the daemon legs):
  *
- *   1. lib<name>.so exists for all eight packs (`make plugin-so`) and loads
+ *   1. lib<name>.so exists for all eight containerpacks plus libjxlest.so
+ *      for the jxl codecpack (`make plugin-so`) and loads
  *      through dlmopen(LM_ID_NEWLM) with the dlopen fallback — the exact pair
  *      invf-plugin-host uses.
  *   2. All three ABI symbols are exported.
@@ -54,9 +55,14 @@ static void skip(const char *what)
     printf("  SKIP  %s\n", what);
 }
 
-/* The eight C containerpacks (Makefile CPACKS). The Python packs (splt_test,
- * raw_image) and the external-tool codecpack (jxl) have no .so: they are not
- * containerpack CLIs written in C, so there is nothing to dlopen. */
+/* The eight C containerpacks (Makefile CPACKS) plus, separately below, the
+ * jxl codecpack. The Python packs (splt_test, raw_image) have no .so: they
+ * are not C CLIs, so there is nothing to dlopen. jxl DOES have one since
+ * WP615 (libjxlest.so, estimate-only codecpack plugin from the same jxlest.c
+ * as bin/jxlest) -- but it is not in this list: its estimate admits unknown
+ * geometry with 0/0 instead of declining with 3, its manifest carries no
+ * `type =` key, and it has no container verbs, so the containerpack legs
+ * below do not apply to it. test_jxl_codecpack() covers it instead. */
 static const char *const PACKS[] = {
     "qcow2", "ext4fs", "fatfs", "ntfs", "rawdisk", "vdi", "xfs", "p7z"
 };
@@ -103,6 +109,152 @@ static int manifest_get(const char *name, const char *key, char *out, size_t cap
     }
     fclose(f);
     return -1;
+}
+
+/* Minimal synthetic JPEG with known geometry (SOF0: w=48, h=32), so the
+ * expected estimate is exactly 48*32*3 = 4608. Hand-built bytes, no PIL. */
+static const unsigned char JXL_FIXTURE[] = {
+    0xFF, 0xD8,                                           /* SOI */
+    0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, /* APP0 */
+    0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x20, 0x00, 0x30, /* SOF0 32x48 */
+    0x01, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+    0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00, /* SOS */
+    0xFF, 0xD9                                            /* EOI */
+};
+#define JXL_EXPECT 4608ULL   /* 48 * 32 * 3 */
+
+/* Run bin/jxlest estimate <path>: the bare count on success, with *rc set to
+ * the CLI exit status. Returns (unsigned long long)-1 when the CLI could not
+ * be run at all. */
+static unsigned long long jxl_cli_estimate(const char *path, int *rc)
+{
+    char cmd[512], buf[64];
+    FILE *p;
+    unsigned long long v = 0;
+    const char *s;
+    int st = -1;
+
+    snprintf(cmd, sizeof cmd,
+             "tools/codecpacks/jxl.codecpack/bin/jxlest estimate %s 2>/dev/null", path);
+    p = popen(cmd, "r");
+    if (!p) { *rc = -1; return (unsigned long long)-1; }
+    buf[0] = '\0';
+    if (!fgets(buf, sizeof buf, p)) { pclose(p); *rc = -1; return (unsigned long long)-1; }
+    st = pclose(p);
+    *rc = WIFEXITED(st) ? WEXITSTATUS(st) : -1;
+    s = buf;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') s++;
+    while (*s >= '0' && *s <= '9') { v = v * 10ull + (unsigned long long)(*s - '0'); s++; }
+    return v;
+}
+
+/* WP615: the jxl codecpack plugin leg. Same load pair and symbol surface as
+ * the containerpacks, but jxl is estimate-only: container verbs decline with
+ * 3 (there is no container CLI to fall back to), and estimate follows the
+ * codecpack admit convention (unknown geometry prints 0, returns 0) rather
+ * than the containerpack decline-3. So this leg pins CLI/.so parity on a
+ * fixture JPEG and on junk, not decline. */
+static void test_jxl_codecpack(const char *junk)
+{
+    const char *so = "tools/codecpacks/jxl.codecpack/libjxlest.so";
+    const char *cli = "tools/codecpacks/jxl.codecpack/bin/jxlest";
+    const char *jpg = "/tmp/ivpack_packs_test_tiny.jpg";
+    char what[512], want[128];
+    void *h = NULL;
+    ivpack_get_desc_fn get_desc;
+    ivpack_container_cmd_fn cmd;
+    ivpack_container_estimate_fn est;
+    const ivpack_desc *d;
+    FILE *f;
+
+    if (access(so, R_OK) != 0) {
+        if (system("make -s plugin-so >/dev/null 2>&1") != 0 || access(so, R_OK) != 0) {
+            skip("jxl: libjxlest.so not built and `make plugin-so` failed");
+            return;
+        }
+    }
+#ifdef LM_ID_NEWLM
+    h = dlmopen(LM_ID_NEWLM, so, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!h) h = dlopen(so, RTLD_NOW | RTLD_LOCAL);
+    ok(h != NULL, "jxl: libjxlest.so loads (dlmopen/dlopen)");
+    if (!h) {
+        printf("        %s\n", dlerror() ? dlerror() : "(no dlerror)");
+        return;
+    }
+
+    get_desc = (ivpack_get_desc_fn)dlsym(h, "ivpack_get_desc");
+    cmd = (ivpack_container_cmd_fn)dlsym(h, "ivpack_container_cmd");
+    est = (ivpack_container_estimate_fn)dlsym(h, "ivpack_container_estimate");
+    ok(get_desc && cmd && est, "jxl: exports the three ABI symbols");
+    if (!get_desc || !cmd || !est) { dlclose(h); return; }
+
+    d = get_desc();
+    ok(d && d->api_version >= IVPACK_API_VERSION_MIN, "jxl: api_version usable");
+    if (!d) { dlclose(h); return; }
+    if (manifest_get("jxl", "name", want, sizeof want) == 0)
+        ok(d->name && strcmp(d->name, want) == 0, "jxl: desc name matches the manifest");
+    /* No `type =` key in the jxl manifest: pin the codecpack literal. */
+    ok(d->pack_class && strcmp(d->pack_class, "codecpack") == 0,
+       "jxl: pack_class is codecpack");
+
+    ok(cmd(NULL) < 0, "jxl: NULL args is refused (<0)");
+    {
+        ivpack_container_args a;
+        memset(&a, 0, sizeof a);
+        a.cmd = 99;
+        a.in_path = junk;
+        a.out_path = "/dev/null";
+        ok(cmd(&a) < 0, "jxl: unknown cmd is refused (<0)");
+
+        memset(&a, 0, sizeof a);
+        a.cmd = 1;                       /* ENUMERATE without an out_path */
+        a.in_path = junk;
+        ok(cmd(&a) < 0, "jxl: ENUMERATE without out_path refused");
+
+        /* Well-formed but unsupported: jxl has no container surface, so it
+         * declines (3), exactly like a containerpack declining a non-image. */
+        memset(&a, 0, sizeof a);
+        a.cmd = 1;
+        a.in_path = junk;
+        a.out_path = "/dev/null";
+        ok(cmd(&a) == 3, "jxl: well-formed ENUMERATE declines with 3");
+    }
+
+    /* Estimate parity: the .so must answer what the CLI prints. */
+    f = fopen(jpg, "wb");
+    if (f) { fwrite(JXL_FIXTURE, 1, sizeof JXL_FIXTURE, f); fclose(f); }
+    if (access(jpg, R_OK) != 0) {
+        skip("jxl: could not write the fixture JPEG");
+    } else if (access(cli, X_OK) != 0) {
+        skip("jxl: bin/jxlest missing, parity leg needs the CLI");
+    } else {
+        ivpack_estimate_res res;
+        int crc, prc;
+        unsigned long long cv;
+        memset(&res, 0, sizeof res);
+        prc = est(jpg, &res);
+        cv = jxl_cli_estimate(jpg, &crc);
+        snprintf(what, sizeof what,
+                 "jxl: fixture estimate agrees (cli=%llu/%d plugin=%llu/%d)",
+                 cv, crc, (unsigned long long)res.mbr_size, prc);
+        ok(crc == 0 && prc == 0 && cv == JXL_EXPECT && res.mbr_size == cv
+           && res.eligible == 1, what);
+
+        /* Junk is admitted with 0 on both sides (the codecpack convention:
+         * geometry unknown, the decode-back guard is the arbiter). */
+        memset(&res, 0, sizeof res);
+        prc = est(junk, &res);
+        cv = jxl_cli_estimate(junk, &crc);
+        snprintf(what, sizeof what,
+                 "jxl: junk admitted identically (cli=%llu/%d plugin=%llu/%d)",
+                 cv, crc, (unsigned long long)res.mbr_size, prc);
+        ok(crc == 0 && prc == 0 && cv == 0 && res.mbr_size == 0
+           && res.eligible == 1, what);
+    }
+    unlink(jpg);
+    dlclose(h);
 }
 
 int main(void)
@@ -214,6 +366,8 @@ int main(void)
 
         dlclose(h);
     }
+
+    test_jxl_codecpack(junk);
 
     unlink(junk);
     printf("%d checks, %d failure(s), %d skip(s)\n", checks, failures, skips);

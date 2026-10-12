@@ -387,7 +387,21 @@ endef
 $(foreach p,$(CPACKS),$(eval $(call PLUGIN_SO_RULE,$(p))))
 
 PLUGIN_SO := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/lib$(p).so)
-plugin-so: $(PLUGIN_SO)
+# WP615: jxlest doubles as a .so plugin (libjxlest.so) from the same .c,
+# the same no-drift shape as the CPACKS rule above (the glue is compiled
+# into both builds; main() is dropped under -DIVPACK_SHARED_LIB). It is
+# NOT in CPACKS: that list drives bin/<pack> from <pack>.c for packs with a
+# manifest `type =` key and container verbs, while jxl is an estimate-only
+# codecpack (source jxlest.c, helper bin/jxlest, no `type` key, container
+# verbs decline). The filenames differ, so the rule is written out
+# explicitly rather than forced through the $(1) pattern; flags and libs
+# stay the single sources they are for the others (PLUGIN_CFLAGS above,
+# PACK_LIBS jxl from its own manifest -- never hardcoded here). jxlest is
+# libc-only, so it needs no own PLUGIN_CFLAGS_jxl.
+JXLEST_SO := tools/codecpacks/jxl.codecpack/libjxlest.so
+$(JXLEST_SO): tools/codecpacks/jxl.codecpack/jxlest.c tools/codecpacks/jxl.codecpack/manifest $(SRC)/include/ivpack_api.h $(SRC)/include/ivpack_impl.h
+	$(CC) $(PLUGIN_CFLAGS) -o $@ $< -ldl $(call PACK_LIBS,jxl)
+plugin-so: $(PLUGIN_SO) $(JXLEST_SO)
 
 # WP113: the CLI half of every containerpack -- bin/<name>, the helper the
 # pack's own manifest argv names and that each tools/test-<pack>.sh builds
@@ -409,11 +423,14 @@ HELPERS := $(foreach p,$(CPACKS),$(call PACKDIR,$(p))/bin/$(p))
 # which case it is in neither CPACKS nor any *_EXTRA_* list and so got no
 # build rule at all. jxlest (the SOF marker-walk estimator the jxl pack's
 # manifest names as `estimate = jxlest estimate {in}`) is the case in point:
-# plain C11 + libc, not an ivpack plugin, built ad-hoc by tools/test-jxl.sh
+# plain C11 + libc, built ad-hoc by tools/test-jxl.sh
 # and previously by packaging/install.sh's hand-rolled per-pack compile.
 # install.sh now SHIPS what the Makefile builds rather than re-deriving the
 # recipe, so a helper with no rule here is a helper that silently stops
 # being installed. Declared explicitly below; same flags as the other helpers.
+# (WP615: the CLI rule below still builds bin/jxlest with NO extra defines --
+# the plugin glue in jxlest.c is compiled into this build too, unused, so the
+# two can never drift; libjxlest.so has its own rule under plugin-so above.)
 STANDALONE_HELPER_FILES := tools/codecpacks/jxl.codecpack/bin/jxlest
 
 tools/codecpacks/jxl.codecpack/bin/jxlest: \
@@ -738,7 +755,7 @@ clean:
 	       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test \
 	       $(OUT)/invf-btree_test $(OUT)/invf-delta_test \
 	       $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
-	       $(OUT)/invf-ivpack_packs_test $(PLUGIN_SO) $(IVPACKS) \
+	       $(OUT)/invf-ivpack_packs_test $(PLUGIN_SO) $(JXLEST_SO) $(IVPACKS) \
 	       tools/invf-plugin-host \
 	       $(OUT)/invf-fuzz $(OUT)/gzhdrfuzz $(OUT)/gzhdrfuzz-libfuzzer \
 	       $(OUT)/invf-gz_header_test \

@@ -1,6 +1,10 @@
 #!/bin/bash
 # test-ivpacks.sh — ADR-007 plugin packaging end-to-end: every C containerpack
 # as BOTH a CLI helper and a lib<name>.so plugin, plus the .ivpack bundles.
+# The jxl codecpack rides along as an estimate-only plugin (libjxlest.so from
+# the same jxlest.c as bin/jxlest, WP615): descriptor surface + estimate
+# parity on a fixture JPEG and on junk, in its own leg -- it has no container
+# verbs and no `type =` key, so the per-pack CPACKS loops do not apply.
 #
 #   what it proves, per pack:
 #     [desc]   lib<name>.so loads through dlmopen(LM_ID_NEWLM) (dlopen
@@ -130,6 +134,16 @@ d = sys.argv[1]
 # a decline target that is definitely nobody's image
 open(os.path.join(d, "junk.bin"), "wb").write(bytes(random.Random(7).randrange(256)
                                                    for _ in range(65536)))
+# WP615: minimal JPEG with known geometry (SOF0: w=48, h=32) for the jxl
+# codecpack estimate-parity leg -- expected estimate 48*32*3 = 4608.
+open(os.path.join(d, "tiny.jpg"), "wb").write(bytes([
+    0xFF, 0xD8,
+    0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00,
+    0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x20, 0x00, 0x30,
+    0x01, 0x01, 0x11, 0x00, 0x02, 0x11, 0x01, 0x03, 0x11, 0x01,
+    0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+    0xFF, 0xD9]))
 # 4 MiB GPT disk: 3 named partitions (text / binary / zeros) + gap markers,
 # protective MBR, primary + backup header/entries (test-rawdisk.sh's layout,
 # scaled down so it fits a small tmpfs).
@@ -264,6 +278,45 @@ for p in $CPACKS; do
         fi
     done
 done
+
+# ------------------------------------------------- jxl (WP615, not in CPACKS) --
+# jxl is an estimate-only codecpack (jxlest.c -> bin/jxlest + libjxlest.so),
+# not a containerpack: no `type =` manifest key, no enumerate/extract/strip/
+# rebuild/map verbs, no .ivpack bundle. So it skips the CPACKS loops above
+# and gets its own leg here: descriptor surface + estimate parity (CLI vs
+# .so) on the fixture JPEG and on junk. Junk is ADMITTED with 0 on both
+# sides (the codecpack unknown-geometry convention) -- NOT declined with 3
+# like the containerpacks, so the decline-parity check above must not run
+# on it.
+echo "== jxl codecpack plugin (estimate-only, WP615) =="
+jd=$PACKROOT/jxl.codecpack
+jso=$jd/libjxlest.so
+jcli=$jd/bin/jxlest
+[ -s "$jso" ] || bad "jxl: make plugin-so produced no libjxlest.so"
+if [ ! -x "$jcli" ]; then
+    make -s -C "$REPO" tools/codecpacks/jxl.codecpack/bin/jxlest >/dev/null \
+        || bad "jxl: CLI build failed"
+fi
+if [ -s "$jso" ] && [ -x "$jcli" ]; then
+    desc=$("$WORK/bin/ivpack-probe" desc "$jso") || bad "jxl: desc probe failed"
+    case "${desc:-}" in *"name=jxl "*) ;; *) bad "jxl: desc name != jxl ($desc)" ;; esac
+    case "${desc:-}" in *"pack_class=codecpack "*) ;; *) bad "jxl: desc pack_class != codecpack ($desc)" ;; esac
+    case "${desc:-}" in *"cmd=yes estimate=yes"*) ok "jxl: $desc" ;; *) bad "jxl: missing cmd/estimate export ($desc)" ;; esac
+    # estimate parity on the fixture JPEG (48x32 -> 4608) and on junk (0/0).
+    for img in tiny.jpg junk.bin; do
+        want=4608; [ "$img" = junk.bin ] && want=0
+        cout=$("$jcli" estimate "$WORK/orig/$img" 2>/dev/null); crc=$?
+        pout=$("$WORK/bin/ivpack-probe" est "$jso" "$WORK/orig/$img" 2>/dev/null); prc=$?
+        pnum=$(printf '%s\n' "$pout" | sed -n 's/.*mbr_size=\([0-9]*\).*/\1/p')
+        if [ "$crc" != 0 ] || [ "$prc" != 0 ]; then
+            bad "jxl: $img estimate failed (cli=$crc plugin=$prc)"
+        elif [ "$cout" != "$want" ] || [ "$pnum" != "$want" ]; then
+            bad "jxl: $img estimate parity (cli=$cout plugin=$pnum want=$want)"
+        else
+            ok "jxl: $img estimated identically (cli=$cout plugin=$pnum)"
+        fi
+    done
+fi
 
 # ------------------------------------------------------------ round trips --
 # rt <pack> <image>: enumerate/extract-all/strip/rebuild/map through the PLUGIN
