@@ -3,6 +3,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 #include "vol_fault.h"   /* test-only seams (P0-2 red control) */
 
 /* Test-only reload door for this TU's fault sites (same shape as the
@@ -711,7 +712,14 @@ static int tz_commit_member(invfs_volume *v, int binary,
         return -1;
     if (keep_map)
         pba_ref_validate(v);
-    vol_free_recipe_blocks(v, old_addr, 0);
+    /* WP612: the superseded member segments are RETIRED, not freed. The
+     * publish above is staged, not durable -- a fence-failure doom
+     * restores the old recipe, which would then name freed blocks (the
+     * WP607 s35/s23 class). The keep_map ensure/validate pair stays: the
+     * map is still exact across this publish (the new recipe is TEXT-only,
+     * which the map never counts), and the drain rebuilds it if anything
+     * later stales it. TEXT entries stay registry-owned as before. */
+    vol_retire_recipe(v, cand->inode_id, old_addr, 0);
     if (binary)
         vol_stamp_class(v, cand->inode_id, INVFS_CLASS_BATCHED_BIN,
                         (uint8_t)m->algo, invfs_registry_generation());

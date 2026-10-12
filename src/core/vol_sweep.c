@@ -3,6 +3,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 
 
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
@@ -997,7 +998,9 @@ static void stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
  * -> ZSTD encode -> decode round-trip guard (publish only bit-exact)
  * -> publish via vol_create_blob_file's v3 branch (content-addressed
  * recipe blob + in-place row supersede; the superseded RAW data segments
- * are reclaimed immediately via targeted free vol_free_recipe_blocks).
+ * are retired to the fence via vol_retire_pbas, WP612 -- the row publish
+ * is staged, so freeing them inline would hand live-again rows reused
+ * blocks when a fence-failure doom unwinds it).
  * Class stamps (v3 xattrs, WP-M7) keep the WP10 policy: drained files
  * skip, uncompressible files are generation-gated, ENOSPC defers.
  * Deliberate M18-remainder gaps (v2 owner-record machinery, not yet
@@ -1514,7 +1517,11 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                 remap[remap_n].new_plen = phys_blocks_new;
                 remap_n++;
 
-                pba_ref_modify(v, pba_new, +1);
+                /* WP612: no +1 here any more. The count used to be moved
+                 * by hand for the publish-time validate (now retired with
+                 * it); the publish flags the map stale and the next free
+                 * gate -- the retire drain included -- rebuilds it from the
+                 * live set, which names pba_new through the new row. */
                 e->pba = pba_new;
                 e->algo = tasks[k].algo_new;
                 e->zone = INVFS_ZONE_BINARY;
@@ -1570,18 +1577,19 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                             "sweep: %s: row publish failed (device error "
                             "mid-pass); rolling back\n",
                             name ? name : "?");
-                /* WP pba-ref-v3-incremental: the remap loop above moved
-                 * the counts itself (-1 per retired pba, +1 per new
-                 * one), so the map is exact again and the staleness
-                 * vol_inode_delta_put just flagged does not apply -- but
-                 * only when the publish actually landed. On a failed put
-                 * the rollback below un-counts and frees the new blocks,
-                 * leaving the old counts exact; invalidate so the next
-                 * free gate rebuilds instead of trusting either state. */
-                if (published)
-                    pba_ref_validate(v);
-                else
-                    pba_ref_invalidate(v);
+                /* WP612: no hand-kept refcount moves across the publish any
+                 * more (the WP pba-ref-v3-incremental shape retired with
+                 * them). The -1 per retired pba / +1 per new one used to run
+                 * here, under a staged row: a fence-failure doom restores
+                 * the old recipe while the map already discharged it, so a
+                 * later free could take a live block (the WP607 s35/s23
+                 * class). The drain replays the moves against a rebuilt map
+                 * instead. The publish flagged the map stale; invalidate
+                 * explicitly so the next free gate rebuilds from the live
+                 * set even if that flagging ever moves. On a failed put the
+                 * rollback below un-counts and frees the new blocks, and
+                 * the same invalidate covers it. */
+                pba_ref_invalidate(v);
                 /* WP78: the same gain verdict the v2 generic floor uses
                  * (the per-segment sum vs the file size), so a wholly
                  * incompressible multi-segment file is stamped
@@ -1601,24 +1609,45 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             free(new_blob);
 
             if (published) {
-                /* Structure before reference, in the only direction that is
-                 * safe: the new recipe is durable, so the segments it
-                 * replaced may go. The refcount test is the pre-existing
-                 * share guard (a pba two live recipes still name is not
-                 * freed), unchanged -- only its POSITION moved.
+                /* WP612: the segments the new recipe replaced are RETIRED,
+                 * not freed. Structure-before-reference still holds -- the
+                 * new recipe is stored and the row names it -- but the row
+                 * is STAGED, not durable, so freeing here hands live-again
+                 * rows reused blocks when a fence-failure doom unwinds the
+                 * publish (the WP-leg2-root-cause shape one level up: that
+                 * comment covers a failed put; this covers a put whose
+                 * fence never lands). The entry carries the old set with
+                 * the new set as keep; the drain replays the share-aware
+                 * loop against the live map (sparing dedupe shares), and
+                 * only while this row is still the live one.
                  * WP sweep-rollback-test-conflict: this loop was dropped by
                  * the same merge, so a SUCCESSFUL publish stranded the
                  * superseded segments too -- the second half of the unclaimed
-                 * growth that suite measures. */
-                for (size_t r = 0; r < remap_n; r++) {
-                    pba_ref_modify(v, remap[r].old_pba, -1);
-                    if (pba_ref_count(v, remap[r].old_pba) == 0) {
-                        CD("SWEEP-REMAP-FREE inode=%llu pba=%llu n=%llu",
-                           (unsigned long long)inode_id,
-                           (unsigned long long)remap[r].old_pba,
-                           (unsigned long long)remap[r].old_plen);
-                        vol_free_blocks(v, remap[r].old_pba, remap[r].old_plen);
+                 * growth that suite measures. Retiring keeps that accounting:
+                 * the blocks are still discharged, only at the fence. */
+                {
+                    uint64_t *oldp = NULL, *keepp = NULL;
+                    oldp = remap_n ?
+                        (uint64_t *)malloc(remap_n * sizeof *oldp) : NULL;
+                    keepp = remap_n ?
+                        (uint64_t *)malloc(remap_n * sizeof *keepp) : NULL;
+                    if (remap_n == 0 || (oldp && keepp)) {
+                        size_t r;
+                        for (r = 0; r < remap_n; r++) {
+                            oldp[r] = remap[r].old_pba;
+                            keepp[r] = remap[r].new_pba;
+                        }
+                        if (remap_n)
+                            vol_retire_pbas(v, inode_id, oldp, remap_n,
+                                            keepp, remap_n);
+                    } else {
+                        fprintf(stderr,
+                                "sweep: %s: retire list OOM; superseded "
+                                "segments stay allocated for the orphan "
+                                "collector\n", name ? name : "?");
                     }
+                    free(oldp);
+                    free(keepp);
                 }
             } else {
                 /* The pass wrote %llu blocks and could not name a single one

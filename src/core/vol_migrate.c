@@ -49,6 +49,7 @@
 #include "invarifs.h"
 #include "volume.h"
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 #include "vol_walk.h"
 #include "vol_migrate.h"
 #include "codec.h"
@@ -403,10 +404,12 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
         }
         moves[n_moves].old_pba = old_pba;
         moves[n_moves].old_plen = old_plen;
-        moves[n_moves].new_pba = pba_new;
         moves[n_moves].new_plen = new_plen;
         n_moves++;
-        pba_ref_modify(v, pba_new, +1);
+        /* WP612: no +1 here any more (the publish-time validate retired
+         * with it). The publish flags the map stale and the next free
+         * gate -- the retire drain included -- rebuilds it from the live
+         * set, which names pba_new through the new row. */
         ne[i].pba = pba_new;
         /* The zone TAG is deliberately left exactly as it was, even
          * when the bytes physically land in the shadow extent (RAW tag
@@ -455,20 +458,26 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
                 fprintf(stderr,
                         "[migrate] %s: row publish failed; rolling back\n",
                         name ? name : "?");
-            if (published)
-                pba_ref_validate(v);
-            else
-                pba_ref_invalidate(v);
+            /* WP612: no hand-kept exactness across the publish any more.
+             * The -1 per moved pba / +1 per new one used to run under a
+             * staged row (same WP607 s35/s23 hazard as the sweep remap).
+             * The publish flagged the map stale; invalidate explicitly so
+             * the next free gate rebuilds from the live set. */
+            pba_ref_invalidate(v);
         }
         free(new_blob);
 
         if (published) {
-            /* New recipe durable: the segments it replaced may go. The
-             * refcount is the share guard (a pba another live recipe
-             * still names is not freed here); every entry here counted
-             * exactly 1 at pricing time, so the -1 discharges our move. */
+            /* WP612: the segments the new recipe replaced are RETIRED, not
+             * freed. The row publish above is staged -- a fence-failure
+             * doom restores the old recipe, which would then name freed
+             * blocks. The entry carries the old set with the new set as
+             * keep; the drain replays the share-aware loop against the
+             * live map, and only while this row is still the live one.
+             * The seal handoff stays inline: it marks ranges for parity
+             * recompute, it frees nothing, and recomputing over
+             * still-allocated blocks is the safe direction. */
             for (r = 0; r < n_moves; r++) {
-                pba_ref_modify(v, moves[r].old_pba, -1);
                 /* Seal handoff: the old range's stripes need a parity
                  * recompute at the next reseal. Consumed, never silent:
                  * a no-op when no seal session tracks (NULL bitmap), the
@@ -476,23 +485,39 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
                 seal_dirty_mark(v, moves[r].old_pba, moves[r].old_plen);
                 *seal_ranges += 1;
                 *seal_blocks += moves[r].old_plen;
-                if (pba_ref_count(v, moves[r].old_pba) == 0) {
-                    if (getenv("INVFS_MIGRATE_DEBUG"))
-                        fprintf(stderr,
-                                "[migrate-dbg] FREE old pba=%llu plen=%llu\n",
-                                (unsigned long long)moves[r].old_pba,
-                                (unsigned long long)moves[r].old_plen);
-                    vol_free_blocks(v, moves[r].old_pba, moves[r].old_plen);
+            }
+            {
+                uint64_t *oldp = NULL, *keepp = NULL;
+                oldp = n_moves ?
+                    (uint64_t *)malloc(n_moves * sizeof *oldp) : NULL;
+                keepp = n_moves ?
+                    (uint64_t *)malloc(n_moves * sizeof *keepp) : NULL;
+                if (n_moves == 0 || (oldp && keepp)) {
+                    for (r = 0; r < n_moves; r++) {
+                        oldp[r] = moves[r].old_pba;
+                        keepp[r] = moves[r].new_pba;
+                    }
+                    if (n_moves)
+                        vol_retire_pbas(v, inode_id, oldp, n_moves,
+                                        keepp, n_moves);
+                } else {
+                    fprintf(stderr,
+                            "[migrate] %s: retire list OOM; superseded "
+                            "segments stay allocated for the orphan "
+                            "collector\n", name ? name : "?");
                 }
+                free(oldp);
+                free(keepp);
             }
             *moved_segs += nmoved;
             *moved_blocks += spend;
             rc_out = 1;
         } else {
             /* Nothing reachable names the new extents; the old recipe is
-             * intact. Give them all back (the sweep rollback's rule). */
+             * intact. Give them all back (the sweep rollback's rule). No
+             * refcount to un-count any more (WP612: the record-time +1
+             * retired with the publish-time -1s). */
             for (r = 0; r < n_moves; r++) {
-                pba_ref_modify(v, moves[r].new_pba, -1);
                 vol_free_blocks(v, moves[r].new_pba, moves[r].new_plen);
             }
             *budget_io += spend;  /* rolled back: the budget is whole again */

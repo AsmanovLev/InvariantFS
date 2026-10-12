@@ -2,6 +2,7 @@
  * creation shared by the recipe-based codecs. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 #include "../codecs/deflate_repro.h"   /* INVFS_DEFLATE_ENGINE_* for a window transform */
 
 
@@ -940,8 +941,16 @@ uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode_id,
     if (vol_inode_delta_put(v, inode_id, &in) != 0)
         return 0;
 
-    /* WP-N1: targeted free of old RAW/shadow data blocks superseded by the new blob */
-    vol_free_recipe_blocks(v, old_addr, pba);
+    /* WP-N1/WP612: the old RAW/shadow data blocks superseded by the new
+     * blob are RETIRED, not freed: the row publish above is staged, not
+     * durable, and a fence-failure doom restores the old recipe, which
+     * would then name freed blocks (the WP607 s35/s23 class, sweep form).
+     * The old keep_pba (the just-written pba) is vacuous here and is not
+     * carried: it came from alloc_blocks -- the free pool -- while every
+     * pba the retired recipe names is marked allocated, and the allocator
+     * never hands out an allocated block, so the retired recipe cannot
+     * name it. The drain replays the same share-aware resolver. */
+    vol_retire_recipe(v, inode_id, old_addr, 0);
 
     return inode_id;
 }
@@ -1047,9 +1056,11 @@ uint64_t vol_publish_window_inode(invfs_volume *v, const char *name,
     memset(&in.recipe, 0, sizeof in.recipe);
     memcpy(in.recipe_addr, addr, INVFS_RECIPE_ADDR_LEN);
     if (vol_inode_delta_put(v, id, &in) != 0) return 0;
-    /* the window holds no blocks, so keep_pba is 0: free whatever the old
-     * recipe of this inode used to own */
-    vol_free_recipe_blocks(v, old_addr, 0);
+    /* the window holds no blocks, so there is no keep_pba: whatever the
+     * old recipe of this inode used to own is RETIRED (WP612), not freed
+     * -- the row publish above is staged, and a doomed row restored to
+     * the old recipe must keep its blocks. */
+    vol_retire_recipe(v, id, old_addr, 0);
     return id;
 }
 

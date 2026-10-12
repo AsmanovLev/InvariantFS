@@ -247,6 +247,18 @@ int main(int argc, char **argv)
     ok(memcmp(new_addr, old_addr, INVFS_RECIPE_ADDR_LEN) != 0,
        "PREMISE: the recipe address really changed");
 
+    /* WP612: the lane retires the superseded blocks to the fence (the
+     * write-path WP607 shape) instead of freeing them inline, so the
+     * release below lands at the covering barrier. Close/reopen is that
+     * barrier here: the retire drain runs at close after the barrier. */
+    vol_close(g_v);
+    {
+        int err2 = 0;
+        g_v = vol_open(g_img, &err2);
+        ok(g_v != NULL, "reopen after the lane drains retires");
+        if (!g_v) { free(tar); return 1; }
+    }
+
     /* ---- LEG 2a: what the release was asked for ---- */
     old_alloc_after = count_allocated(old_pbas, n_old);
     printf("        superseded blocks still allocated: %d of %zu\n",

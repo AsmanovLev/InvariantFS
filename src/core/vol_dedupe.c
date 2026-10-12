@@ -12,6 +12,7 @@
  */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 
 
 /* ---- WP12(h): offline per-segment dedupe ------------------------------
@@ -194,6 +195,13 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     uint8_t *new_blob = NULL;
     size_t new_blen = 0;
     uint8_t new_addr[INVFS_RECIPE_ADDR_LEN];
+    /* WP612: applied losers, tracked here because new_ents is freed long
+     * before the retire below runs (the retire must come after the row
+     * publish: its span capture needs the staged row). Sized by nm; a
+     * NULL pair disables tracking and the losers leak to the orphan
+     * collector, never to a wrong free. */
+    uint64_t *trk_cur = NULL, *trk_canon = NULL;
+    size_t ntrk = 0;
 
     *freed_out = 0;
     *applied_out = 0;
@@ -218,6 +226,15 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
     new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
     if (!new_ents) { free(blob); return -1; }
     memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
+    if (nm) {
+        trk_cur = (uint64_t *)malloc(nm * sizeof *trk_cur);
+        trk_canon = (uint64_t *)malloc(nm * sizeof *trk_canon);
+        if (!trk_cur || !trk_canon) {
+            free(trk_cur);
+            free(trk_canon);
+            trk_cur = trk_canon = NULL;
+        }
+    }
 
     for (m = 0; m < nm; m++) {
         for (j = 0; j < n_ents; j++) {
@@ -226,8 +243,16 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
                     new_ents[j].pba = ms[m].canon_pba;
                     applied++;
                     if (ms[m].cross_file) (*cross_applied_out)++;
-                    pba_ref_modify(v, ms[m].cur_pba, -1);
-                    pba_ref_modify(v, ms[m].canon_pba, +1);
+                    /* WP612: no -1/+1 here any more. The counts used to be
+                     * moved by hand for the publish-time validate below;
+                     * that ran under a staged row (same WP607 s35/s23
+                     * hazard as the sweep remap). The publish flags the
+                     * map stale and the retire drain rebuilds it. */
+                    if (trk_cur && ntrk < nm) {
+                        trk_cur[ntrk] = ms[m].cur_pba;
+                        trk_canon[ntrk] = ms[m].canon_pba;
+                        ntrk++;
+                    }
                 }
                 break;
             }
@@ -237,51 +262,68 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
 
     if (!applied) {
         free(new_ents);
+        free(trk_cur);
+        free(trk_canon);
         return 1;
     }
 
     if (vol_ast_recipe_serialize(in.size, new_ents, (uint32_t)n_ents,
                                  &new_blob, &new_blen) != 0) {
         free(new_ents);
+        free(trk_cur);
+        free(trk_canon);
         return -1;
     }
     free(new_ents);
 
     if (vol_recipe_store(v, new_blob, new_blen, new_addr) != 0) {
         free(new_blob);
+        free(trk_cur);
+        free(trk_canon);
         return -1;
     }
     free(new_blob);
 
     memcpy(in.recipe_addr, new_addr, sizeof(new_addr));
-    if (vol_inode_delta_put(v, inode, &in) != 0)
+    if (vol_inode_delta_put(v, inode, &in) != 0) {
+        free(trk_cur);
+        free(trk_canon);
         return -1;
-    /* WP pba-ref-v3-incremental: the merge loop above moved the counts
-     * itself (-1 per loser pba, +1 per canonical pba), so the map is exact
-     * and the staleness vol_inode_delta_put just flagged does not
-     * apply -- clearing it here is what keeps a dedupe pass from paying a
-     * full rebuild at its next free gate. */
-    pba_ref_validate(v);
+    }
+    /* WP612: no hand-kept exactness across the publish any more (the
+     * merge-time moves retired with the free loop below). The publish
+     * flagged the map stale; invalidate explicitly so the next free gate
+     * rebuilds from the live set. */
+    pba_ref_invalidate(v);
 
-    /* Free loser extents if their refcount dropped to 0 */
-    for (m = 0; m < nm; m++) {
-        size_t k;
-        int seen = 0;
-        for (k = 0; k < m; k++) {
-            if (ms[k].cur_pba == ms[m].cur_pba) { seen = 1; break; }
-        }
-        if (seen) continue;
-        if (pba_ref_count(v, ms[m].cur_pba) == 0) {
+    /* WP612: loser extents are RETIRED, not freed. The row publish above
+     * is staged, not durable -- a fence-failure doom restores the old
+     * recipe, which would then name freed blocks (the WP607 s35/s23
+     * class, dedupe form). Only APPLIED losers retire, read off the
+     * tracker filled by the merge loop (a merge that did not apply still
+     * names its cur_pba live). The entry carries the losers with the
+     * canons as keep; the drain replays the share-aware loop against the
+     * live map, and only while this row is still the live one. `freed`
+     * counts retired blocks: they discharge at the covering fence, which
+     * precedes close, so pass totals still converge. Untracked (tracker
+     * OOM) losers stay allocated for the orphan collector. */
+    {
+        size_t a;
+        if (ntrk)
+            vol_retire_pbas(v, inode, trk_cur, ntrk, trk_canon, ntrk);
+        for (a = 0; a < ntrk; a++) {
+            size_t k;
+            int seen = 0;
             uint64_t plen = 0;
-            if (seg_extent_checked(v, ms[m].cur_pba, &plen) == 0 && plen > 0) {
-                CD("DEDUPE-FREE inode=%llu pba=%llu n=%llu",
-                   (unsigned long long)ms[m].inode,
-                   (unsigned long long)ms[m].cur_pba,
-                   (unsigned long long)plen);
-                vol_free_blocks(v, ms[m].cur_pba, plen);
-                freed += plen;
+            for (k = 0; k < a; k++) {
+                if (trk_cur[k] == trk_cur[a]) { seen = 1; break; }
             }
+            if (seen) continue;
+            if (seg_extent_checked(v, trk_cur[a], &plen) == 0 && plen > 0)
+                freed += plen;
         }
+        free(trk_cur);
+        free(trk_canon);
     }
 
     *freed_out = freed;

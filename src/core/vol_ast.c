@@ -2,6 +2,7 @@
  * creation + lookup by name. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_delta.h"   /* WP612 retire API */
 
 
 
@@ -213,7 +214,20 @@ int vol_free_recipe_blocks(invfs_volume *v,
  *  - `zone == INVFS_ZONE_TEXT` entries are skipped inside
  *    vol_free_recipe_blocks (a shared batch segment is owned by the
  *    batch registry, not by this member), and the pba refcount means a
- *    block another live recipe still names is not freed here. */
+ *    block another live recipe still names is not freed here.
+ *
+ * WP612: the free is RETIRED, not run. The callers just staged the
+ * superseding row (vol_create_blob_file -> vol_inode_delta_put), and a
+ * staged row is not durable -- group commit may doom and unwind it, and
+ * a fence failure restores the old recipe, which would then name freed
+ * blocks (the WP607 s35/s23 use-after-free, sweep-lane form). The
+ * delete-kind entry is wrong here (the row still exists, naming the NEW
+ * recipe); the supersede-kind entry frees at the first successful fence
+ * covering the new row, and only while that row is still the live one.
+ * The moved-guard above stays: it is what keeps a same-address re-run
+ * from retiring live blocks, and the drain's span+seq guard cannot see
+ * it (both rows would stage the same address). Leaks (dropped entries,
+ * over-cap) go to the sweep orphan collector, never to a double free. */
 void vol_release_superseded_blob(
     invfs_volume *v, uint64_t inode_id,
     const uint8_t old_addr[INVFS_RECIPE_ADDR_LEN])
@@ -229,7 +243,7 @@ void vol_release_superseded_blob(
     if (memcmp(now.recipe_addr, old_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return;
     CD("RETIRE inode=%llu", (unsigned long long)inode_id);
-    vol_free_recipe_blocks(v, old_addr, 0);
+    vol_retire_recipe(v, inode_id, old_addr, 0);
 }
 
 

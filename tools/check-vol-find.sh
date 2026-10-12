@@ -124,7 +124,7 @@ src/core/vol_cpack.c:4313:ACTS   # member table: miss aborts with error
 src/core/vol_cpack.c:4345:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
-src/core/vol_png.c:1013:SKIP
+src/core/vol_png.c:1022:SKIP
 src/core/vol_read.c:1080:SKIP
 src/core/vol_read.c:1176:SKIP
 src/core/vol_read.c:1214:ACTS
@@ -135,13 +135,13 @@ src/core/vol_read.c:818:SKIP
 src/core/vol_read.c:835:SKIP
 src/core/vol_read.c:895:SKIP
 src/core/vol_read.c:970:SKIP
-src/core/vol_sweep.c:1794:SKIP
-src/core/vol_sweep.c:251:SKIP
-src/core/vol_sweep.c:556:ACTS
-src/core/vol_sweep.c:575:ACTS
-src/core/vol_sweep.c:595:ACTS
-src/core/vol_sweep.c:614:ACTS
-src/core/vol_textzone.c:775:SKIP
+src/core/vol_sweep.c:1823:SKIP
+src/core/vol_sweep.c:252:SKIP
+src/core/vol_sweep.c:557:ACTS
+src/core/vol_sweep.c:576:ACTS
+src/core/vol_sweep.c:596:ACTS
+src/core/vol_sweep.c:615:ACTS
+src/core/vol_textzone.c:783:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
 src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)

@@ -144,7 +144,18 @@ int main(int argc, char **argv)
     ok(ds.blocks_freed > 0, "dedupe reports reclaimed block count");
     ok(progress_calls > 0 && saw_hash_progress && saw_merge_progress,
        "dedupe progress callback covers hash and merge phases");
-    ok(v->free_blocks > free_before, "free blocks increased after deduplication");
+    /* WP612: dedupe loser pbas retire to the fence (the write-path WP607
+     * shape) instead of freeing inline, so the reclaim lands at the
+     * covering barrier, not inside the dedupe call. Close/reopen is that
+     * barrier here: the retire drain runs at close after the barrier. */
+    vol_close(v);
+    v = NULL;
+    {
+        int err = 0;
+        v = vol_open(img, &err);
+        ok(v != NULL, "reopen after dedupe drains retires");
+    }
+    ok(v != NULL && v->free_blocks > free_before, "free blocks increased after deduplication");
 
     /* 4. Flush and check bit-exact content */
     vol_flush(v);

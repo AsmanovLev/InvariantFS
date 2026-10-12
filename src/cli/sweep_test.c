@@ -132,7 +132,20 @@ int main(int argc, char **argv)
         int swept = vol_sweep_pending(v);
         ok(swept == 3, "vol_sweep_pending processed 3 files");
     }
-    ok(v->raw_free > raw_free_before, "RAW zone reclaimed freed blocks after sweep");
+    /* WP612: the sweep lanes retire superseded segments to the fence
+     * (the write-path WP607 shape) instead of freeing them inline, so
+     * the reclaim lands at the covering barrier, not inside the sweep
+     * call. Close/reopen is that barrier here: the retire drain runs at
+     * close after the barrier, and the reopened handle must show the
+     * blocks back. */
+    vol_close(v);
+    v = NULL;
+    {
+        int err = 0;
+        v = vol_open(img, &err);
+        ok(v != NULL, "reopen after sweep drains retires");
+    }
+    ok(v != NULL && v->raw_free > raw_free_before, "RAW zone reclaimed freed blocks after sweep");
 
     /* 8. Assert all files left RAW for consolidated storage. WP78: v3 now
      * batches text into the TEXT zone (PPMd) exactly like v2, so the

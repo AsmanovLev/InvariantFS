@@ -1432,6 +1432,14 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # the free-block count does not drop across the sweep; pre-fix it drops
 # by 17 per orphaned segment and nothing ever gives them back.
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-publish-rollback.sh
+# WP612: sweep-lane superseded frees ride retire-on-fence (the WP607 shape
+# for the offline lanes). A TAR-heavy corpus is swept twice: sweep #1 must
+# RECLAIM through the retire drain (free blocks rise; a drain that never
+# ran strands the superseded segments), every file must invf-cat
+# byte-identical (no dangling live recipe), fsck must stay clean, and
+# sweep #2 must be stable (no per-sweep leak beyond the documented
+# one-sweep savepoint lag).
+	$(TESTENV) $(TESTISO) bash tools/test-sweep-lane-retire.sh
 # WP604: a vol_unlink that fails must not mutate (rc==0 iff the namespace
 # changed). Sealed volume, one post-seal write, then a fault-armed unlink:
 # pre-fix the recipe-free failure returned -1 with the dirent already gone.
