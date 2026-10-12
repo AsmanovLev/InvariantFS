@@ -16,17 +16,7 @@ concurrency:
 on:
   push:
     branches: ["**"]
-    # Docs-only pushes skip the heavy tiers (a man-page typo must not
-    # cancel a green release validation run); docs-gate below still runs.
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
-      - "packaging/man/**"
   pull_request:
-    paths-ignore:
-      - "docs/**"
-      - "*.md"
-      - "packaging/man/**"
   # The distro install harnesses are heavy: they download a full Arch
   # bootstrap (~120 MB) or a Void ROOTFS, build a 1.8 GB staging tree, and
   # then mkfs + import it. They are not a per-push gate; they are a loop,
@@ -34,12 +24,96 @@ on:
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
+    inputs:
+      full:
+        description: "force the full tier (all jobs) regardless of scope"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
 
 jobs:
+  # Scope gate: distro-specific changes run distro-specific jobs, not the
+  # whole tier. Rules (first match wins in the case list below):
+  #   docs/md/man only ............ docs-gate only (heavy tiers skip)
+  #   packaging/<distro> .......... that distro's package+install jobs
+  #   shared packaging (install.sh, units, hooks, test-packaging.sh)
+  #     ........................... all distro jobs
+  #   install scripts (iso-*, boot-*, test-*-install.sh)
+  #     ........................... the matching install jobs
+  #   everything else (src, Makefile, tools, .github, unknown)
+  #     ........................... FULL tier (safe default: over-run)
+  # engine + docs-gate always run (needs chains + load-bearing hygiene).
+  # e2e-full + soak run on full runs only (they test engine code).
+  # Tag discipline: tag a release only off a full-green run -- dispatch
+  # with full=true (the default) when the push itself ran scoped.
+  scope:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      full: ${{ steps.calc.outputs.full }}
+      deb: ${{ steps.calc.outputs.deb }}
+      rpm: ${{ steps.calc.outputs.rpm }}
+      arch: ${{ steps.calc.outputs.arch }}
+      gentoo: ${{ steps.calc.outputs.gentoo }}
+      void: ${{ steps.calc.outputs.void }}
+      boot_arch: ${{ steps.calc.outputs.boot_arch }}
+      boot_void: ${{ steps.calc.outputs.boot_void }}
+      boot_debian: ${{ steps.calc.outputs.boot_debian }}
+      boot_fedora: ${{ steps.calc.outputs.boot_fedora }}
+      iso_arch: ${{ steps.calc.outputs.iso_arch }}
+      iso_void: ${{ steps.calc.outputs.iso_void }}
+      iso_gentoo: ${{ steps.calc.outputs.iso_gentoo }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - id: calc
+        run: |
+          FULL=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0
+          BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
+          force_full() { FULL=1; }
+          if [ "${{ github.event_name }}" = schedule ]; then force_full
+          elif [ "${{ github.event_name }}" = workflow_dispatch ] && \
+               [ "${{ inputs.full }}" = "true" ]; then force_full
+          else
+            BASE="${{ github.event.pull_request.base.sha }}"
+            [ -z "$BASE" ] && BASE="${{ github.event.before }}"
+            case "$BASE" in ""|0000000000000000000000000000000000000000) force_full;; *)
+            FILES=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || echo FORCE_FULL)
+            [ "$FILES" = FORCE_FULL ] && force_full
+            for f in $FILES; do
+              case "$f" in
+                docs/*|*.md|packaging/man/*) ;;
+                packaging/debian/*) DEB=1; BD=1;;
+                packaging/invfs.spec) RPM=1; BF=1;;
+                packaging/PKGBUILD) ARCH=1; BA=1; IA=1;;
+                packaging/gentoo/*) GEN=1; IG=1;;
+                packaging/void/*) VOID=1; BV=1; IV=1;;
+                packaging/install.sh|packaging/systemd/*|packaging/dracut/*|packaging/mkinitcpio/*) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1;;
+                tools/test-packaging.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1;;
+                tools/iso-arch-install.sh|tools/boot-arch-qemu.sh|tools/iso-guest-arch-setup.sh|tools/test-arch-install.sh) BA=1; IA=1;;
+                tools/iso-void-install.sh|tools/boot-void-qemu.sh|tools/iso-guest-void-setup.sh|tools/test-void-install.sh) BV=1; IV=1;;
+                tools/boot-debian-qemu.sh) BD=1;;
+                tools/test-fedora-install.sh) BF=1;;
+                tools/iso-gentoo-install.sh|tools/iso-guest-gentoo-setup.sh) IG=1;;
+                *) force_full;;
+              esac
+            done;; esac
+          fi
+          {
+            echo "full=$FULL"; echo "deb=$DEB"; echo "rpm=$RPM"
+            echo "arch=$ARCH"; echo "gentoo=$GEN"; echo "void=$VOID"
+            echo "boot_arch=$BA"; echo "boot_void=$BV"
+            echo "boot_debian=$BD"; echo "boot_fedora=$BF"
+            echo "iso_arch=$IA"; echo "iso_void=$IV"; echo "iso_gentoo=$IG"
+          } >> "$GITHUB_OUTPUT"
+          echo "scope: full=$FULL deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID"
+
   # Load-bearing docs gate (AGENTS.md §1.8): broken doc links or man-page
-  # syntax fail the build here in under a minute, on every push including
-  # docs-only ones the heavy tiers skip.
+  # syntax fail the build here in under a minute, on every push.
   docs-gate:
+    needs: [scope]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     steps:
@@ -147,7 +221,8 @@ jobs:
   # so a bins-only artifact cannot feed them. Per-suite timeout so one
   # wedged suite cannot eat the job.
   e2e-full:
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true'
     # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
     # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
     # image. The version split is coverage, not drift: engine still gates
@@ -204,7 +279,8 @@ jobs:
   # that need a human, not a gate. Builds the tree itself, same white-box
   # reason as e2e-full (it compiles orphan_test mid-run).
   soak-flakey:
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     continue-on-error: true
@@ -258,7 +334,8 @@ jobs:
   # is pinned under RUNNER_TEMP so a 1.8 GB staging tree never lands on the
   # runner's small /tmp.
   installation-bootstrap-arch:
-    needs: [engine, packaging-arch]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.boot_arch == 'true'
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
     # realism for the same CI minutes. Re-enable by deleting this condition;
@@ -396,7 +473,8 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-void:
-    needs: [engine, packaging-void]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.boot_void == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -522,7 +600,8 @@ jobs:
           if-no-files-found: ignore
 
   installation-bootstrap-debian:
-    needs: [engine, packaging-debian]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.deb == 'true' || needs.scope.outputs.boot_debian == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -649,7 +728,8 @@ jobs:
   # two-device), fsck clean, bit-exact reads. No boot yet -- that needs
   # boot-fedora-qemu.sh, which does not exist. Scratch under RUNNER_TEMP.
   installation-bootstrap-fedora:
-    needs: [engine, packaging-fedora]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.rpm == 'true' || needs.scope.outputs.boot_fedora == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -669,7 +749,8 @@ jobs:
           INVFS_FEDORA_WORK="$RUNNER_TEMP/fedora" \
             bash tools/test-fedora-install.sh
   packaging-fedora:
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.rpm == 'true'
     runs-on: ubuntu-22.04
     container: fedora:latest
     timeout-minutes: 40
@@ -710,7 +791,8 @@ jobs:
   # Manifest regenerated -- the ebuild's BLAKE2B/SIZE pins are provenance
   # notes, portage's Manifest does the real verification.
   packaging-gentoo:
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true'
     runs-on: ubuntu-22.04
     container: gentoo/stage3:latest
     timeout-minutes: 60
@@ -765,7 +847,8 @@ jobs:
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
-    needs: [engine, packaging-arch]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -836,7 +919,8 @@ jobs:
   # driver falls back to TCG (slow), hence the generous timeout. See
   # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
   installation-iso-void:
-    needs: [engine, packaging-void]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -879,7 +963,8 @@ jobs:
   # hence the generous timeout. See tools/iso-gentoo-install.sh. Gentoo
   # has no installer TUI; the Handbook install IS the CLI flow.
   installation-iso-gentoo:
-    needs: [engine, packaging-gentoo]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -921,7 +1006,8 @@ jobs:
     runs-on: ubuntu-22.04
     container: debian:bookworm
     timeout-minutes: 40
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.deb == 'true'
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
@@ -952,7 +1038,8 @@ jobs:
     runs-on: ubuntu-22.04
     container: archlinux:base
     timeout-minutes: 40
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true'
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
@@ -1001,7 +1088,8 @@ jobs:
       # unconfined was not enough (bind mount denied).
       options: --privileged
     timeout-minutes: 90
-    needs: [engine]
+    needs: [scope, engine]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true'
     # ethereal chroot style: the DOCUMENTED Docker flow (common/chroot-style
     # README). No namespaces, no mounts: symlinks emulate the chroot, the
     # container root is the masterdir, and BREAKOUT lets root run it all.
