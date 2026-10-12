@@ -587,6 +587,17 @@ int main(int argc, char **argv)
     scratch = getenv("INVFS_TEST_SCRATCH");
     if (!scratch || !*scratch)
         scratch = argv[1];
+    /* The dir must exist before mkfs_fresh: a stale build/hdtest from an
+     * older run used to mask this (green on dirty trees, red on clean
+     * ones), so create it every time. */
+    {
+        char mkd[1024];
+        snprintf(mkd, sizeof mkd, "mkdir -p %s", scratch);
+        if (system(mkd) != 0) {
+            fprintf(stderr, "cannot create scratchdir %s\n", scratch);
+            return 2;
+        }
+    }
     snprintf(g_dir, sizeof g_dir, "%s", scratch);
     snprintf(g_img, sizeof g_img, "%s/hd.img", scratch);
 
