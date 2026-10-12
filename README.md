@@ -11,13 +11,18 @@ deduplication, codec selection and partial reads fall out naturally.
 
 FUSE-based, single-host, content-addressed. Written in C11.
 
-**Status: experimental.** The on-disk format is Meta-v3 and Meta-v3 only
-(a pre-v0.5 volume will not open; there is no conversion path). Durability
-contract: acknowledged writes are durable (`fsync` fences before it
-returns; a failed call leaves the pre-call state, never a torn prefix) --
+**Status: testing.** CI is green across engine, e2e and soak tiers,
+releases are published (`v0.6.x`, tarball + deb + Arch + rpm, sha256 +
+bootstrap installer), and the pack registry is live. The on-disk format
+is Meta-v3 and Meta-v3 only (a pre-v0.5 volume will not open; there is
+no conversion path). Durability contract: acknowledged writes are durable
+(`fsync` fences before it returns; a failed call leaves the pre-call
+state, never a torn prefix) --
 see `docs/adr/ADR-009-v3-durability-contract.md`. Anything not yet
-acknowledged may be absent after a crash, never torn. Not a replacement
-for ext4/XFS on general workloads.
+acknowledged may be absent after a crash, never torn. Still not a
+replacement for ext4/XFS on general workloads: pre-production means
+reviewed snapshots and raw `dd` backups before anything you cannot
+re-import (see `INCIDENTS.md`).
 
 ## Features
 
@@ -69,6 +74,8 @@ explicit, destructive override).
 * **Pack registry** — `invf-pack` installs/verifies packs from the
   [registry](https://github.com/AsmanovLev/InvariantFS-registry), with
   alternatives (one encoder per family) and static helpers.
+  `install <name>` takes the release bundle by default (`.ivpack`,
+  tarball fallback); `--fetch-source` takes raw-tree sources instead.
 * **POSIX layer** — mode/uid/gid enforced daemon-side, POSIX.1e ACLs stored as
   `system.posix_acl_*` xattr blobs, xattrs as opaque blobs.
 
@@ -198,7 +205,8 @@ sh packaging/bootstrap.sh --source --prefix /usr/local
 ```
 
 Boot a distribution root on InvFS (single- or two-device):
-`docs/GENTOO-INSTALL.md`, `docs/ARCH-INSTALL.md`, `docs/VOID-INSTALL.md`.
+`docs/GENTOO-INSTALL.md`, `docs/ARCH-INSTALL.md`, `docs/VOID-INSTALL.md`,
+`docs/DEBIAN-INSTALL.md`.
 Codec packs: `invf-pack` — see the
 [registry](https://github.com/AsmanovLev/InvariantFS-registry).
 
@@ -212,7 +220,8 @@ make flakey         # chaos/soak
 make release        # dist/invfs-<ver>-<arch>.tar.zst + SHA256SUMS
 ```
 
-Requires `gcc`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev`. Run e2e suites
+Requires `gcc`, `pkg-config`, `libfuse3-dev`, `zlib1g-dev`, `libzstd-dev`,
+`python3` (`qemu-utils` for the full unit gate). Run e2e suites
 through `tools/run-e2e.sh`: it isolates most suites in a private mount
 namespace (parallel-safe) and serializes only the root/loop/`/tmp`-using ones
 on a global lock.

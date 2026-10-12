@@ -1,6 +1,6 @@
 # InvariantFS Architecture Overview
 
-InvariantFS is an experimental, content-addressed filesystem with a bit-exactness contract: **what you write comes back byte-for-byte identical**.
+InvariantFS is a testing-stage, content-addressed filesystem with a bit-exactness contract: **what you write comes back byte-for-byte identical**.
 
 ---
 
