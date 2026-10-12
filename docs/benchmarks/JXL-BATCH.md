@@ -88,3 +88,15 @@ in the lossless path (frame 5 spot-checked pixel-exact, 12 frames
 present). Tuning does not save the album shape; the per-frame path
 stands unchallenged. Album-batching investigation closed: photo story
 = transcode-per-file + opaque batching.
+
+## AVIF min-partition leg (`-s 0 -k 999 -a min-partition-size=4`)
+
+| Leg | What | Result |
+|---|---|---:|
+| D5 | same 12 frames, finest partitions (85 s) | 634,344 B (better than D2/D4, still **2.3x worse** than D1) |
+
+Reading: fine partitions beat coarse (content wants detail), but no
+setting touches the per-frame sum (270,007 B). The animation path
+carries overhead the single-image path does not, and no inter-frame
+coding materializes in any tested configuration. Album shape closed
+for good on current tooling.
