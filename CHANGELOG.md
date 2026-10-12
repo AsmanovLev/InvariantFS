@@ -2,7 +2,7 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
-## [Unreleased] (toward v0.6.2)
+## [v0.6.2] - 2026-10-12
 
 ### Changed
 - `install` defaults to the release bundle (`.ivpack`, tarball fallback);

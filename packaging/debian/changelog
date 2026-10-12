@@ -1,3 +1,8 @@
+invfs (0.6.2-1) unstable; urgency=medium
+
+  * invf-pack installs release bundles by default; --fetch-source for
+    raw-tree sources. Pack manager renamed invfs-pack -> invf-pack.
+
 invfs (0.6.1-1) unstable; urgency=medium
 
   * Pack registry fetch (WP608): raw-tree, release-tarball and .ivpack
