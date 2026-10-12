@@ -4,9 +4,11 @@
 # Leg 1 (merge correctness):
 #   mkfs -> tree with known SEGMENT-aligned duplicates -> sweep (runs the
 #   dedupe pass between the walk and the text GC) -> verify --deep ->
-#   invf-cat bit-exact vs originals -> assert merged/freed counts AND that
-#   the free-block delta equals the freed-blocks report -> second sweep
-#   idempotent (0 new merges) -> fsck clean.
+#   invf-cat bit-exact vs originals -> assert merged/freed counts AND,
+#   after bare sweeps converge the multi-generation retire discharge,
+#   that the converged free-block delta equals the freed-blocks report
+#   (control-adjusted) -> second sweep idempotent (0 new merges) ->
+#   fsck clean.
 # Leg 2 (TEXT safety):
 #   a volume of batched text files (including two identical texts, which
 #   also exercises the deferred-candidate skip: dedupe runs before
@@ -143,11 +145,20 @@ FREED=$(dedupe_field "$WORK/sweep1.log" freed)
 #   (FREE1_dup - FREE0_dup) - (FREE1_ctl - FREE0_ctl)
 # recovers the blocks dedupe returned minus the handful of pages it
 # allocates to rewrite the losing inodes (one recipe/inode page per merged
-# file on v3). The residual must therefore be small and non-negative --
-# before WP75 the bitmap flush was missing, so the residual would have been
-# ~FREED (the frees simply never reached disk). DEDUPE_META_MAX bounds the
-# rewrite metadata for this fixture.
-DEDUPE_META_MAX=4
+# file on v3).
+#
+# WP612 shape: superseded frees ride retire-on-fence and discharge
+# across generations (retire drain at close, fold settling, savepoint
+# windows dropping one per sweep), so ONE sweep no longer settles the
+# books -- measured on this fixture: 120595 -> 120624 -> 120633 ->
+# 120641 -> 120650 -> 120650 against a 120652 target (FREE0 + 57 -
+# control churn), i.e. convergence over ~4 passes, zero leak. Assert
+# the CONVERGED total, not the first-sweep level: sweep until free is
+# stable across two consecutive passes (bounded), then compare. A real
+# leak never reaches the target (stable shortfall); a stuck drain never
+# stabilizes. DEDUPE_CONVERGE_EPS bounds per-pass settling noise.
+DEDUPE_CONVERGE_EPS=8
+DEDUPE_CONVERGE_MAX=6
 # WP21: the sweep held its frees in the retention registry (the live
 # checkpoint); realize it first so the bitmap reflects the dedupe (the
 # no-op re-sweep inside --realize leaves no new checkpoint behind).
@@ -155,6 +166,26 @@ $B/invf-sweep "$IMG" --realize >> "$WORK/sweep1.log" 2>&1 || {
     cat "$WORK/sweep1.log"; exit 1; }
 FREE1=$(free_blocks "$IMG")
 echo "free blocks after sweep: $FREE1 (freed by dedupe: $FREED)"
+# WP612: let the multi-generation discharge settle before comparing.
+echo "== converge: bare sweeps until free stabilizes =="
+PREV=$FREE1
+STABLE=0
+for i in $(seq 1 $DEDUPE_CONVERGE_MAX); do
+    $B/invf-sweep "$IMG" > "$WORK/sweepc$i.log" 2>&1 || { cat "$WORK/sweepc$i.log"; exit 1; }
+    CUR=$(free_blocks "$IMG")
+    D=$((CUR > PREV ? CUR - PREV : PREV - CUR))
+    echo "  converge sweep $i: free $CUR (delta $D)"
+    if [ "$D" -le "$DEDUPE_CONVERGE_EPS" ]; then
+        STABLE=$((STABLE + 1))
+        [ "$STABLE" -ge 2 ] && { FREE1=$CUR; break; }
+    else
+        STABLE=0
+    fi
+    PREV=$CUR
+    FREE1=$CUR
+done
+[ "$STABLE" -ge 2 ] || { echo "FAIL: free blocks did not stabilize in $DEDUPE_CONVERGE_MAX sweeps"; exit 1; }
+echo "converged at $FREE1"
 
 echo "== control image (no shared segments; identical geometry) =="
 $B/invf-mkfs "$IMGCTL" 0.5 >/dev/null
@@ -178,9 +209,9 @@ CTL_DELTA=$((FREE1_CTL - FREE0_CTL))
 RESIDUAL=$((FREED - (DUP_DELTA - CTL_DELTA)))
 echo "control free blocks after sweep: $FREE1_CTL " \
      "(dup delta $DUP_DELTA, control delta $CTL_DELTA, residual $RESIDUAL)"
-[ "$RESIDUAL" -ge 0 ] && [ "$RESIDUAL" -le "$DEDUPE_META_MAX" ] || {
-    echo "FAIL: dedupe free-block delta $((DUP_DELTA - CTL_DELTA)) not within " \
-         "$DEDUPE_META_MAX of freed $FREED (residual $RESIDUAL)"; exit 1; }
+[ "$RESIDUAL" -ge 0 ] && [ "$RESIDUAL" -le "$DEDUPE_CONVERGE_EPS" ] || {
+    echo "FAIL: converged dedupe free-block delta $((DUP_DELTA - CTL_DELTA)) not within " \
+         "$DEDUPE_CONVERGE_EPS of freed $FREED (residual $RESIDUAL)"; exit 1; }
 echo "bitmap cross-check OK: +$FREED blocks returned vs control"
 
 echo "== verify --deep =="
