@@ -75,3 +75,16 @@ tuning knobs unexplored here; without dedicated tuning research,
 animated-AVIF-album is DEAD as a near-term lane, same verdict as
 JXL-multiframe. Per-frame AVIF lossless itself is strong (1.78x vs PNG
 on this corpus) and stays a valid per-file transcode candidate.
+
+## AVIF max-effort legs (`-s 0 -k 999 -a min-partition-size=128`)
+
+| Leg | What | Result |
+|---|---|---:|
+| D4 | same 12 frames, max effort + coarsest partitions (28 s) | 1,429,017 B (**5.3x worse** than D1) |
+
+Reading: forcing maximum block sizes backfires — the content needs
+fine partitions, and no keyint setting materializes inter-frame gain
+in the lossless path (frame 5 spot-checked pixel-exact, 12 frames
+present). Tuning does not save the album shape; the per-frame path
+stands unchallenged. Album-batching investigation closed: photo story
+= transcode-per-file + opaque batching.
