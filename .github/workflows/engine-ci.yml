@@ -16,7 +16,17 @@ concurrency:
 on:
   push:
     branches: ["**"]
+    # Docs-only pushes skip the heavy tiers (a man-page typo must not
+    # cancel a green release validation run); docs-gate below still runs.
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "packaging/man/**"
   pull_request:
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "packaging/man/**"
   # The distro install harnesses are heavy: they download a full Arch
   # bootstrap (~120 MB) or a Void ROOTFS, build a 1.8 GB staging tree, and
   # then mkfs + import it. They are not a per-push gate; they are a loop,
@@ -26,6 +36,26 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Load-bearing docs gate (AGENTS.md §1.8): broken doc links or man-page
+  # syntax fail the build here in under a minute, on every push including
+  # docs-only ones the heavy tiers skip.
+  docs-gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - name: repo hygiene
+        run: bash tools/check-repo-hygiene.sh
+      - name: man page syntax (EN+RU)
+        run: |
+          command -v groff >/dev/null || sudo apt-get install -y -qq groff
+          fail=0
+          for f in packaging/man/*.[178] packaging/man/ru/*.[178]; do
+            out=$(groff -z -man "$f" 2>&1) || true
+            if [ -n "$out" ]; then echo "groff: $f: $out"; fail=1; fi
+          done
+          exit $fail
+
   engine:
     runs-on: ubuntu-22.04
     timeout-minutes: 60
