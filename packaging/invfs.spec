@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.6.2
+Version:        0.6.3
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -90,6 +90,8 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Mon Oct 12 2026 InvariantFS Developers <invfs@localhost> - 0.6.3-1
+- sweep-lane retire-on-fence (WP612); v3 content-cut recovery (WP613)
 * Mon Oct 12 2026 InvariantFS Developers <invfs@localhost> - 0.6.2-1
 - invf-pack installs release bundles by default; --fetch-source for sources
 - Pack manager renamed invfs-pack -> invf-pack

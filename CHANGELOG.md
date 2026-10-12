@@ -2,6 +2,25 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.6.3] - 2026-10-12
+
+### Added
+- Sweep-lane retire-on-fence (WP612): offline sweep lanes, the dedupe
+  loser loop and the migrate move commit route superseded frees through
+  `vol_retire_pbas` / `vol_release_superseded_blob` (the write-path WP607
+  shape); the drain runs at the covering fence. Proven by the documented
+  one-sweep savepoint lag pair (pin on sweep #1, discharge on #2).
+- v3 content-cut recovery path (WP613): torn data segments are detected
+  (segment probe in the recipe audit, `segment-torn` ledger), proposed
+  (`invf-fsck --cut --dry-run`) and explicitly repaired (`--cut` prefix
+  rewrite through the delta/fence path with byte-exact verify).
+  Uncuttable files stay EIO; no silent healing, ever.
+
+### Fixed
+- CI gentoo ISO job: finished the stage3 pin bump (guest 20261004 ->
+  20261011 with the full sha512); the half-bumped pin failed every run
+  in phase 1.
+
 ## [v0.6.2] - 2026-10-12
 
 ### Changed

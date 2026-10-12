@@ -22,7 +22,7 @@ pkgname=invfs
 # Test hook: the packaging suite overrides this to the artifact under
 # test (INVFS_TEMPLATE_VERSION); real xbps-src builds use the default.
 # Re-pin version + checksum below on every release, after publish.
-version=${INVFS_TEMPLATE_VERSION:-0.6.2}
+version=${INVFS_TEMPLATE_VERSION:-0.6.3}
 revision=1
 _artifact="invfs-v${version}-x86_64"
 # No build_style: the artifact is prebuilt, so there is nothing to

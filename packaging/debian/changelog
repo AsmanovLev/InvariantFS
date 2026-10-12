@@ -1,3 +1,7 @@
+invfs (0.6.3-1) unstable; urgency=medium
+
+  * sweep-lane retire-on-fence (WP612); v3 content-cut recovery (WP613).
+
 invfs (0.6.2-1) unstable; urgency=medium
 
   * invf-pack installs release bundles by default; --fetch-source for
