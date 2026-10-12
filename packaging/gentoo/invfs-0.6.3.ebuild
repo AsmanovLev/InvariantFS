@@ -31,8 +31,8 @@ S="${WORKDIR}"
 # Pinned digest of the release artifact, as portage wants it
 # (`make release-sums` prints the pair; the release.yml repin job
 # writes it back automatically after publish).
-BLAKE2B="fd540903831898dbdee4a8dbd3883345b4190569d3741b96beeb8bc94d1e88b2f0ad2afba73e14126c69ee4ccbc1ebd7be818e91004e24244ad104e74a9e6595"
-SIZE="1446467"
+BLAKE2B="5477be5b9a0fe71f6bb316f46e89bf48e5beb61f58b35ea940691fc8a1d9fb4f"
+SIZE="1457542"
 
 DESCRIPTION="Semantic content-addressed filesystem with a bit-exactness invariant"
 HOMEPAGE="https://github.com/AsmanovLev/InvariantFS"

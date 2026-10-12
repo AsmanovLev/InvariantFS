@@ -52,7 +52,7 @@ distfiles="
 # $checksum, not the legacy $sha256sums). CI re-pins this to the
 # HEAD-built artifact; the SHA256SUMS provenance chain (dist/SHA256SUMS ->
 # .sig -> author pubkey) is verified by packaging/bootstrap.sh, not fetched.
-checksum="24a5abc0142e5ff92435be42c4e9a46ebb1b9c06a7597d02deefa825b866a1c2"
+checksum="544808dc716175055088833d7223e9f2e6da67278444cf5f28975386a6e29742"
 
 do_install() {
 	vmkdir "$PKGDESTDIR"
