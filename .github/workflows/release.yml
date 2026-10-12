@@ -198,7 +198,7 @@ jobs:
           # bootstrap.sh is the README one-liner entry point
           # (releases/latest/download/bootstrap.sh) -- it must be an asset.
           cp packaging/bootstrap.sh assets/
-          cp packaging/gentoo/invfs-*.ebuild assets/ 2>/dev/null || true
+          cp "packaging/gentoo/invfs-${TAG#v}.ebuild" assets/  # current version only; old ones ride with their own releases
           cp packaging/void/template "assets/void-template-${TAG#v}" 2>/dev/null || true
           cp packaging/PKGBUILD "assets/PKGBUILD-${TAG#v}" 2>/dev/null || true
           { echo "InvariantFS $TAG — see CHANGELOG.md for the full list."; echo;
