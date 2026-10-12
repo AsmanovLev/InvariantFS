@@ -37,6 +37,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$(git rev-list -n 1 "$TAG")"
           grep -q "pkgver=$VER" packaging/PKGBUILD
           grep -q "^Version: *$VER$" packaging/invfs.spec
+          grep -q "INVFS_VERSION_STRING \"v$VER\"" src/core/invarifs.h
           head -n 1 packaging/debian/changelog | grep -q "($VER-"
           echo "tree matches $TAG"
 
@@ -53,7 +54,11 @@ jobs:
           sudo apt-get install -y -qq build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev python3
       - name: make release
-        run: make release
+        # Pin the version explicitly: git-describe luck (shallow clones,
+        # missing tags, dubious ownership) must never stamp a wrong
+        # version into a published artifact. TAG carries the v prefix
+        # (RELEASE_NAME is invfs-$(RELEASE_VERSION)-...).
+        run: make release RELEASE_VERSION="$TAG"
       - name: verify checksums
         run: cd dist && sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v4

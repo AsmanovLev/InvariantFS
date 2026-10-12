@@ -77,8 +77,11 @@ note "building the release artifact (make release)"
 if ! make release > "$WORK/release.log" 2>&1; then
     echo "FAIL: make release failed:"; tail -20 "$WORK/release.log"; exit 1
 fi
-VER=$(cut -d- -f2 < <(ls dist/invfs-*-x86_64.tar.zst 2>/dev/null | head -1 | xargs -r basename) 2>/dev/null)
-ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+# Newest first: a stale dist/ (old tarballs beside the just-built one)
+# must never shadow the artifact under test; alphabetical head -1 picks
+# the OLDEST version instead (seen live: v0.6.0 tested from a v0.6.2 tree).
+VER=$(cut -d- -f2 < <(ls -t dist/invfs-*-x86_64.tar.zst 2>/dev/null | head -1 | xargs -r basename) 2>/dev/null)
+ART=$(ls -t dist/invfs-*-x86_64.tar.zst | head -1)
 SUM=dist/SHA256SUMS
 ARTBASE=$(basename "$ART")
 note "artifact: $ARTBASE"
