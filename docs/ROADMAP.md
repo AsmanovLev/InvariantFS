@@ -56,7 +56,7 @@ are not quoted.
 
 ## Presentation
 
-- `docs/video/CONCEPT.md` v2 + `docs/video/draft.mp4`: hook TBD
+- `docs/video/CONCEPT.md` v2 + `docs/video/scenes.py` (draft render is a local build product, untracked by policy): hook TBD
   (no "almost right is wrong"), staged-verification spine, no seal,
   GitHub CTA. Sound: music-first, layered. NUMBERS only from live
   benchmark docs above.
