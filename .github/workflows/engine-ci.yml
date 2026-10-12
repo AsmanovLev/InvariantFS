@@ -702,7 +702,7 @@ jobs:
       - name: local overlay with HEAD distfiles
         run: |
           set -euo pipefail
-          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          ART=$(ls -t dist/invfs-*-x86_64.tar.zst | head -1)
           VER=$(cut -d- -f2 <<<"$(basename "$ART")")
           PV=${VER#v}
           OVERLAY=/var/db/repos/invfs-local
@@ -939,7 +939,7 @@ jobs:
       - name: real makepkg of the recipe
         run: |
           set -euo pipefail
-          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          ART=$(ls -t dist/invfs-*-x86_64.tar.zst | head -1)
           D=/tmp/archpkg; rm -rf "$D"; mkdir -p "$D"
           cp packaging/PKGBUILD dist/SHA256SUMS "$ART" "$D/"
           cd "$D"
@@ -1024,14 +1024,21 @@ jobs:
       - name: real xbps-src build of the template
         run: |
           set -euo pipefail
-          ART=$(ls dist/invfs-*-x86_64.tar.zst | head -1)
+          ART=$(ls -t dist/invfs-*-x86_64.tar.zst | head -1)
           OVER=/tmp/vp/srcpkgs/invfs
           mkdir -p "$OVER"
           cp packaging/void/template "$OVER/template"
-          VER=$(sed -n 's/^version=//p' "$OVER/template")
-          # xbps-src only looks inside hostdir/sources/<pkg>-<ver>/; a copy
-          # at the sources root is invisible and triggers a real fetch.
-          SRCDIST=/tmp/vp/hostdir/sources/invfs-$VER
+          # The overlay copy tracks the just-built artifact, not the
+          # committed template: version skew (template re-pinned only at
+          # release time) used to point distfiles at the published older
+          # tarball while checksum= was re-pinned to the local build -- a
+          # guaranteed mismatch. Bump version= in the overlay only.
+          BUILT_VER=$(tar --zstd -xOf "$ART" --wildcards '*/VERSION' | head -1 | sed 's/^v//')
+          sed -i "s/^version=.*/version=$BUILT_VER/" "$OVER/template"
+          # xbps-src stages distfiles under hostdir/sources/<pkgname>/; the
+          # old sources/<pkg>-<ver>/ path was invisible, so every run did a
+          # real fetch of whatever the committed version pointed at.
+          SRCDIST=/tmp/vp/hostdir/sources/invfs
           mkdir -p "$SRCDIST"
           cp "$ART" "$SRCDIST/"
           H=$(cut -d' ' -f1 dist/SHA256SUMS)
