@@ -767,26 +767,48 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                         free(jpg);
                     }
                 } else if (e->algo == INVFS_ALGO_APE) {
-                    /* whole file is one APE blob -> decode to flac.
-                       WP101: the length must MATCH, it is not clamped. A
-                       short decode used to be memcpy'd in and the tail of
-                       the caller's buffer left at whatever it held, so a
-                       truncated/corrupt APE blob was served as a partly
-                       valid FLAC instead of failing. A long decode is an
-                       overflow of `data + dst_off` and is refused too. */
+                    /* whole file is one APE blob.
+                       WP619: pack-owned when a pack entry with decode is
+                       loaded (the WP16e JXL shape): the sweep's pack loop
+                       mints APE blobs from non-FLAC files (WAV), whose
+                       bytes only the pack's decode returns. A pack decode
+                       that does not hit the exact recorded size is NOT
+                       pack-made -- it is a native FLACR-lane blob (APE of
+                       the file's PCM, read as APE->WAV->FLAC below) or a
+                       corrupt blob -- so it falls through to the builtin
+                       path instead of failing. Length-gating is sound
+                       because the sweep's decode-back guard guarantees a
+                       pack-made blob decodes to exactly its recorded size,
+                       while a native blob decodes (via mac -d) to WAV
+                       bytes whose length is the PCM size, not the FLAC
+                       size. Corner (documented, accepted): a native blob
+                       whose PCM-WAV length coincides with its FLAC length
+                       would be served as WAV; that needs a FLAC as large
+                       as its own PCM + 44, i.e. adversarial input. */
+                    const invfs_codec *ac =
+                        invfs_codec_by_algo_vol(v, INVFS_ALGO_APE);
                     uint8_t *fl = NULL;
                     size_t fl_len = 0;
-                    if (invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
+                    int pack_hit = 0;
+                    if (ac && ac->decode) {
+                        if (ac->decode(blob, hdr, data + dst_off,
+                                       (size_t)e->length) == 0)
+                            pack_hit = 1;
+                    }
+                    if (!pack_hit &&
+                        invfs_ape_decompress(blob, hdr, &fl, &fl_len) != 0) {
                         fprintf(stderr, "APE decompress error\n");
                         free(blob); return -1;
                     }
-                    if (fl_len != e->length) {
+                    if (!pack_hit && fl_len != e->length) {
                         fprintf(stderr, "APE length mismatch (%s: got %zu, want %llu)\n",
                                 recname_of(rn), fl_len, (unsigned long long)e->length);
                         free(fl); free(blob); return -1;
                     }
-                    memcpy(data + dst_off, fl, fl_len);
-                    free(fl);
+                    if (!pack_hit) {
+                        memcpy(data + dst_off, fl, fl_len);
+                        free(fl);
+                    }
                 } else if (e->algo == INVFS_ALGO_PMP) {
                     /* whole file is one PMP blob -> decode back to mp3.
                        Length is checked, not clamped: packMP3 is bit-exact

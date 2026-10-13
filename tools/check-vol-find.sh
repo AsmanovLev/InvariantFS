@@ -125,16 +125,16 @@ src/core/vol_cpack.c:4345:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1022:SKIP
-src/core/vol_read.c:1080:SKIP
-src/core/vol_read.c:1176:SKIP
-src/core/vol_read.c:1214:ACTS
-src/core/vol_read.c:1425:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1432:SKIP
-src/core/vol_read.c:1622:ACTS
-src/core/vol_read.c:818:SKIP
-src/core/vol_read.c:835:SKIP
-src/core/vol_read.c:895:SKIP
-src/core/vol_read.c:970:SKIP
+src/core/vol_read.c:1102:SKIP
+src/core/vol_read.c:1198:SKIP
+src/core/vol_read.c:1236:ACTS
+src/core/vol_read.c:1447:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1454:SKIP
+src/core/vol_read.c:1644:ACTS
+src/core/vol_read.c:840:SKIP
+src/core/vol_read.c:857:SKIP
+src/core/vol_read.c:917:SKIP
+src/core/vol_read.c:992:SKIP
 src/core/vol_sweep.c:1823:SKIP
 src/core/vol_sweep.c:252:SKIP
 src/core/vol_sweep.c:557:ACTS

@@ -102,6 +102,15 @@ typedef struct invfs_pack_def {
     const char *decode;
     const char *estimate;  /* argv template with {in}; NULL when absent */
     const char *requires;  /* comma list of extra tools, NULL when none */
+    /* WP619: staged-filename suffixes for extension-sniffing tools.
+     * blob_ext suffixes the blob side (decode input in<blob_ext>,
+     * encode output out<blob_ext>); raw_ext suffixes the raw side
+     * (encode input in<raw_ext>, decode output out<raw_ext>). The exec
+     * hooks need no change: {in}/{out} expand to the suffixed paths.
+     * NULL when the manifest omits them (every pre-WP619 pack), which
+     * keeps the historical bare in/out. */
+    const char *blob_ext;
+    const char *raw_ext;
     /* WP16a: manifest `type = container` (default/absent = codec). A
      * container pack decomposes a container file into member inodes and
      * carries the four container commands instead of encode/decode (both

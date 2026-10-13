@@ -58,7 +58,7 @@ bad()  { echo "  FAIL: $*"; fail=1; }
 # ---- the manifest keys parse_manifest() reads ----------------------------
 # src/codecs/codec.c:429 (parse_manifest) and its key chain below it.
 ENGINE_KEYS="name algo pack_version caps dec_mem generation requires
-             decomp_gen type encode decode estimate
+             blob_ext raw_ext decomp_gen type encode decode estimate
              enumerate extract strip rebuild map batch
              sniff.offset sniff.magic sniff.ext"
 

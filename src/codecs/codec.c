@@ -350,6 +350,14 @@ struct pack_manifest {
     size_t   pending_off;     /* sniff.offset seen before any sniff.magic */
     char     exts[256];       /* sniff.ext comma list, verbatim */
     char     requires[256];   /* extra tools, comma list */
+    /* WP619: staged-filename suffixes for extension-sniffing tools.
+     * blob_ext names the codec blob suffix (decode stages its input as
+     * in<blob_ext>, encode expects its output at out<blob_ext>);
+     * raw_ext names the raw-side suffix (encode stages its input as
+     * in<raw_ext>, decode writes out<raw_ext>). Both validated to `.` +
+     * alnum at parse; empty = bare in/out. */
+    char     blob_ext[16];
+    char     raw_ext[16];
     char     encode[512];
     char     decode[512];
     char     estimate[512];
@@ -513,6 +521,22 @@ static int pack_parse_lines(FILE *f, struct pack_manifest *m)
             m->generation = (unsigned)strtoul(val, NULL, 0);
         } else if (strcmp(s, "requires") == 0) {
             str_copy(m->requires, sizeof m->requires, val);
+        } else if (strcmp(s, "blob_ext") == 0 || strcmp(s, "raw_ext") == 0) {
+            /* WP619: suffixes are cosmetic staging names, but a '/' or
+             * '..' in one would escape the scratch dir -- accept only
+             * '.' followed by alphanumerics, ignore anything else. */
+            char *dst = strcmp(s, "blob_ext") == 0 ? m->blob_ext : m->raw_ext;
+            size_t i, n = strlen(val);
+            int good = n >= 2 && n < sizeof m->blob_ext && val[0] == '.';
+            for (i = 1; good && i < n; i++) {
+                int ch = (unsigned char)val[i];
+                if (!((ch >= 'a' && ch <= 'z') ||
+                      (ch >= 'A' && ch <= 'Z') ||
+                      (ch >= '0' && ch <= '9')))
+                    good = 0;
+            }
+            if (good)
+                str_copy(dst, sizeof m->blob_ext, val);
         } else if (strcmp(s, "sniff.ext") == 0) {
             str_copy(m->exts, sizeof m->exts, val);
         } else if (strcmp(s, "sniff.magic") == 0) {
@@ -777,6 +801,7 @@ typedef struct {
     invfs_pack_def   def;       /* exec record for the volume.c hooks */
     char            *dir;       /* pack directory ({pack} substitution) */
     char            *name, *encode, *decode, *estimate, *requires, *exts;
+    char            *blob_ext, *raw_ext;   /* WP619: NULL when absent */
     /* WP16a container commands (all NULL for a codec pack) */
     int              is_container;
     char            *enumerate, *extract, *strip, *rebuild;
@@ -1008,8 +1033,24 @@ static int pack_buffer_io(pack_entry *p, int is_encode,
 
     if (pack_tmpdir(dir, sizeof dir, (uint64_t)inlen + (uint64_t)outcap
                     + (1u << 20)) != 0) return -1;
-    snprintf(pin, sizeof pin, "%s/in", dir);
-    snprintf(pout, sizeof pout, "%s/out", dir);
+    /* WP619: extension-sniffing tools (mac wants in.ape, wavpack wants
+     * in.wav/in.wv and writes out.wv / out.wav whatever the argv says).
+     * blob_ext suffixes the blob side (decode input, encode output),
+     * raw_ext suffixes the raw side (encode input, decode output);
+     * absent = the historical bare in/out. The argv templates are
+     * unchanged -- {in}/{out} simply expand to the suffixed paths. */
+    if (is_encode && p->raw_ext)
+        snprintf(pin, sizeof pin, "%s/in%s", dir, p->raw_ext);
+    else if (!is_encode && p->blob_ext)
+        snprintf(pin, sizeof pin, "%s/in%s", dir, p->blob_ext);
+    else
+        snprintf(pin, sizeof pin, "%s/in", dir);
+    if (!is_encode && p->raw_ext)
+        snprintf(pout, sizeof pout, "%s/out%s", dir, p->raw_ext);
+    else if (is_encode && p->blob_ext)
+        snprintf(pout, sizeof pout, "%s/out%s", dir, p->blob_ext);
+    else
+        snprintf(pout, sizeof pout, "%s/out", dir);
     if (pack_write(pin, in, inlen) != 0) { rmdir(dir); return -1; }
     /* nonzero exit or a missing/empty output = the pack declined */
     if (invfs_codec_pack_exec(&p->pub, is_encode, pin, pout) == 0 &&
@@ -1202,6 +1243,7 @@ static void pack_entry_free(pack_entry *p)
 {
     free(p->dir); free(p->name); free(p->encode); free(p->decode);
     free(p->estimate); free(p->requires); free(p->exts);
+    free(p->blob_ext); free(p->raw_ext);
     free(p->enumerate); free(p->extract); free(p->strip); free(p->rebuild);
     free(p->map);
     free(p->batch);
@@ -1499,6 +1541,8 @@ static void pack_register_inner(const char *dir, const struct pack_manifest *m,
     p->estimate = m->has_estimate ? pack_strdup(m->estimate) : NULL;
     p->requires = m->requires[0] ? pack_strdup(m->requires) : NULL;
     p->exts     = m->exts[0] ? pack_strdup(m->exts) : NULL;
+    p->blob_ext = m->blob_ext[0] ? pack_strdup(m->blob_ext) : NULL;
+    p->raw_ext  = m->raw_ext[0] ? pack_strdup(m->raw_ext) : NULL;
     p->enumerate = m->has_enumerate ? pack_strdup(m->enumerate) : NULL;
     p->extract   = m->has_extract ? pack_strdup(m->extract) : NULL;
     p->strip     = m->has_strip ? pack_strdup(m->strip) : NULL;
@@ -1513,6 +1557,7 @@ static void pack_register_inner(const char *dir, const struct pack_manifest *m,
         (m->has_encode && !p->encode) || (m->has_decode && !p->decode) ||
         (m->has_estimate && !p->estimate) ||
         (m->requires[0] && !p->requires) || (m->exts[0] && !p->exts) ||
+        (m->blob_ext[0] && !p->blob_ext) || (m->raw_ext[0] && !p->raw_ext) ||
         (m->is_container && m->has_map && !p->map) ||
         (m->is_container && m->has_batch && !p->batch) ||
         (m->is_container &&
@@ -1558,6 +1603,8 @@ static void pack_register_inner(const char *dir, const struct pack_manifest *m,
     p->def.decode   = p->decode;
     p->def.estimate = p->estimate;
     p->def.requires = p->requires;
+    p->def.blob_ext = p->blob_ext;   /* WP619: NULL when absent */
+    p->def.raw_ext  = p->raw_ext;
     p->def.is_container = p->is_container;
     p->def.enumerate = p->enumerate;
     p->def.extract   = p->extract;

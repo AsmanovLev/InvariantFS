@@ -1560,6 +1560,7 @@ test-packs: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pngflac.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-fatpacks.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sweepboot.sh
 	$(TESTENV) $(TESTISO) bash tools/test-cpack-max-members.sh
 	$(TESTENV) $(TESTISO) bash tools/plugin-daemon-smoke.sh

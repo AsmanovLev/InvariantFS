@@ -683,7 +683,7 @@ static void test_probe(void)
 static void test_packs(void)
 {
     char dir[256], packs[320], pack[384], dupe[384], cpack[384], bpack[384],
-         mpack[384], opack[384], path[448];
+         mpack[384], opack[384], epack[384], path[448];
     const invfs_codec *c, *all;
     const invfs_pack_def *def;
     size_t n = 0, i, olen = 0;
@@ -702,9 +702,10 @@ static void test_packs(void)
     snprintf(bpack, sizeof bpack, "%s/badcont.codecpack", packs);
     snprintf(mpack, sizeof mpack, "%s/spltmap.codecpack", packs);
     snprintf(opack, sizeof opack, "%s/jxlpack.codecpack", packs);
+    snprintf(epack, sizeof epack, "%s/extbad.codecpack", packs);
     r = mkdir(dir, 0755) | mkdir(packs, 0755) | mkdir(pack, 0755) |
         mkdir(dupe, 0755) | mkdir(cpack, 0755) | mkdir(bpack, 0755) |
-        mkdir(mpack, 0755) | mkdir(opack, 0755);
+        mkdir(mpack, 0755) | mkdir(opack, 0755) | mkdir(epack, 0755);
 
     /* one valid pack (sniff.offset BEFORE sniff.magic: pending-offset path)
      * plus a second pack whose algo collides with builtin ZSTD (skipped) */
@@ -721,6 +722,8 @@ static void test_packs(void)
                     "sniff.magic = 4D5A\n"
                     "sniff.ext = fak,fake\n"
                     "requires = cp\n"
+                    "blob_ext = .fak\n"
+                    "raw_ext = .raw\n"
                     "encode = cp {in} {out}\n"
                     "decode = cp {in} {out}\n"
                     "map = cp {in} {out}\n"   /* container-ABI key on a codec
@@ -791,6 +794,21 @@ static void test_packs(void)
                     "sniff.magic = FFD8FF\n"
                     "encode = cp {in} {out}\n"
                     "decode = cp {in} {out}\n", 0);
+    /* WP619: staged-filename suffixes; hostile values must be ignored
+     * (a '/' or a missing dot would escape the scratch dir) while the
+     * pack itself still registers. */
+    snprintf(path, sizeof path, "%s/manifest", epack);
+    r |= write_file(path,
+                    "# suffix-validation fixture (WP619)\n"
+                    "name = extbad\n"
+                    "algo = 46\n"
+                    "pack_version = 1\n"
+                    "caps = external|wholefile\n"
+                    "sniff.magic = 45585442\n"
+                    "blob_ext = ../evil\n"
+                    "raw_ext = nodot\n"
+                    "encode = cp {in} {out}\n"
+                    "decode = cp {in} {out}\n", 0);
     ok(r == 0, "fixture: pack dirs written");
 
     setenv("INVFS_CODECPACKS", packs, 1);
@@ -798,12 +816,13 @@ static void test_packs(void)
 
     all = invfs_codec_all(&n);
     /* 14 static, MINUS the jxl placeholder the override pack replaced (the
-     * pack's entry is the only one for algo 4), PLUS the four fixture packs
+     * pack's entry is the only one for algo 4), PLUS the five fixture packs
      * that are allowed to register: fakeimg(42), spltmini(43), spltmap(45),
-     * jxlpack(4). dupe(algo 1) collides with builtin ZSTD and badcont(44) is
-     * missing rebuild -- both skipped, asserted separately below. */
-    ok(all != NULL && n == REGISTRY_STATIC_N - 1 + 4,
-       "packs registered: 13 static + codec + override + 2 containers "
+     * jxlpack(4), extbad(46). dupe(algo 1) collides with builtin ZSTD and
+     * badcont(44) is missing rebuild -- both skipped, asserted separately
+     * below. */
+    ok(all != NULL && n == REGISTRY_STATIC_N - 1 + 5,
+       "packs registered: 13 static + codec + override + 2 containers + ext "
        "(the override REPLACES the builtin jxl placeholder)");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
        "text heuristic still LAST with packs loaded");
@@ -863,6 +882,17 @@ static void test_packs(void)
     def = invfs_codec_pack_def(c);
     ok(def && def->dir && strstr(def->dir, "fakeimg.codecpack") != NULL,
        "pack def exposes the pack dir");
+    ok(def && def->blob_ext && strcmp(def->blob_ext, ".fak") == 0,
+       "WP619: blob_ext parsed into the def");
+    ok(def && def->raw_ext && strcmp(def->raw_ext, ".raw") == 0,
+       "WP619: raw_ext parsed into the def");
+    c = invfs_codec_by_algo(46);
+    ok(c != NULL && strcmp(c->name, "extbad") == 0,
+       "WP619: hostile suffixes do not block registration");
+    def = c ? invfs_codec_pack_def(c) : NULL;
+    ok(def && def->blob_ext == NULL && def->raw_ext == NULL,
+       "WP619: hostile blob_ext/raw_ext ignored (NULL, bare in/out)");
+    c = invfs_codec_by_algo(42);
     ok(invfs_codec_pack_def(invfs_codec_by_algo(INVFS_ALGO_ZSTD)) == NULL,
        "builtin codec has no pack def");
 
@@ -967,6 +997,7 @@ static void test_packs(void)
     ok(invfs_codec_by_algo(42) == NULL, "reset unloads packs");
     ok(invfs_codec_by_algo(43) == NULL, "reset unloads container packs");
     ok(invfs_codec_by_algo(45) == NULL, "reset unloads seekable packs");
+    ok(invfs_codec_by_algo(46) == NULL, "reset unloads ext-suffix packs");
     c = invfs_codec_by_algo(INVFS_ALGO_JXL);
     ok(c && strcmp(c->name, "jxl") == 0 && c->encode == NULL &&
        c->decode == NULL && (c->caps & INVFS_CODEC_CAP_PACKONLY),
@@ -987,12 +1018,15 @@ static void test_packs(void)
     unlink(path);
     snprintf(path, sizeof path, "%s/manifest", opack);
     unlink(path);
+    snprintf(path, sizeof path, "%s/manifest", epack);
+    unlink(path);
     rmdir(pack);
     rmdir(dupe);
     rmdir(cpack);
     rmdir(bpack);
     rmdir(mpack);
     rmdir(opack);
+    rmdir(epack);
     rmdir(packs);
     rmdir(dir);
 }
