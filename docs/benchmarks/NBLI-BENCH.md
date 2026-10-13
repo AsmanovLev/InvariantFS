@@ -108,7 +108,13 @@ timed rerun, so no rebuild was needed — upstream sources unchanged
 Head-to-head on the burst corpus (36,290,805 B PNG): NBLI default
 33,146,290 B in 6.36 s vs `cjxl -d 0 -e 8` 33,305,754 B in 113.32 s —
 NBLI is **0.5% smaller at 17.8x the encode speed**; vs effort-7 JXL
-(33,715,596 B, 59.26 s) it is **1.7% smaller at 9.3x**. The real
+(33,715,596 B, 59.26 s) it is **1.7% smaller at 9.3x**. Note what
+"burst" means here and what it does not: NBLI is a SINGLE-image
+codec with no inter-frame coding — each of the 12 frames was encoded
+independently (~0.53 s/file) and the totals are plain sums. The corpus
+is a burst series only in shape (consecutive similar frames), so these
+numbers prove consistent per-frame wins on photo-like content, not a
+burst/series mode. The real
 photo repeats the shape: NBLI 626,432 B in 0.19 s vs `-e 8` 628,036 B
 in 4.01 s (**0.3% smaller, 21.5x faster**). The upstream claim (JXL
 `-e 8` ratio at ~25x speed on CLIC2021 photos) points the same
