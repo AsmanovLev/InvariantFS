@@ -20,6 +20,9 @@ same linear-predictive family, so the batching math transfers.)
 | C | concatenated 300 s album + `flac -8` | 12,342,587 B (**+0.6%** vs A) |
 | D | same album + `wavpack -h` | 12,434,986 B (**+0.007%** vs B, noise) |
 | E | decode-back, raw PCM compare | album + track bit-exact |
+| F | Monkey's Audio `mac -c3000` (high) per track, sum | 12,001,192 B (**4.41x**, best of three) |
+| G | same 300 s album + `mac -c3000` | 12,000,020 B (**+0.01%** vs F, noise) |
+| H | APE decode-back, raw compare | track + album bit-exact (52,920,000 B) |
 
 ## Reading
 
@@ -35,3 +38,13 @@ same linear-predictive family, so the batching math transfers.)
   digits, but the mechanism (fast per-track adaptation) says the
   delta stays tiny. Re-run on real albums only if someone disputes
   with numbers, not adjectives.
+
+## Lane note: `mac` vs hostile WAVs
+
+Monkey's Audio `mac` (built from source) SEGFAULTS (SIGSEGV) on
+ffmpeg-written WAVs carrying a `LIST` chunk, and encodes clean
+(stdlib-`wave`-written) WAVs fine. Any future APE lane must
+normalize/sanitize container chunks before feeding `mac` — or, more
+robustly, run it sandboxed (exec-helper path) so a parser crash is a
+decline, never a daemon fault. Observed 2026-10-13, all legs above
+ran on clean WAVs with identical audio.
