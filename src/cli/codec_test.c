@@ -101,7 +101,7 @@ void invfs_vol_pack_release(const void *vol) { (void)vol; }
  * (REGISTRY_N). Pinned here on purpose -- adding a builtin codec must be a
  * deliberate, visible test change, not a silent drift. It says nothing about
  * how many codecpacks the host has installed; main() guarantees that. */
-#define REGISTRY_STATIC_N 14
+#define REGISTRY_STATIC_N 15   /* WP620: +1 for the nbli placeholder */
 
 static int failures = 0;
 static int checks = 0;
@@ -133,13 +133,13 @@ static void test_registry(void)
     const invfs_codec *c;
     int roundtrip;
 
-    /* WP105: "14" is REGISTRY_N -- the BUILTIN registry's size, a property of
+    /* WP105: "15" is REGISTRY_N -- the BUILTIN registry's size, a property of
      * this source tree, and it is only reachable because main() switched the
      * system pack dir off. What is NOT a property of this tree is how many
      * codecpacks the host has installed, so that half never enters an
      * assertion here; pack registration is exercised from fixture manifests
      * below, and the host-pack path is covered by the e2e suites. */
-    ok(all != NULL && n == REGISTRY_STATIC_N, "registry holds the 14 static entries");
+    ok(all != NULL && n == REGISTRY_STATIC_N, "registry holds the 15 static entries");
     ok(invfs_registry_generation() >= 1, "registry generation >= 1");
 
     c = invfs_codec_by_algo(INVFS_ALGO_NONE);
@@ -815,14 +815,14 @@ static void test_packs(void)
     invfs_codec_probe_reset();
 
     all = invfs_codec_all(&n);
-    /* 14 static, MINUS the jxl placeholder the override pack replaced (the
+    /* 15 static, MINUS the jxl placeholder the override pack replaced (the
      * pack's entry is the only one for algo 4), PLUS the five fixture packs
      * that are allowed to register: fakeimg(42), spltmini(43), spltmap(45),
      * jxlpack(4), extbad(46). dupe(algo 1) collides with builtin ZSTD and
      * badcont(44) is missing rebuild -- both skipped, asserted separately
      * below. */
     ok(all != NULL && n == REGISTRY_STATIC_N - 1 + 5,
-       "packs registered: 13 static + codec + override + 2 containers + ext "
+       "packs registered: 14 static + codec + override + 2 containers + ext "
        "(the override REPLACES the builtin jxl placeholder)");
     ok(all[n - 1].algo == INVFS_ALGO_PPMD,
        "text heuristic still LAST with packs loaded");

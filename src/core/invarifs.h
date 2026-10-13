@@ -103,6 +103,13 @@
  * splice at the offsets; the sweep stores nothing before a full in-memory
  * rebuild memcmps the original (the house 1:1 invariant). */
 #define INVFS_ALGO_EXER 15
+/* WP620: NBLI prototype lane -- a PNG's pixels NBLI-coded in a "name!nbli"
+ * sibling plus the same IVPN recipe PNGR stores (deflate replica of the
+ * original IDAT). Same stored shape as PNGR with the pixel codec swapped
+ * (JXL blob <-> NBLI blob); the recipe format is unchanged. Opt-in via
+ * photo_codec=nbli (default jxl); the NBLI tool arrives as a fat pack,
+ * never a builtin. */
+#define INVFS_ALGO_NBLI 16
 /* ADR-010 amendment 2: a recipe entry that is a WINDOW into another inode
  * instead of a stored segment. The entry's own pba is unused (a window owns
  * no blocks) and carries src_inode_id; the rest of the descriptor lives in a

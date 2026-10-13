@@ -3416,14 +3416,16 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                 "files=%llu\ndirs=%llu\ntombstones=%llu\n"
                 "logical_bytes=%llu\n"
                 "raw_used_bytes=%llu\nshadow_used_bytes=%llu\n"
-                "free_blocks=%llu\n",
+                "free_blocks=%llu\n"
+                "photo_codec=%s\n",
                 (unsigned long long)hfiles,
                 (unsigned long long)hdirs,
                 (unsigned long long)htombs,
                 (unsigned long long)hlogic,
                 (unsigned long long)raw_used,
                 (unsigned long long)shadow_used,
-                (unsigned long long)vol_count_free(g_vol));
+                (unsigned long long)vol_count_free(g_vol),
+                invfs_photo_codec_nbli() ? "nbli" : "jxl");
         pthread_mutex_unlock(&g_io_lock);
         if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
         if (!value || size == 0) return n;
@@ -3938,6 +3940,19 @@ int main(int argc, char *argv[])
                 /* WP212: this mount is the boot root -- see the note on
                  * g_survive_term. Set by tools/initramfs-init.sh only. */
                 g_survive_term = 1;
+            } else if (strncmp(tok, "photo_codec=", 12) == 0) {
+                /* WP620: the two-way photo handler (PNG lane only; JPEGs
+                 * keep the JXL path whatever this says). Default jxl;
+                 * nbli opts into the NBLI fat-pack lane. A bad value is
+                 * ignored loudly, keeping the default. */
+                const char *mode = tok + 12;
+                if (strcmp(mode, "nbli") == 0)
+                    invfs_set_photo_codec_nbli(1);
+                else if (strcmp(mode, "jxl") == 0)
+                    invfs_set_photo_codec_nbli(0);
+                else
+                    fprintf(stderr, "invf: bad -o photo_codec=%s; ignored "
+                            "(want jxl|nbli)\n", mode);
             } else if (strcmp(tok, "noautopack") == 0) {
                 /* P0-1 guard (owner policy): mount an untrusted volume
                  * without ever executing a pack-supplied binary. Probes

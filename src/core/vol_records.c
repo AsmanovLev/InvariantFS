@@ -144,6 +144,7 @@ int ast_owns_siblings(const invfs_ast_hdr *ah,
     case INVFS_ALGO_TARR:
     case INVFS_ALGO_GZR:
     case INVFS_ALGO_PNGR:
+    case INVFS_ALGO_NBLI:   /* WP620: the "name!nbli" sibling */
     case INVFS_ALGO_FLACR:
     case INVFS_ALGO_EXER:
         return 1;
@@ -220,7 +221,8 @@ typedef struct {
  *   recipe            vol_cpack.c:1232 :1369, vol_sweep.c:458
  *   mbrt              vol_cpack.c:2902 :3245 :3641 :3838 :3864 :3923
  *   mbrmap            vol_cpack.c:2903 :3000 :3683
- *   jxl               vol_png.c:442 :734, vol_sweep.c:516
+ *   jxl               vol_png.c:502 (shared commit half; PNGR call at :817)
+ *   nbli              vol_png.c:502 (shared commit half; NBLI lane at :907)
  *   cover<digits>     vol_cpack.c:1266 :1403
  *   part<digits>      vol_cpack.c:1537 :1780, vol_sweep.c:250 :477 :497
  *   exr<digits>       vol_exer.c:266 :431
@@ -288,6 +290,7 @@ static int sib_segment_is_internal_shape(const char *suf, size_t n)
         return 1;
     if (n == 4 && !memcmp(suf, "mbrt", 4)) return 1;
     if (n == 3 && !memcmp(suf, "jxl", 3))   return 1;
+    if (n == 4 && !memcmp(suf, "nbli", 4))  return 1;   /* WP620 */
 
     /* <tag><digits>: cover/cover0/cover12, part0, exr0 ... */
     {

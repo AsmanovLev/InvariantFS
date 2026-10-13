@@ -53,10 +53,10 @@ src/cli/fuse_fs.c:2745:SKIP
 src/cli/fuse_fs.c:2959:SKIP
 src/cli/fuse_fs.c:3014:SKIP
 src/cli/fuse_fs.c:3275:SKIP
-src/cli/fuse_fs.c:3442:SKIP
-src/cli/fuse_fs.c:3514:SKIP
-src/cli/fuse_fs.c:3549:SKIP
-src/cli/fuse_fs.c:3586:SKIP
+src/cli/fuse_fs.c:3444:SKIP
+src/cli/fuse_fs.c:3516:SKIP
+src/cli/fuse_fs.c:3551:SKIP
+src/cli/fuse_fs.c:3588:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2838:SKIP   # list --volume: unreadable manifest skips the pack row
@@ -124,23 +124,24 @@ src/core/vol_cpack.c:4313:ACTS   # member table: miss aborts with error
 src/core/vol_cpack.c:4345:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
-src/core/vol_png.c:1022:SKIP
-src/core/vol_read.c:1102:SKIP
-src/core/vol_read.c:1198:SKIP
-src/core/vol_read.c:1236:ACTS
-src/core/vol_read.c:1447:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1454:SKIP
-src/core/vol_read.c:1644:ACTS
-src/core/vol_read.c:840:SKIP
-src/core/vol_read.c:857:SKIP
-src/core/vol_read.c:917:SKIP
-src/core/vol_read.c:992:SKIP
-src/core/vol_sweep.c:1823:SKIP
-src/core/vol_sweep.c:252:SKIP
-src/core/vol_sweep.c:557:ACTS
-src/core/vol_sweep.c:576:ACTS
-src/core/vol_sweep.c:596:ACTS
-src/core/vol_sweep.c:615:ACTS
+src/core/vol_png.c:1214:SKIP
+src/core/vol_read.c:488:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
+src/core/vol_read.c:503:SKIP
+src/core/vol_read.c:1232:SKIP
+src/core/vol_read.c:1270:ACTS
+src/core/vol_read.c:1481:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1488:SKIP
+src/core/vol_read.c:1679:ACTS
+src/core/vol_read.c:881:SKIP
+src/core/vol_read.c:898:SKIP
+src/core/vol_read.c:958:SKIP
+src/core/vol_read.c:1033:SKIP
+src/core/vol_sweep.c:1883:SKIP
+src/core/vol_sweep.c:278:SKIP
+src/core/vol_sweep.c:583:ACTS
+src/core/vol_sweep.c:602:ACTS
+src/core/vol_sweep.c:622:ACTS
+src/core/vol_sweep.c:655:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:783:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement

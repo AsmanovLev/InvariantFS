@@ -22,11 +22,11 @@
  * INVFS_DEBUG is the existing convention (vol_sweep.c, vol_tier.c, ...), so
  * this adds no new knob and no behaviour change: unset, it is a single
  * getenv() the compiler already had to emit for the rest of the file. */
-static void png_refuse(const char *name, const char *why)
+static void png_refuse(const char *lane, const char *name, const char *why)
 {
     if (getenv("INVFS_DEBUG"))
-        fprintf(stderr, "[vol] PNGR %s: refused (%s); original kept RAW\n",
-                name ? name : "?", why);
+        fprintf(stderr, "[vol] %s %s: refused (%s); original kept RAW\n",
+                lane ? lane : "PNGR", name ? name : "?", why);
 }
 
 /* zlib inflate wrapper used by pngx (windowBits=-15: a PNG IDAT is a RAW
@@ -301,6 +301,253 @@ static int jxl_tool(const char *exe, const char *in, const char *out,
     return run_tool(exe, in, out, opts);
 }
 
+/* WP620: shared PNG-lane front half (both pixel codecs). Parse + the v1
+ * guards + the zlib-wrapped refusal. 0 = admitted with info filled, -1 =
+ * refused (the reason logged via png_refuse). Decode-working-set admission
+ * stays in the sweep_dispatch branch, which owns the MEMLIMIT stamp. */
+static int png_parse_admit(const char *lane, const char *name, const uint8_t *png,
+                           size_t png_len, pngx_info *info)
+{
+    if (png_len < 33 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) {
+        png_refuse(lane, name, "no PNG signature"); return -1;
+    }
+    if (name_too_long_for_children(name)) {
+        png_refuse(lane, name, "name too long for the codec sibling"); return -1;
+    }
+    memset(info, 0, sizeof *info);
+    if (pngx_extract(png, png_len, NULL, 0, png_inflate, info) != 0) {
+        /* A zlib-wrapped IDAT lands here: it is not a PNG. */
+        png_refuse(lane, name, "IDAT is not a raw-deflate PNG stream, or the "
+                         "chunks do not describe an image");
+        pngx_free(info);   /* a failed extract still owns idat/idat_crc */
+        return -1;
+    }
+    if (info->bitdepth != 8 || info->interlace != 0 || info->bpp == 0) {
+        png_refuse(lane, name, "v1 guard: 8-bit non-interlaced only");
+        pngx_free(info); return -1;
+    }
+    if (info->nrows == 0 || info->rgb_len == 0) {
+        png_refuse(lane, name, "empty image"); pngx_free(info); return -1;
+    }
+    /* The recipe rebuilds the IDAT at windowBits -15 (a PNG IDAT is a raw
+     * deflate stream) and the recipe has no field in which to record another
+     * framing -- its enc byte is the deflate ENGINE, per dfc2b24, not a
+     * window. So a zlib-wrapped IDAT is refused here, by name, instead of
+     * being stored under a shape the read path could not reproduce. It is
+     * not a PNG: no conforming decoder reads it. Some toolschains' PNG
+     * writers do emit one, which is why pngx_extract() tolerates it and the
+     * refusal lives here rather than in the parser. */
+    if (png_idat_is_zlib_wrapped(info->idat, info->idat_len)) {
+        png_refuse(lane, name, "IDAT is zlib-wrapped, not a raw deflate stream");
+        pngx_free(info); return -1;
+    }
+    return 0;
+}
+
+/* WP620: shared PNG-lane commit half. refilter -> deflate-replica search ->
+ * recipe -> full-house rebuild guard -> size guard -> sibling + name commit.
+ * blob = the pixel codec's whole-file encoding (JXL or NBLI blob),
+ * rt_rgb = the pixels that encoding decoded back to (the lane proved them
+ * before calling). lane/sib_tag/algo name the lane ("PNGR"/"NBLI") for
+ * diagnostics, the sibling suffix ("!jxl"/"!nbli") and the stamped algo.
+ * Caller-owned buffers (info, rt_rgb, blob) are never freed here; the
+ * recipe and all intermediates are. Returns the new inode id, 0 on any
+ * refusal (the reason logged; the caller stamps). */
+static uint64_t png_commit_repack(invfs_volume *v, const char *name,
+                                  const uint8_t *png, size_t png_len,
+                                  pngx_info *info,
+                                  const uint8_t *rt_rgb, size_t rt_rgb_len,
+                                  const uint8_t *blob, size_t blob_len,
+                                  const char *lane, const char *blob_what,
+                                  const char *sib_tag, uint32_t algo)
+{
+    /* Find the deflate parameters that reproduce the original IDAT
+     * byte-for-byte. This has to search ACROSS ENGINES, not just across
+     * (level, memLevel): the encoder that wrote the PNG may have been a
+     * different zlib implementation than the one this build links. (See the
+     * pre-refactor comment: on a zlib-ng host the old level/mem loop could
+     * never match a PNG PIL wrote with stock zlib.) invfs_deflate_repro_find()
+     * probes the bundled stock zlib and the system zlib and reports which
+     * one matched, and `enc` carries that engine id, so the recipe format
+     * is unchanged. */
+    uint8_t enc = 0, level = 0, mem = 0, strategy = 0;
+    int found = 0;
+    /* refilter first (the round-trip proved rt_rgb is the pixels) */
+    uint8_t *filt = NULL; size_t filt_len = 0;
+    uint8_t *recipe = NULL; size_t rlen = 0;
+    if (pngx_refilter(rt_rgb, rt_rgb_len, info, &filt, &filt_len) != 0) {
+        png_refuse(lane, name, "refilter failed");
+        return 0;
+    }
+    {
+        invfs_deflate_params dp;
+        memset(&dp, 0, sizeof dp);
+        if (invfs_deflate_repro_find(filt, filt_len, info->idat,
+                                     info->idat_len, -15, &dp) == 0) {
+            enc = dp.engine;
+            level = (uint8_t)dp.level;
+            mem = (uint8_t)dp.mem_level;
+            strategy = (uint8_t)dp.strategy;
+            found = 1;
+            if (getenv("INVFS_DEBUG"))
+                fprintf(stderr, "[vol] %s %s: IDAT reproduced by %s "
+                        "level=%d memLevel=%d strategy=%d\n",
+                        lane, name ? name : "?",
+                        invfs_deflate_engine_name(dp.engine),
+                        (int)dp.level, (int)dp.mem_level, (int)dp.strategy);
+        }
+    }
+    free(filt);
+    if (!found) {
+        png_refuse(lane, name, "no deflate parameters reproduce the IDAT "
+                         "(windowBits/level/memLevel/strategy outside the grid)");
+        return 0;   /* unknown encoder: keep original */
+    }
+
+    /* recipe + pixel-codec blob */
+    if (pngx_build_recipe(info, enc, level, mem, strategy,
+                          &recipe, &rlen) != 0) {
+        png_refuse(lane, name, "recipe build failed");
+        return 0;
+    }
+
+    /* Full-house guard: replay the READ path end-to-end before committing
+     * anything -- recipe parse -> refilter(round-trip pixels) -> deflate
+     * replica -> pngx_rebuild -- and demand the original PNG bytes back.
+     * (The pixel and IDAT checks above verify the halves; this verifies the
+     * serialized recipe round-trips and the parts assemble to the exact
+     * file, which is what a reader will do with what we are about to
+     * store.) */
+    {
+        pngx_info pi2;
+        uint8_t *f2 = NULL, *s2 = NULL, *rb = NULL;
+        size_t f2_len = 0, s2_len = 0, rb_len = 0;
+        size_t want_split = 0, i;
+        int vok = 0;
+        const char *vwhy = "recipe does not parse";
+
+        for (i = 0; i < info->idat_n; i++) want_split += info->idat_split[i];
+        memset(&pi2, 0, sizeof pi2);
+        if (pngx_parse_recipe(recipe, rlen, &pi2) != 0) {
+            vwhy = "recipe does not parse";
+        } else if (pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) != 0) {
+            vwhy = "refilter of the round-tripped pixels failed";
+        } else {
+            if (pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM ||
+                pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_STOCK) {
+                /* Rebuild through the engine the sweep recorded, not through
+                 * whatever deflateInit2 happens to map to now: the IDAT is
+                 * reproduced bit-for-bit only by the same implementation that
+                 * wrote it. invfs_deflate_repro_encode() selects it. */
+                invfs_deflate_params dp;
+                memset(&dp, 0, sizeof dp);
+                dp.engine = pi2.enc;
+                dp.level = (int8_t)pi2.level;
+                dp.mem_level = (int8_t)pi2.mem;
+                dp.strategy = (int8_t)pi2.strategy;
+                dp.window_bits = -15;   /* PNG IDAT = raw deflate */
+                if (invfs_deflate_repro_encode(f2, f2_len, &dp, &s2,
+                                               &s2_len) != 0) {
+                    vwhy = "deflate replica failed";
+                } else if (s2_len != want_split) {
+                    vwhy = "deflate replica is not the recorded IDAT length";
+                } else {
+                    vok = 1;
+                }
+            } else {
+                size_t bound = f2_len + f2_len / 4 + 4096;
+                s2 = (uint8_t *)malloc(bound);
+                if (s2 &&
+                    mz_tdefl_compress(f2, f2_len, s2, bound,
+                                      pi2.level, &s2_len) == 0)
+                    vok = 1;
+                else
+                    vwhy = "miniz replica failed";
+            }
+            if (vok && pngx_rebuild(&pi2, s2, s2_len, &rb, &rb_len) != 0) {
+                vok = 0;
+                vwhy = "pngx_rebuild rejected the replica";
+            } else if (vok && rb_len != png_len) {
+                vok = 0;
+                vwhy = "rebuilt PNG is the wrong length";
+            } else if (vok && memcmp(rb, png, png_len) != 0) {
+                vok = 0;
+                vwhy = "rebuilt PNG differs from the original";
+            }
+        }
+        free(f2); free(s2); free(rb);
+        pngx_free(&pi2);
+        if (!vok) {
+            png_refuse(lane, name, vwhy);
+            free(recipe);
+            return 0;   /* the stored shape would not read back: refuse */
+        }
+    }
+
+    /* guard: pixel-codec blob + recipe must be smaller than the original */
+    if (blob_len + rlen >= png_len) {
+        char why[128];
+        snprintf(why, sizeof why, "%s + recipe is not smaller than the PNG",
+                 blob_what);
+        png_refuse(lane, name, why);
+        free(recipe); return 0;
+    }
+    /* create name<sib_tag> first, then name (atomic) */
+    {
+        char sn[320];
+        uint64_t sino, ino;
+        size_t bound, rbl = 0;
+        uint8_t *rc;
+        size_t rcl;
+        snprintf(sn, sizeof sn, "%s%s", name, sib_tag);
+        sino = vol_create_blob_file(v, sn, blob, blob_len,
+                                    (uint64_t)blob_len, INVFS_ALGO_NONE);
+        if (!sino) { png_refuse(lane, name, "blob write failed");
+                     free(recipe);
+                     return vol_transcode_abort(v, name); }
+        bound = ZSTD_compressBound(rlen);
+        rc = (uint8_t *)malloc(bound + 1);
+        if (!rc) { png_refuse(lane, name, "out of memory");
+                   free(recipe);
+                   return vol_transcode_abort(v, name); }
+        rcl = ZSTD_compress(rc + 1, bound, recipe, rlen, 19);
+        if (!ZSTD_isError(rcl) && rcl < rlen) { rc[0] = 1; rbl = rcl + 1; }
+        else { rc[0] = 0; memcpy(rc + 1, recipe, rlen); rbl = rlen + 1; }
+        free(recipe);
+        ino = vol_create_blob_file(v, name, rc, rbl,
+                                   (uint64_t)png_len, algo);
+        free(rc);
+        if (!ino) return vol_transcode_abort(v, name);
+        return ino;
+    }
+}
+
+/* WP620: decode an NBLI blob through the fat pack (file-level argv, staged
+ * as in.nbli/out.png -- the CLI sniffs the direction off the names). 0 on
+ * ok with the decoded PNG slurped; -1 when the pack is absent, the tool
+ * failed, or the output is missing/empty. Shared by the sweep-side
+ * decode-back guard and the read path. */
+static int nbli_decode_blob(const invfs_codec *nc, const uint8_t *nbli,
+                            size_t nbli_len,
+                            uint8_t **png_out, size_t *png_len)
+{
+    char dir[64], in[128], out[128];
+    int rc = -1;
+    *png_out = NULL; *png_len = 0;
+    if (!nc) return -1;
+    if (tool_tmpdir(dir, sizeof dir,
+                    (uint64_t)nbli_len * 4 + (4u<<20)) != 0) return -1;
+    snprintf(in, sizeof in, "%s/in.nbli", dir);
+    snprintf(out, sizeof out, "%s/out.png", dir);
+    if (tool_write(in, nbli, nbli_len) == 0 &&
+        invfs_codec_pack_exec(nc, 0, in, out) == 0 &&
+        png_slurp(out, png_out, png_len) == 0)
+        rc = 0;
+    tool_rm(dir, "in.nbli"); tool_rm(dir, "out.png");
+    rmdir(dir);
+    return rc;
+}
+
 
 /* PNG -> JXL lossless blob + IVPN recipe (bit-exact via deflate replica
    and refilter). Verified end-to-end at transcode time: the whole
@@ -467,40 +714,8 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
      * JXL round-trip must reproduce the pixels and the deflate replica the
      * original IDAT before anything is committed; refused files keep their
      * original RAW bytes. */
-    if (png_len < 33 || memcmp(png, "\x89PNG\r\n\x1a\n", 8) != 0) {
-        png_refuse(name, "no PNG signature"); return 0;
-    }
-    if (name_too_long_for_children(name)) {
-        png_refuse(name, "name too long for the !jxl sibling"); return 0;
-    }
     pngx_info info;
-    memset(&info, 0, sizeof info);
-    if (pngx_extract(png, png_len, NULL, 0, png_inflate, &info) != 0) {
-        /* A zlib-wrapped IDAT lands here: it is not a PNG. */
-        png_refuse(name, "IDAT is not a raw-deflate PNG stream, or the "
-                         "chunks do not describe an image");
-        pngx_free(&info);   /* a failed extract still owns idat/idat_crc */
-        return 0;
-    }
-    if (info.bitdepth != 8 || info.interlace != 0 || info.bpp == 0) {
-        png_refuse(name, "v1 guard: 8-bit non-interlaced only");
-        pngx_free(&info); return 0;
-    }
-    if (info.nrows == 0 || info.rgb_len == 0) {
-        png_refuse(name, "empty image"); pngx_free(&info); return 0;
-    }
-    /* The recipe rebuilds the IDAT at windowBits -15 (a PNG IDAT is a raw
-     * deflate stream) and the recipe has no field in which to record another
-     * framing -- its enc byte is the deflate ENGINE, per dfc2b24, not a
-     * window. So a zlib-wrapped IDAT is refused here, by name, instead of
-     * being stored under a shape the read path could not reproduce. It is
-     * not a PNG: no conforming decoder reads it. Some toolschains' PNG
-     * writers do emit one, which is why pngx_extract() tolerates it and the
-     * refusal lives here rather than in the parser. */
-    if (png_idat_is_zlib_wrapped(info.idat, info.idat_len)) {
-        png_refuse(name, "IDAT is zlib-wrapped, not a raw deflate stream");
-        pngx_free(&info); return 0;
-    }
+    if (png_parse_admit("PNGR", name, png, png_len, &info) != 0) return 0;
 
     char dir[64], sp[320], jx[320], dn[320];
     /* the spool, the intermediate jxl and the decoded png are all in the
@@ -534,7 +749,7 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
         if (png_spool_build(&info, spool_wbits[spi], &spool, &spool_len) != 0)
             continue;
         if (tool_write(sp, spool, spool_len) != 0) {
-            png_refuse(name, "cannot write the spool PNG");
+            png_refuse("PNGR", name, "cannot write the spool PNG");
             free(spool);
             tool_rm(dir, "tmp.jxl"); rmdir(dir);
             pngx_free(&info); return 0;
@@ -582,177 +797,154 @@ uint64_t vol_create_png_file(invfs_volume *v, const char *name,
     }
     if (!rt_rgb) {
         rmdir(dir);
-        png_refuse(name, rt_why);
+        png_refuse("PNGR", name, rt_why);
         pngx_free(&info); return 0;   /* JXL changed pixels: keep original */
     }
 
-    /* Find the deflate parameters that reproduce the original IDAT
-     * byte-for-byte. This has to search ACROSS ENGINES, not just across
-     * (level, memLevel): the encoder that wrote the PNG may have been a
-     * different zlib implementation than the one this build links. On a
-     * zlib-ng host the old level/mem loop could never match a PNG PIL wrote
-     * with stock zlib -- all 225 (level, memLevel, strategy) combinations
-     * missed -- so every PNG landed in GENERIC_GUARD{PNGR} instead of being
-     * transcoded. invfs_deflate_repro_find() already probes the bundled
-     * stock zlib and the system zlib and reports which one matched, and
-     * `enc` carries that engine id (0 system zlib, 1 miniz, 2 stock zlib),
-     * so the recipe format is unchanged.
-     *
-     * Compat: recipes written before this change used enc=0 to mean "the
-     * build's default zlib", which was stock zlib. They now decode as
-     * "system zlib". Nothing wrote one while the lane was refusing every
-     * file, so the exposure is limited to volumes built with an older
-     * binary that DID transcode PNGs. */
-    uint8_t enc = 0, level = 0, mem = 0, strategy = 0;
-    int found = 0;
-    /* refilter first (the JXL round-trip proved info.rgb is the pixels) */
-    uint8_t *filt = NULL; size_t filt_len = 0;
-    if (pngx_refilter(info.rgb, info.rgb_len, &info, &filt, &filt_len) != 0) {
-        png_refuse(name, "refilter failed");
-        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
-        pngx_free(&info); return 0;
-    }
-    invfs_deflate_params dp;
-    memset(&dp, 0, sizeof dp);
-    if (invfs_deflate_repro_find(filt, filt_len, info.idat, info.idat_len,
-                                 -15, &dp) == 0) {
-        enc = dp.engine;
-        level = (uint8_t)dp.level;
-        mem = (uint8_t)dp.mem_level;
-        strategy = (uint8_t)dp.strategy;
-        found = 1;
-        if (getenv("INVFS_DEBUG"))
-            fprintf(stderr, "[vol] PNGR %s: IDAT reproduced by %s "
-                    "level=%d memLevel=%d strategy=%d\n",
-                    name ? name : "?", invfs_deflate_engine_name(dp.engine),
-                    (int)dp.level, (int)dp.mem_level, (int)dp.strategy);
-    }
-    free(filt);
-    if (!found) {
-        png_refuse(name, "no deflate parameters reproduce the IDAT "
-                         "(windowBits/level/memLevel/strategy outside the grid)");
-        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
-        pngx_free(&info); return 0;   /* unknown encoder: keep original */
-    }
-
-    /* recipe + JXL blob */
-    uint8_t *recipe = NULL; size_t rlen = 0;
-    if (pngx_build_recipe(&info, enc, level, mem, strategy, &recipe, &rlen) != 0) {
-        png_refuse(name, "recipe build failed");
-        free(rt_rgb); tool_rm(dir, "tmp.jxl"); rmdir(dir);
-        pngx_free(&info); return 0;
-    }
-    uint8_t *jxl = NULL; size_t jxl_len = 0;
-    if (png_slurp(jx, &jxl, &jxl_len) != 0) {
-        png_refuse(name, "cjxl left no JXL blob behind");
-        free(rt_rgb); free(recipe);
-        tool_rm(dir, "tmp.jxl"); rmdir(dir);
-        pngx_free(&info); return 0;
-    }
-    tool_rm(dir, "tmp.jxl"); rmdir(dir);
-
-    /* Full-house guard: replay the READ path end-to-end before committing
-     * anything -- recipe parse -> refilter(round-trip pixels) -> deflate
-     * replica -> pngx_rebuild -- and demand the original PNG bytes back.
-     * (The pixel and IDAT checks above verify the halves; this verifies the
-     * serialized recipe round-trips and the parts assemble to the exact
-     * file, which is what a reader will do with what we are about to
-     * store.) */
+    /* The pixel proof above left tmp.jxl on disk; slurp it now. The
+     * deflate search, the full-house guard and the commit below live in
+     * the shared png_commit_repack half and no longer touch scratch. */
     {
-        pngx_info pi2;
-        uint8_t *f2 = NULL, *s2 = NULL, *rb = NULL;
-        size_t f2_len = 0, s2_len = 0, rb_len = 0;
-        size_t want_split = 0, i;
-        int vok = 0;
-        const char *vwhy = "recipe does not parse";
+        uint8_t *jxl = NULL; size_t jxl_len = 0;
+        uint64_t ino;
+        if (png_slurp(jx, &jxl, &jxl_len) != 0) {
+            png_refuse("PNGR", name, "cjxl left no JXL blob behind");
+            free(rt_rgb);
+            tool_rm(dir, "tmp.jxl"); rmdir(dir);
+            pngx_free(&info); return 0;
+        }
+        tool_rm(dir, "tmp.jxl"); rmdir(dir);
+        ino = png_commit_repack(v, name, png, png_len, &info,
+                                rt_rgb, rt_rgb_len, jxl, jxl_len,
+                                "PNGR", "JXL blob", "!jxl",
+                                INVFS_ALGO_PNGR);
+        free(rt_rgb); free(jxl); pngx_free(&info);
+        return ino;
+    }
+#endif
+}
 
-        for (i = 0; i < info.idat_n; i++) want_split += info.idat_split[i];
-        memset(&pi2, 0, sizeof pi2);
-        if (pngx_parse_recipe(recipe, rlen, &pi2) != 0) {
-            vwhy = "recipe does not parse";
-        } else if (pngx_refilter(rt_rgb, rt_rgb_len, &pi2, &f2, &f2_len) != 0) {
-            vwhy = "refilter of the round-tripped pixels failed";
+/* PNG -> NBLI lossless blob + IVPN recipe (bit-exact via decode-back pixel
+ * guard, deflate replica and whole-rebuild guard). The PNGR shape with the
+ * pixel codec swapped: the spool PNG (canonical minimal re-emit of the
+ * original filtered rows) goes through the nbli fat pack's buffer
+ * trampolines (staged as in.png/out.nbli by pack_buffer_io), the decoded
+ * PNG comes back through the file-level argv (in.nbli/out.png -- exact,
+ * no size guess), and everything downstream (deflate search, recipe,
+ * full-house guard, commit) is the shared png_commit_repack half.
+ * 0 = refused (the file stays RAW; the caller stamps). Pack/tool absence
+ * inside is a refusal like any other; the dispatch branch pre-gates the
+ * common case into WAITING (RAW, unstamped) instead. */
+uint64_t vol_create_nbli_file(invfs_volume *v, const char *name,
+                              const uint8_t *png, size_t png_len)
+{
+#ifdef _WIN32
+    (void)v; (void)name; (void)png; (void)png_len;
+    return 0;   /* no POSIX pack tool layer on Windows: always refuse */
+#else
+    const invfs_codec *nc = invfs_codec_by_algo(INVFS_ALGO_NBLI);
+    pngx_info info;
+    uint8_t *spool = NULL, *enc = NULL, *dnb = NULL;
+    size_t spool_len = 0, enc_cap, enc_len = 0, dn_len = 0;
+    uint8_t *rt_rgb = NULL; size_t rt_rgb_len = 0;
+    uint64_t ino;
+    if (!nc || !nc->encode || !nc->decode ||
+        (nc->probe && !nc->probe())) {
+        png_refuse("NBLI", name, "nbli pack not loaded");
+        return 0;
+    }
+    if (png_parse_admit("NBLI", name, png, png_len, &info) != 0) return 0;
+    /* spool: the original filtered rows re-emitted minimal (STORED IDAT).
+     * Framing is zlib-WRAPPED here, not the spec raw: NBLI's minimal PNG
+     * reader only parses wrapped IDATs (a raw spool fails its decode).
+     * The framing is ours to choose and changes nothing downstream -- NBLI
+     * decodes to pixels before coding, and the recipe is built from the
+     * ORIGINAL rows and IDAT, never from the spool. */
+    if (png_spool_build(&info, 15, &spool, &spool_len) != 0) {
+        png_refuse("NBLI", name, "spool build failed");
+        pngx_free(&info); return 0;
+    }
+    /* encode through the pack (in.png -> out.nbli staging inside). The
+     * blob may exceed the input on pathological input; the size guard in
+     * the commit half is what refuses that, but the trampoline needs room
+     * to produce it. */
+    enc_cap = spool_len + spool_len / 4 + 65536;
+    enc = (uint8_t *)malloc(enc_cap ? enc_cap : 1);
+    if (!enc || nc->encode(spool, spool_len, enc, enc_cap, &enc_len) != 0 ||
+        enc_len == 0) {
+        png_refuse("NBLI", name, "nbli encode failed (see INVFS_HELPER_VERBOSE)");
+        free(spool); free(enc);
+        pngx_free(&info); return 0;
+    }
+    free(spool);
+    /* decode-back pixel guard: the blob must render the exact original
+     * pixels. RGBA (alpha dropped with a warning), 16-bit and anything
+     * else NBLI cannot represent fails HERE, by pixel count or by memcmp
+     * -- never silently. */
+    if (nbli_decode_blob(nc, enc, enc_len, &dnb, &dn_len) != 0) {
+        png_refuse("NBLI", name, "nbli decode failed (see INVFS_HELPER_VERBOSE)");
+        free(enc);
+        pngx_free(&info); return 0;
+    }
+    {
+        pngx_info di;
+        memset(&di, 0, sizeof di);
+        if (pngx_extract(dnb, dn_len, NULL, 0, png_inflate, &di) != 0) {
+            png_refuse("NBLI", name, "nbli's PNG does not parse");
+        } else if (di.rgb_len != info.rgb_len) {
+            png_refuse("NBLI", name, "nbli returned a different pixel count");
+        } else if (memcmp(di.rgb, info.rgb, info.rgb_len) != 0) {
+            png_refuse("NBLI", name, "NBLI round-trip changed the pixels");
         } else {
-            if (pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_SYSTEM ||
-                pi2.enc == INVFS_DEFLATE_ENGINE_ZLIB_STOCK) {
-                /* Rebuild through the engine the sweep recorded, not through
-                 * whatever deflateInit2 happens to map to now: the IDAT is
-                 * reproduced bit-for-bit only by the same implementation that
-                 * wrote it. invfs_deflate_repro_encode() selects it. */
-                invfs_deflate_params dp;
-                memset(&dp, 0, sizeof dp);
-                dp.engine = pi2.enc;
-                dp.level = (int8_t)pi2.level;
-                dp.mem_level = (int8_t)pi2.mem;
-                dp.strategy = (int8_t)pi2.strategy;
-                dp.window_bits = -15;   /* PNG IDAT = raw deflate */
-                if (invfs_deflate_repro_encode(f2, f2_len, &dp, &s2,
-                                               &s2_len) != 0) {
-                    vwhy = "deflate replica failed";
-                } else if (s2_len != want_split) {
-                    vwhy = "deflate replica is not the recorded IDAT length";
-                } else {
-                    vok = 1;
-                }
-            } else {
-                size_t bound = f2_len + f2_len / 4 + 4096;
-                s2 = (uint8_t *)malloc(bound);
-                if (s2 &&
-                    mz_tdefl_compress(f2, f2_len, s2, bound,
-                                      pi2.level, &s2_len) == 0)
-                    vok = 1;
-                else
-                    vwhy = "miniz replica failed";
-            }
-            if (vok && pngx_rebuild(&pi2, s2, s2_len, &rb, &rb_len) != 0) {
-                vok = 0;
-                vwhy = "pngx_rebuild rejected the replica";
-            } else if (vok && rb_len != png_len) {
-                vok = 0;
-                vwhy = "rebuilt PNG is the wrong length";
-            } else if (vok && memcmp(rb, png, png_len) != 0) {
-                vok = 0;
-                vwhy = "rebuilt PNG differs from the original";
-            }
+            rt_rgb = di.rgb; rt_rgb_len = di.rgb_len;
+            di.rgb = NULL; di.rgb_len = 0;
         }
-        free(f2); free(s2); free(rb);
-        pngx_free(&pi2);
-        free(rt_rgb);
-        if (!vok) {
-            png_refuse(name, vwhy);
-            free(jxl); free(recipe); pngx_free(&info);
-            return 0;   /* the stored shape would not read back: refuse */
-        }
+        pngx_free(&di);
     }
-
-    /* guard: JXL + recipe must be smaller than the original */
-    if ((size_t)jxl_len + rlen >= png_len) {
-        png_refuse(name, "JXL blob + recipe is not smaller than the PNG");
-        free(jxl); free(recipe); pngx_free(&info); return 0;
+    free(dnb);
+    if (!rt_rgb) {
+        free(enc);
+        pngx_free(&info); return 0;   /* pixels differ: keep original */
     }
-    /* create name!jxl first, then name (atomic) */
-    char jn[320];
-    snprintf(jn, sizeof jn, "%s!jxl", name);
-    uint64_t jino = vol_create_blob_file(v, jn, jxl, (size_t)jxl_len,
-                                         (uint64_t)jxl_len, INVFS_ALGO_NONE);
-    free(jxl);
-    if (!jino) { png_refuse(name, "blob write failed");
-                 free(recipe); pngx_free(&info);
-                 return vol_transcode_abort(v, name); }
-    size_t bound = ZSTD_compressBound(rlen);
-    uint8_t *rc = (uint8_t *)malloc(bound + 1);
-    if (!rc) { png_refuse(name, "out of memory");
-               free(recipe); pngx_free(&info);
-               return vol_transcode_abort(v, name); }
-    size_t rbl = 0;
-    size_t rcl = ZSTD_compress(rc + 1, bound, recipe, rlen, 19);
-    if (!ZSTD_isError(rcl) && rcl < rlen) { rc[0] = 1; rbl = rcl + 1; }
-    else { rc[0] = 0; memcpy(rc + 1, recipe, rlen); rbl = rlen + 1; }
-    uint64_t ino = vol_create_blob_file(v, name, rc, rbl,
-                                        (uint64_t)png_len, INVFS_ALGO_PNGR);
-    free(rc); free(recipe); pngx_free(&info);
-    if (!ino) return vol_transcode_abort(v, name);
+    ino = png_commit_repack(v, name, png, png_len, &info,
+                            rt_rgb, rt_rgb_len, enc, enc_len,
+                            "NBLI", "NBLI blob", "!nbli",
+                            INVFS_ALGO_NBLI);
+    free(enc); free(rt_rgb); pngx_free(&info);
     return ino;
+#endif
+}
+
+/* NBLI blob -> pixels (pack decode of the "name!nbli" sibling, parsed to
+ * RGB). 0 on ok -- mirrors invfs_png_from_jxl's contract (POSIX half).
+ * Pack absent or tool failed reads EIO upstream, exactly like a missing
+ * djxl does for PNGR. */
+int invfs_png_from_nbli(invfs_volume *v, uint64_t nbli_inode,
+                        uint8_t **rgb, size_t *rgb_len)
+{
+#ifdef _WIN32
+    (void)v; (void)nbli_inode; (void)rgb; (void)rgb_len;
+    return -1;
+#else
+    const invfs_codec *nc = invfs_codec_by_algo(INVFS_ALGO_NBLI);
+    uint8_t *nbli = NULL, *dn = NULL;
+    size_t nbli_len = 0, dn_len = 0;
+    pngx_info di;
+    int ok = 0;
+    if (!nc || !nc->encode || !nc->decode) return -1;
+    if (vol_read_inode(v, nbli_inode, 0, &nbli, &nbli_len) != 0) return -1;
+    if (nbli_decode_blob(nc, nbli, nbli_len, &dn, &dn_len) == 0) {
+        memset(&di, 0, sizeof di);
+        if (pngx_extract(dn, dn_len, NULL, 0, png_inflate, &di) == 0) {
+            *rgb = di.rgb; *rgb_len = di.rgb_len;
+            di.rgb = NULL; di.rgb_len = 0;
+            pngx_free(&di);
+            ok = 1;
+        }
+    }
+    free(nbli);
+    free(dn);
+    return ok ? 0 : -1;
 #endif
 }
 

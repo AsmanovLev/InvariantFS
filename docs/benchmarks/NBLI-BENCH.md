@@ -132,3 +132,108 @@ NBLI files, which is a narrow proof for a v0.4 prototype. Engine
 wiring, `.so` packaging, and registry work are out of scope and
 unstarted — the next WP should re-run these legs on real Kodak/CLIC
 frames and measure decode before any lane lands.
+
+---
+
+## WP620 appendix: real CLIC frames + decode speed (2026-10-14)
+
+The "next WP" legs the verdict above asked for, run for the lane
+decision. Same host family (Debian 13, gcc-14.2.0), same tool pins
+(`cjxl`/`djxl` v0.11.2 system, PIL 11.1.0), all encoders
+single-threaded (`cjxl`/`djxl` with `--num_threads=1`; NBLI is
+single-threaded by construction). The NBLI binary is the SHIPPED
+artifact shape: prototype sources at `6561fc8` built `g++ -static -O2`
+(the registry `nbli` fat pack's `bin/nbli`, via
+`registry/tools/build-payloads.sh build nbli`).
+
+### Corpus: still no Kodak, CLIC instead (documented fallback)
+
+Kodak is unfetchable from this network exactly as in WP617
+(`https://r0k.us/graphics/kodak/kodak/kodim01.png` -> HTTP 403,
+`https://www.math.purdue.edu/~lucier/PHOTO_CD/kodim01.png` -> HTTP
+404, probed 2026-10-14). The WP617 carried-over photo is gone with
+`/tmp`. Fallback, explicitly: **CLIC2021 professional_valid_2020**
+(`https://data.vision.ee.ethz.ch/cvl/clic/professional_valid_2020.zip`,
+134,834,429 B, sha256
+`00be38092ade2ab5163b65f7f6523d46c7bca147007f559adbb02c0afc236b7d`)
+— the validation split of the same family upstream benchmarked
+(their table used the train split). Five frames spanning 254 KB to
+5.7 MB, md5s on record in the bench scratch log:
+
+| frame | PNG bytes | dims |
+|---|---|---:|
+| schicka-307 | 253,864 | ~512x384 RGB |
+| todd-quackenbush-222 | 630,741 | RGB |
+| daniel-robert-405 | 2,405,747 | 1500x844 RGB |
+| wojciech-szaturski-3611 | 3,595,720 | RGB |
+| alexander-shustov-73 | 5,706,719 | RGB |
+
+Total: 12,592,791 B PNG.
+
+### Legs (per frame: bytes, encode wall, decode wall)
+
+| frame | NBLI default | JXL `-d 0` effort 7 | JXL `-d 0 -e 8` |
+|---|---|---|---|
+| schicka-307 | 167,384 B / 0.056 s / 0.044 s | 168,278 / 0.296 / 0.063 | 167,821 / 1.094 / 0.064 |
+| todd-quackenbush-222 | 453,604 / 0.093 / 0.071 | 450,101 / 0.633 / 0.110 | 448,178 / 1.709 / 0.112 |
+| daniel-robert-405 | 1,612,300 / 0.362 / 0.281 | 1,609,461 / 3.014 / 0.385 | 1,602,658 / 7.496 / 0.400 |
+| wojciech-szaturski-3611 | 2,256,558 / 0.640 / 0.525 | 2,441,309 / 4.767 / 0.661 | 2,420,219 / 10.307 / 0.637 |
+| alexander-shustov-73 | 3,928,328 / 0.795 / 0.613 | 3,895,069 / 8.216 / 0.896 | 3,881,930 / 18.325 / 0.899 |
+
+Totals: NBLI 8,418,174 B in 1.946 s enc / 1.534 s dec;
+effort-7 JXL 8,554,218 B in 16.926 s / 2.115 s;
+`-e 8` JXL 8,520,806 B in 38.931 s / 2.112 s.
+
+So on real frames NBLI is **1.2% smaller than `-e 8` at 20.0x the
+encode speed and 1.38x the decode speed** (8.7x / 1.38x vs
+effort-7). Per-frame the ratio story is mixed, as honest numbers are:
+-6.8% (wojciech), -0.3% (schicka), +0.6% (daniel), +1.2% (todd,
+alexander) vs `-e 8` — while encode is 16-23x faster on every frame
+and decode 1.2-1.6x faster on every frame.
+
+### Decode-back: 15/15 pixel-exact
+
+All 5 frames through all 3 legs (NBLI decode via `nbli -f <.nbli>
+-o`, JXL via `djxl --num_threads=1`), numpy array equality against
+the source pixels: 15 exact, 0 mismatches. With WP617's 51 files the
+prototype's bit-exactness proof stands at 66 files.
+
+### The honest caveat: the lane admits none of these (by design)
+
+All 41 CLIC valid-split PNGs carry zlib-wrapped IDATs, and the
+IVPN recipe records no IDAT framing -- so the WP620 lane (like PNGR
+before it) refuses every stock photo by name and keeps it RAW. The
+numbers above are TOOL-level (what the codec does); what the lane
+does with a wrapped PNG is nothing, safely. A framing-aware recipe
+(range check: recipe version byte already exists, `ver` 1/2 accepted
+in `pngx_parse_recipe`, so a v3 with one framing bit refuses cleanly
+on old readers) would admit them to BOTH lanes -- proposed as a
+follow-up WP, deliberately not folded into this one (one WP per
+logical change; PNGR behavior must not move under an NBLI WP).
+
+### Lane-level read timing: NBLI at parity-to-1.2x-slower than PNGR (2026-10-14)
+
+Tool-level decode (above) favors NBLI 1.38x, but a lane read is not a tool
+decode: `invf-cat` pays process spawn + `vol_open` + the lane's replay
+(decode the stored blob, rebuild the PNG, verify). Four raw-deflate
+fixtures (155 KB–1.6 MB, gradient+noise pixels), each swept both ways on
+this branch (default → `CONTAINER{PNGR}`, `INVFS_PHOTO_CODEC=nbli` →
+`CONTAINER{NBLI}`), every timed read verified byte-exact against the
+source, best-of-9 `invf-cat` wall on one host:
+
+| file (PNG bytes) | PNGR cat best (median) | NBLI cat best (median) |
+|---|---|---|
+| small 155,246 | 74.5 ms (74.7) | 63.7 ms (64.0) |
+| s1 415,343 | 102.7 ms (107.2) | 108.7 ms (109.6) |
+| s2 919,536 | 171.2 ms (173.2) | 201.2 ms (201.4) |
+| s3 1,613,960 | 278.8 ms (284.1) | 331.8 ms (334.1) |
+
+So NBLI reads are 1.17x faster on the smallest file (spawn-dominated
+floor) and 1.06–1.19x slower above ~400 KB. Neither direction is a reason
+to pick a codec: the pick is encode speed + size (NBLI, above) vs
+staying on the default path (JXL). Method limits: one host, floor
+includes ~30–50 ms of spawn+open, scratch under `/tmp/invfs-wp620-timing`
+(cleaned after). Env note: the lane's `cjxl`/`djxl` must resolve via
+`$INVFS_TOOLS` — a scratch run without it refused every PNGR file with
+`cjxl failed on the spool` while NBLI (bundled-first pack `bin/`)
+claimed them; that asymmetry is setup, not a lane property.

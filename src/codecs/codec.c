@@ -1254,7 +1254,7 @@ static void pack_entry_free(pack_entry *p)
  * Filled lazily on the first probe of each codec. The sweep is
  * single-threaded today, so a plain unsynchronized cache is fine --
  * revisit if probing ever goes concurrent. */
-#define PROBE_CACHE_SLOTS 16   /* INVFS_ALGO_* registry ids run 0..15; 14
+#define PROBE_CACHE_SLOTS 32   /* INVFS_ALGO_* registry ids run 0..31; 14
                                 * (ZSTD_BCJ) is an AST-only tag (WP14a) with
                                 * no registry entry, so it never probes */
 static signed char probe_cache[PROBE_CACHE_SLOTS];   /* 0 = not probed yet */
@@ -1294,6 +1294,9 @@ static int probe_pmp(void) { return probe_cached(INVFS_ALGO_PMP, "pmp", "packMP3
 static int probe_jxl(void) { return probe_cached(INVFS_ALGO_JXL, "jxl", "cjxl"); }
 static int probe_ape(void) { return probe_cached(INVFS_ALGO_APE, "ape", "mac"); }
 static int probe_wv(void)  { return probe_cached(INVFS_ALGO_WV,  "wv",  "wavpack"); }
+/* WP620: the nbli fat pack's tool (pack name and tool name are both
+ * "nbli"); the lane drives the pack entry, this is the placeholder's. */
+static int probe_nbli(void) { return probe_cached(INVFS_ALGO_NBLI, "nbli", "nbli"); }
 
 /* ---------------- the registry ----------------
  * Order = sniff priority: specific magics first, text LAST. NONE/LZ4/ZSTD
@@ -1342,6 +1345,14 @@ static const invfs_codec registry[] = {
     { INVFS_ALGO_EXER, "exer",
       INVFS_CODEC_CAP_CONTAINER, 0, 1,
       sniff_exer, NULL, NULL, NULL },
+    /* WP620: the NBLI lane's placeholder (same shape as the WP16e jxl one:
+     * sniff + probe only, the transcode lives in the nbli fat pack). A
+     * manifest claiming algo 16 OVERRIDES this entry; while no pack is
+     * loaded the sweep defers PNGs RAW and unstamped under photo_codec=nbli
+     * instead of letting them fall to the generic floor. */
+    { INVFS_ALGO_NBLI, "nbli",
+      INVFS_CODEC_CAP_EXTERNAL | INVFS_CODEC_CAP_PACKONLY, 0, 1,
+      sniff_pngr, probe_nbli, NULL, NULL },
     { INVFS_ALGO_PPMD, "ppmd",
       INVFS_CODEC_CAP_BATCHED, 68ull << 20, 0,
       sniff_ppmd, NULL, invfs_ppmd_encode, invfs_ppmd_decode },

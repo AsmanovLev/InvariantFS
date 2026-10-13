@@ -39,6 +39,32 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
 
 
+/* WP620: the two-way photo handler's codec choice. Default jxl (existing
+ * volumes behave identically until the user opts in); nbli is explicit.
+ * Session-fixed like invfs_set_no_autopack: the mount option (or setter)
+ * wins, the INVFS_PHOTO_CODEC env var covers the offline tools
+ * (invf-sweep), which share this TU and need no init plumbing. Neither
+ * call site is hot (both fork), so a getenv per call is lost in the noise.
+ * JPEGs never consult this: NBLI has no JPEG-bitstream-reconstruction mode,
+ * so the JPEG branch keeps the JXL path whatever the knob says. */
+static int g_photo_codec_set = 0;
+static int g_photo_codec_nbli = 0;
+
+void invfs_set_photo_codec_nbli(int on)
+{
+    g_photo_codec_set = 1;
+    g_photo_codec_nbli = on ? 1 : 0;
+}
+
+int invfs_photo_codec_nbli(void)
+{
+    const char *e;
+    if (g_photo_codec_set)
+        return g_photo_codec_nbli;
+    e = getenv("INVFS_PHOTO_CODEC");
+    return e && (strcmp(e, "nbli") == 0 || strcmp(e, "NBLI") == 0);
+}
+
 /* WP10 §2: the minimum compression gain (in percent) below which a file is
  * stamped UNCOMPRESSIBLE and skipped by later sweeps until a newer codec
  * generation sniffs it. INVFS_MIN_GAIN_PCT, default 0.5. */
@@ -509,7 +535,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                           const char *name, const uint8_t *full,
                           size_t full_len)
 {
-    char rname[272], p0name[272], jn[272];
+    char rname[272], p0name[272], jn[272], nn[272];
     int declined_algo = 0;   /* WP103: the pack the WP13 loop already tried */
     /* WP202: the address the row carries RIGHT NOW, captured before any lane
      * below can supersede it in place.
@@ -609,14 +635,30 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         return 4;   /* GZIP */
     }
 
-    /* PNG -> JXL lossless + IVPN recipe (bit-exact) */
+    /* PNG -> pixel-codec lossless + IVPN recipe (bit-exact). WP620: the
+     * two-way photo handler. photo_codec=nbli drives the NBLI fat pack
+     * (vol_create_nbli_file: the NBLI blob in "name!nbli"); default jxl
+     * keeps the PNGR path (vol_create_png_file: the JXL blob in
+     * "name!jxl"). The knob picks the codec for files transcoded from now
+     * on only: a file either sibling exists for is already transcoded and
+     * keeps its codec (both shapes read back through their own sibling and
+     * roll back through their own recipe -- the algo on the segment says
+     * which, never the knob), so flipping the knob never rewrites the
+     * volume. JPEGs never arrive here (separate branch below: NBLI has no
+     * JPEG-bitstream-reconstruction mode). */
     if (full_len >= 33 && memcmp(full, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        int want_nbli = invfs_photo_codec_nbli();
+        uint8_t lane_algo = want_nbli ? INVFS_ALGO_NBLI : INVFS_ALGO_PNGR;
+        uint64_t nino;
         snprintf(jn, sizeof jn, "%s!jxl", name);
-        if (vol_find(v, jn) != 0) return 0;
+        snprintf(nn, sizeof nn, "%s!nbli", name);
+        if (vol_find(v, jn) != 0 || vol_find(v, nn) != 0) return 0;
         /* WP10 §12.2: admission needs the DECODE working set, derivable from
          * IHDR without a trial decode: raw pixels ~= h * (1 + ceil(w*ch*bd/8))
          * (unfiltered rows + per-row filter byte). Beyond the limit the file
-         * stays admissible to generic ZSTD but never to PNGR. */
+         * stays admissible to generic ZSTD but never to this lane. The
+         * stamp names the lane's algo, so a raised limit re-arms the lane
+         * that stamped it. */
         {
             uint32_t w = ((uint32_t)full[16] << 24) | ((uint32_t)full[17] << 16) |
                          ((uint32_t)full[18] << 8) | (uint32_t)full[19];
@@ -630,22 +672,40 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                                (1 + (((uint64_t)w * ch * bd) + 7) / 8);
                 if (raw > vol_get_dec_mem_limit(v)) {
                     vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_MEMLIMIT,
-                                    INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+                                    lane_algo, tz_codec_gen(lane_algo));
                     return 0;
                 }
             }
         }
-        uint64_t nino = vol_create_png_file(v, name, full, full_len);
+        if (want_nbli) {
+            /* Pack-absent is WAITING, not refusal: RAW, unstamped, retried.
+             * A GUARD stamp would pin the file until the pack's generation
+             * grows, and installing the pack grows nothing -- so the
+             * common no-pack case never reaches the attempt below. */
+            const invfs_codec *nc = invfs_codec_by_algo(INVFS_ALGO_NBLI);
+            if (!nc || !nc->encode || !nc->decode ||
+                (nc->probe && !nc->probe())) {
+                if (getenv("INVFS_DEBUG"))
+                    fprintf(stderr, "[sweep] %s: nbli pack not loaded; "
+                            "waiting RAW\n", name);
+                return 0;
+            }
+            nino = vol_create_nbli_file(v, name, full, full_len);
+        } else {
+            nino = vol_create_png_file(v, name, full, full_len);
+        }
         if (!nino) {
             vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_GUARD,
-                            INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+                            lane_algo, tz_codec_gen(lane_algo));
             return 0;
         }
         /* WP202: the lane SUPERSEDED the row in place, so the old recipe's
          * data segments are the lane's to release. */
         vol_release_superseded_blob(v, inode_id, old_addr);
         vol_stamp_class(v, nino, INVFS_CLASS_CONTAINER,
-                        INVFS_ALGO_PNGR, tz_codec_gen(INVFS_ALGO_PNGR));
+                        lane_algo, tz_codec_gen(lane_algo));
+        if (want_nbli)
+            fprintf(stderr, "[sweep] %s: nbli (pack)\n", name);
         return 5;   /* PNG */
     }
 

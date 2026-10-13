@@ -231,7 +231,8 @@ int  vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                     size_t len, void *buf);
 int  vol_delete_file(invfs_volume *v, const char *name);
 int  vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name);
-/* unlink a file AND its "name!recipe"/"!partN"/"!coverN"/"!jxl" siblings */
+/* unlink a file AND its "name!recipe"/"!partN"/"!coverN"/"!jxl"/"!nbli"
+ * siblings (WP620 adds the NBLI pixel-blob sibling) */
 int  vol_unlink(invfs_volume *v, const char *name);
 /* remove a single name of a hardlinked inode without retiring blocks */
 int  vol_unlink_name(invfs_volume *v, const char *name);
@@ -1003,6 +1004,14 @@ uint64_t vol_create_tar_file(invfs_volume *v, const char *name,
                              const uint8_t *tar, size_t tar_len);
 uint64_t vol_create_png_file(invfs_volume *v, const char *name,
                             const uint8_t *png, size_t png_len);
+/* WP620: PNG -> NBLI blob + IVPN recipe (the PNGR shape with the pixel
+ * codec swapped). 0 = refused (file stays RAW); the caller stamps. */
+uint64_t vol_create_nbli_file(invfs_volume *v, const char *name,
+                              const uint8_t *png, size_t png_len);
+/* WP620: NBLI blob -> pixels (pack decode of the "name!nbli" sibling).
+ * 0 on ok (mirrors invfs_png_from_jxl's contract). */
+int invfs_png_from_nbli(invfs_volume *v, uint64_t nbli_inode,
+                        uint8_t **rgb, size_t *rgb_len);
 uint64_t vol_create_gz_file(invfs_volume *v, const char *name,
                             const uint8_t *gz, size_t gz_len);
 uint64_t vol_create_ape_file(invfs_volume *v, const char *name,
@@ -1015,6 +1024,12 @@ int invfs_pmp_decompress(const uint8_t *pmp, size_t pmp_len,
 uint64_t vol_create_pmp_file(invfs_volume *v, const char *name,
                              const uint8_t *pmp, size_t pmp_len,
                              uint64_t orig_size);
+
+/* WP620: the two-way photo handler's codec choice (vol_sweep.c). Default
+ * jxl; nbli is opt-in via -o photo_codec=nbli (setter) or
+ * INVFS_PHOTO_CODEC=nbli (env fallback for the offline tools). */
+void invfs_set_photo_codec_nbli(int on);
+int  invfs_photo_codec_nbli(void);
 
 /* ---- WP10: memory policy + storage class + text batching ---- */
 

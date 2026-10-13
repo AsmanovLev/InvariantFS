@@ -641,7 +641,11 @@ be recovered bit-for-bit, regardless of what codec was applied.
     (`src/core/vol_sweep.c:1100-1136`). The whole-path rebuild+memcmp guard
     refuses anything it cannot prove, and a refused PNG is simply left RAW
     (measured: `PNGR ...: refused (IDAT is zlib-wrapped, not a raw deflate
-    stream); original kept RAW`).
+    stream); original kept RAW`). Opt-in alternative: `-o photo_codec=nbli`
+    (`src/cli/fuse_fs.c:3921`; `INVFS_PHOTO_CODEC=nbli` offline) routes new
+    PNG transcodes through the NBLI fat pack instead (default `jxl`);
+    per-file choice is recorded in the recipe, reads need no knob
+    (`docs/benchmarks/NBLI-BENCH.md`, WP620 appendix).
   - **MP4 → stored verbatim.** There is no video lane; the lossless H.264
     model was built, measured, and shelved (`impl_docs/AUDIT.md` WP15).
   - **TAR / GZIP → stored byte-original but *decomposed*.** The lane keeps

@@ -325,7 +325,7 @@ static void leg_a2_neighbour_names_survive(void)
         "n!mbr0000-a!b",  /* cpack_sanitize folds a '!' in a member name to
                            * '_', so a real '!' never appears in the tail */
         "n!mbr0000-a b",  /* ditto for a space */
-        "n!exr", "n!cover",
+        "n!exr", "n!cover", "n!nbli0", "n!nbl",
     };
     /* LEG A3. Names that MATCH a real container shape. These are the
      * ACCEPTED RESIDUAL of the fix and they are asserted COLLECTED on
@@ -339,6 +339,7 @@ static void leg_a2_neighbour_names_survive(void)
      * a reader assume the shape check closed the case. */
     static const char *collide[] = {
         "n!part0", "n!recipe", "n!mbr0000-x", "n!exr0", "n!mbrt", "n!jxl",
+        "n!nbli",   /* WP620 */
     };
     size_t i;
 
@@ -429,6 +430,7 @@ static void leg_c_every_real_shape_is_collected(void)
         "s!exr0",
         "s!exr3",
         "s!jxl",
+        "s!nbli",   /* WP620 */
         "s!mbrt",
         "s!mbrmap",
         "s!mbr0000",

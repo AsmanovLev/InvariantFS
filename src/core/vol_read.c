@@ -472,6 +472,47 @@ static const char *recname_of(vol_recname *rn)
     return rn->buf;
 }
 
+/* WP620: pixels for a PNG-lane recipe -- PNGR via "name!jxl"+djxl, NBLI
+ * via "name!nbli"+the fat pack. The algo ON THE SEGMENT picks the sibling
+ * and the decoder: forward-read never consults the photo_codec knob (and
+ * rollback never needs it either -- both shapes share the IVPN recipe).
+ * 0 on ok, -1 with rgb untouched on any failure (reads EIO upstream). */
+static int pngr_lane_pixels(invfs_volume *v, const char *recname,
+                            uint32_t algo,
+                            uint8_t **rgb, size_t *rgb_len)
+{
+    if (algo == INVFS_ALGO_NBLI) {
+        char nn[320];
+        uint64_t nino;
+        snprintf(nn, sizeof nn, "%s!nbli", recname);
+        nino = vol_find(v, nn);
+        if (!nino) {
+            fprintf(stderr, "NBLI: nbli '%s' missing\n", nn);
+            return -1;
+        }
+        if (invfs_png_from_nbli(v, nino, rgb, rgb_len) != 0) {
+            fprintf(stderr, "NBLI: nbli decode failed for %s\n", recname);
+            return -1;
+        }
+        return 0;
+    }
+    {
+        char jn[320];
+        uint64_t jino;
+        snprintf(jn, sizeof jn, "%s!jxl", recname);
+        jino = vol_find(v, jn);
+        if (!jino) {
+            fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
+            return -1;
+        }
+        if (invfs_png_from_jxl(v, jino, rgb, rgb_len) != 0) {
+            fprintf(stderr, "PNGR: djxl failed for %s\n", recname);
+            return -1;
+        }
+        return 0;
+    }
+}
+
 /* ADR-010 amendment 2: `wins`/`n_wins` are the recipe's trailing window
  * table (NULL/0 for every recipe written before the change). Passing the
  * table in rather than re-parsing it per entry keeps the hot loop's cost at
@@ -1058,9 +1099,11 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     }
                     memcpy(data + dst_off, fl, fl_len);
                     free(fl); free(rcp_own);
-                } else if (e->algo == INVFS_ALGO_PNGR) {
+                } else if (e->algo == INVFS_ALGO_PNGR ||
+                           e->algo == INVFS_ALGO_NBLI) {
                     /* blob = recipe [0x01][zstd] or [0x00][raw IVPN];
-                       pixels from sibling "name!jxl" (djxl -> PNG). */
+                       pixels from the lane sibling (PNGR: "name!jxl" via
+                       djxl; NBLI: "name!nbli" via the fat pack). */
                     const uint8_t *rcp; size_t rcp_len;
                     uint8_t *rcp_own = NULL;
                     if (hdr > 1 && blob[0] == 1) {
@@ -1096,18 +1139,9 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     }
                     int ok = 1;
                     uint8_t *rgb = NULL; size_t rgb_len = 0;
-                    {
-                        char jn[320];
-                        snprintf(jn, sizeof jn, "%s!jxl", recname_of(rn));
-                        uint64_t jino = vol_find(v, jn);
-                        if (!jino) {
-                            fprintf(stderr, "PNGR: jxl '%s' missing\n", jn);
-                            ok = 0;
-                        } else if (invfs_png_from_jxl(v, jino, &rgb, &rgb_len) != 0) {
-                            fprintf(stderr, "PNGR: djxl failed for %s\n", recname_of(rn));
-                            ok = 0;
-                        }
-                    }
+                    if (pngr_lane_pixels(v, recname_of(rn), e->algo,
+                                         &rgb, &rgb_len) != 0)
+                        ok = 0;
                     uint8_t *filt = NULL; size_t filt_len = 0;
                     uint8_t *stream = NULL; size_t stream_len = 0;
                     uint8_t *fl = NULL; size_t fl_len = 0;
@@ -1523,6 +1557,7 @@ static int algo_is_whole_file(invfs_volume *v, uint32_t algo)
     const invfs_codec *c;
     if (algo == INVFS_ALGO_FLACR || algo == INVFS_ALGO_TARR ||
         algo == INVFS_ALGO_GZR   || algo == INVFS_ALGO_PNGR ||
+        algo == INVFS_ALGO_NBLI  ||
         algo == INVFS_ALGO_PMP   || algo == INVFS_ALGO_APE  ||
         algo == INVFS_ALGO_JXL   || algo == INVFS_ALGO_EXER)
         return 1;
