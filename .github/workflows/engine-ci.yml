@@ -715,6 +715,17 @@ jobs:
               2>&1 | tee "$RUNNER_TEMP/debianboot.log" || rc=${PIPESTATUS[0]}
           cp /tmp/invfs-debian-boot-single.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
           exit $rc
+      # WP621: the serial console is the evidence, and on a red step 8 the
+      # tee above never runs (skipped) while the upload below only knows
+      # runner.temp paths -- the failed run arrived with no console to read.
+      # This rescue runs always and collects every known serial location.
+      - name: rescue serial logs
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/artifacts"
+          cp /var/tmp/invfs-deb-boot-logs/serial.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
+          cp /tmp/invfs-debian-boot-single.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
+          ls "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
       # Serial consoles are the evidence; kept per-distro so a
       # red job arrives with its own console to read.
       - name: upload serial logs

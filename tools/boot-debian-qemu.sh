@@ -43,6 +43,14 @@ INITRD="${INVFS_DEB_INITRD:-$REPO/vm/initramfs.cpio.gz}"
 # networkd was off. A timeout that fires mid-boot and says only "did not reach
 # multi-user" is a worse instrument than one that reports the last target.
 BOOT_TIMEOUT="${INVFS_DEB_BOOT_TIMEOUT:-900}"
+# WP621: the poweroff wait was a hardcoded 120s and fired on a healthy
+# guest purely from TCG-emulation variance (engine-ci: booted, SSH OK,
+# poweroff issued, no powerdown in 120s; sibling run on the same sha went
+# green). Same treatment the boot wait already got: TCG-honest default,
+# overridable per leg. Deliberately NOT shortening guest-side
+# DefaultTimeoutStopSec instead: a systemd SIGKILL of a hung FUSE unmount
+# would still "power off" and the gate would stop proving CLEAN shutdown.
+POWEROFF_TIMEOUT="${INVFS_DEB_POWEROFF_TIMEOUT:-300}"
 MODE="${INVFS_DEB_MODE:-single}"
 
 # STAGE is required only when this run will IMPORT it. With
@@ -319,6 +327,9 @@ banner above is the authoritative init evidence either way"
         && say "' / ' is an invfs fuse mount" \
         || note "' / ' did not name invfs (checked in guest)"
     say "systemctl is-system-running: $(ssh_guest 'systemctl is-system-running' 2>/dev/null || echo '<unknown>')"
+    # WP621: blame snapshot before the poweroff so the next red names its
+    # slow unit instead of just timing out. Best-effort, note-level.
+    say "slowest stop units (pre-poweroff blame): $(ssh_guest 'systemd-analyze blame 2>/dev/null | head -5 | tr "\n" ";"' 2>/dev/null || echo '<unknown>')"
     say "poweroff over SSH"
     ssh_guest "systemctl poweroff" 2>/dev/null || true
 else
@@ -333,9 +344,9 @@ fi
 # made an optional extra leg load-bearing again, which is the mistake the
 # serial-based assertions were introduced to remove.
 if [ "$SSH_OK" = 1 ]; then
-    wait_marker 'reboot: (Power down|System Powered Off|Reached target.*(Power-Off|Reboot|Shutdown))' 120 \
+    wait_marker 'reboot: (Power down|System Powered Off|Reached target.*(Power-Off|Reboot|Shutdown))' "$POWEROFF_TIMEOUT" \
         || fail "systemctl poweroff was issued over SSH but the guest did not \
-shut down within 120s -- a clean shutdown on a FUSE root IS worth failing on"
+shut down within ${POWEROFF_TIMEOUT}s -- a clean shutdown on a FUSE root IS worth failing on"
     qpid_alive && { sleep 20; qpid_alive && fail "QEMU still running 20s after poweroff"; }
     say "poweroff OK (QEMU exited)"
 else
