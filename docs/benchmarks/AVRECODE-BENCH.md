@@ -84,10 +84,12 @@ Exit codes recorded explicitly, no piped suites.
   (Synthetic caveat cuts both ways — real-world ultrafast/CAVLC
   captures might show the small wins Solveig reported — but a lane
   needs a measured win on a real corpus, not a 2015 citation.)
-- Overall: **decline by default.** An avrecode lane earns existence
+- Overall: **parked, not declined** (orchestrator decision 2026-10-13). An avrecode lane earns existence
   only if ALL of these hold: (1) inputs are pre-sniffed CAVLC-only
   (cheap gate: Baseline profile / `cabac=0` in SPS or settings SEI —
   anything else refuses before exec); (2) a measured saving on a real
   CAVLC corpus that pays for the lane's complexity (this bench: 0 B);
   (3) exec remains sandboxed with abort-tolerant refusal, given the
-  tool aborts rather than errors. None holds today — no lane.
+  tool aborts rather than errors. None holds today — no lane, but the
+  item stays on the roadmap (`docs/ROADMAP.md`): revisit when upstream
+  fixes the CABAC-encode path or a fork-and-fix WP is scheduled.

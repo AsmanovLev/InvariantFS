@@ -16,11 +16,15 @@ are not quoted.
   packs (read-forever grandfathering for old recipes).
 - `research` — NBLI prototype bench vs our JXL lane (ratio + speed).
   `fNBLI` closed binary is disqualified (no binaries, no audit).
-- `research` — avrecode video lane (Dropbox, BSD): lossless H.264
+- `parked` — avrecode video lane (Dropbox, BSD): lossless H.264
   re-compression back to exact source bytes — the video analogue of
-  the JXL-reconstruction/JPEG and PNGR-rebuild pattern. Bench ratio +
-  roundtrip on a sample MP4 first. Hard requirement: exec-sandboxed
-  only (upstream says "trusted inputs only, does not validate input").
+  the JXL-reconstruction/JPEG and PNGR-rebuild pattern. Benched
+  2026-10-13 (`docs/benchmarks/AVRECODE-BENCH.md`): CAVLC-only
+  roundtrip works but earns 0 B on synthetic input, both CABAC legs
+  SIGABRT inside `recode`. Revisit on condition: upstream fixes the
+  CABAC-encode path, or a fork-and-fix WP is scheduled. Hard
+  requirement stays: exec-sandboxed only (upstream says "trusted
+  inputs only, does not validate input").
 - `dead` — JXL-multiframe photo album: 0% gain (even -3.5%), APNG-input
   quirk, no per-frame JPEG reconstruction in format/tools
   (`docs/benchmarks/JXL-BATCH.md`, multiframe legs).
