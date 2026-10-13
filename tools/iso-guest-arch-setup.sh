@@ -190,11 +190,36 @@ say "import /mnt -> $VOL (batched)"
 echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
 invf-import "$VOL" /mnt || exit 1
 unset INVFS_COMMIT_BYTES INVFS_COMMIT_MS INVFS_COMMIT_IDLE_MS
-# Lock-holder snapshot: if fsck below reports 'in use by another process',
-# this names the holder.
-say "holders of $VOL:"
-ls -l /proc/[0-9]*/fd 2>/dev/null | grep -a "$(basename "$VOL")$" || say "(none visible)"
-invf-fsck "$VOL" || exit 1
+# WP624: drain transient device probers before the fsck -- 8 GB of fresh
+# block writes leave udev workers re-probing exactly in the milliseconds
+# between import exit and the fsck flock, which reads as a phantom holder.
+udevadm settle 2>/dev/null || true
+# Lock-holder evidence (gentoo standard): /proc/locks is authoritative for
+# flock holders with pids; the fd scan catches plain open handles; mount
+# catches a daemon. Dumped before every fsck attempt so a red names names.
+invfs_holder_evidence() {
+    say "holders of $VOL:"
+    base=$(basename "$VOL")
+    cat /proc/locks 2>/dev/null | grep -a "$base" || say "(no flock holders)"
+    for d in /proc/[0-9]*/fd; do
+        pid=${d#/proc/}; pid=${pid%%/*}
+        ls -l "$d" 2>/dev/null | grep -a "${base}$" | sed "s/^/pid $pid: /"
+    done | grep -a . || say "(no open fds visible)"
+    mount 2>/dev/null | grep -a "$VOL" || say "(not mounted)"
+    ps aux 2>/dev/null | grep -a "invf" | grep -av grep || say "(no invf processes)"
+}
+# WP624: holder-evidenced retry. A leaked engine lock persists across
+# attempts and still fails red WITH the holder named; only transients
+# (proven transient by clean evidence) are forgiven.
+_attempt=0
+until invf-fsck "$VOL"; do
+    _attempt=$((_attempt + 1))
+    if [ "$_attempt" -ge 3 ]; then exit 1; fi
+    say "fsck locked (attempt $_attempt/3) -- re-dumping holder evidence:"
+    invfs_holder_evidence
+    sleep 2
+    invfs_holder_evidence
+done
 
 # ---- phase 3: asserts ----
 # Paths are slashless by repo convention (all harnesses call invf-cat with
