@@ -245,9 +245,14 @@ grep -q 'FUSE root detected' "$SERIAL" || \
 echo "stage 2 + autologin OK"
 
 note "waiting for sshd (hostfwd tcp::$PORT -> :22)"
-ssh_deadline=$((SECONDS + BOOT_TIMEOUT))
+# WP628: the banner wait has its own knob (default = BOOT_TIMEOUT, so
+# unset behavior is byte-for-byte unchanged). Split because on TCG the
+# boot markers pass while sshd's banner lags minutes behind (two CI
+# reds: guest at login prompt, every probe 'banner exchange timeout').
+SSH_TIMEOUT="${INVFS_VOID_SSH_TIMEOUT:-$BOOT_TIMEOUT}"
+ssh_deadline=$((SECONDS + SSH_TIMEOUT))
 until ssh_ready; do
-    [ "$SECONDS" -lt "$ssh_deadline" ] || fail "SSH not reachable within ${BOOT_TIMEOUT}s"
+    [ "$SECONDS" -lt "$ssh_deadline" ] || fail "SSH not reachable within ${SSH_TIMEOUT}s"
     qpid_alive || fail "QEMU exited before SSH came up"
     sleep 2
 done

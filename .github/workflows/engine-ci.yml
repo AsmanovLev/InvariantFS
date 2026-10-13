@@ -568,6 +568,7 @@ jobs:
           INVFS_VOID_WORK="$RUNNER_TEMP/voidboot" \
           INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot-logs" \
           INVFS_VOID_KEEP=0 \
+          INVFS_VOID_SSH_TIMEOUT=600 \
             bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot.log" || rc=${PIPESTATUS[0]}
           cp -r "$RUNNER_TEMP/voidboot-logs" "$RUNNER_TEMP/artifacts" 2>/dev/null || true
           exit $rc
@@ -579,6 +580,7 @@ jobs:
           INVFS_VOID_WORK="$RUNNER_TEMP/voidboot2" \
           INVFS_VOID_LOGDIR="$RUNNER_TEMP/voidboot2-logs" \
           INVFS_VOID_KEEP=0 \
+          INVFS_VOID_SSH_TIMEOUT=600 \
             bash tools/boot-void-qemu.sh 2>&1 | tee "$RUNNER_TEMP/voidboot2.log" || rc=${PIPESTATUS[0]}
           cp -r "$RUNNER_TEMP/voidboot2-logs" "$RUNNER_TEMP/artifacts" 2>/dev/null || true
           exit $rc
