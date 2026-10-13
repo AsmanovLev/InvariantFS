@@ -700,7 +700,14 @@ jobs:
             trixie "$S"
           sudo chown -R "$(id -u):$(id -g)" "$S"
           bash tools/configure-debian.sh "$S"
+          # DIAGNOSTIC (saga layer 3): 600 s poweroff budget on this step
+          # only, to discriminate daemon-grinding-slowly (powers down at
+          # ~400 s) from writeback-wedged (identical D-state stall past
+          # 600 s). Script default stays 300. Revisit once WP626 concludes:
+          # slow -> accept/document or speed up (own WP); stuck -> the
+          # request-tracing fix lands and this override goes away.
           INVFS_DEB_BOOT_TIMEOUT=1500 \
+          INVFS_DEB_POWEROFF_TIMEOUT=600 \
           INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
       - name: debian root BOOTS on InvariantFS (single device)
         run: |
