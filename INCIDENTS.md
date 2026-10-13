@@ -3083,3 +3083,30 @@ accept DAMAGED-iff-NAMED terminal states (the v3 checker never learned the
 content cut -- vol_fsck.c names the gap; the bitmap has no CRC -- recorded
 gap; demanding pristine post-soak on an exhausted volume contradicts the
 in-soak proven-exhausted accept).
+
+## CI debian shutdown saga (2026-10-13/14): TCG budgets, then SIGTERM/@, then writeback stall — OPEN, WP626 owns the current layer
+
+  **Date:** 2026-10-14
+  **Severity:** Medium (CI red, no data loss; guest never powers off in budget)
+  **Status:** OPEN. Three layers peeled so far, each with its own fix:
+  - Layer 1 (harness): 120s poweroff wait fired on a healthy-but-TCG-slow
+    guest (same-sha flake). WP621: `INVFS_DEB_POWEROFF_TIMEOUT`, default 300;
+    always-run serial rescue (prior reds arrived with no console).
+  - Layer 2 (engine/shutdown protocol): serial showed systemd-shutdown
+    SIGTERM at 187s, "Waiting for process: 98 (invf-fuse)" at 200s, SIGKILL
+    at 280s. The guest daemon runs survive_term (boot root) so TERM is
+    ignored BY CONTRACT; shutdown paid its fixed ~90s TERM->KILL wait. WP623:
+    argv[0] `@` mark (systemd root-storage-daemon protocol) excludes the
+    daemon from both kill broadcasts; plain mounts keep SIGTERM-unmounts;
+    gate `tools/test-sigterm-exit.sh` in `make e2e`; local KVM void-boot
+    poweroff PASS.
+  - Layer 3 (engine/write path — CURRENT): with the `@` fix deployed, the
+    kill phase passes but final sync wedges: `systemd-journal:160 blocked
+    >122s`, state D, `fuse_wait_on_page_writeback <- fuse_page_mkwrite`
+    (mmap'd journal write on the FUSE root, request pending against a live
+    daemon that never answers). WP626 owns it. Prime suspect: WRITEBACK_CACHE
+    burst vs the daemon write/flush path; to be proven by request tracing,
+    not assumed.
+  Deliberately NOT done: guest DefaultTimeoutStopSec cuts (would let a hung
+  FUSE unmount die by SIGKILL and still "power off" — the gate would stop
+  proving clean shutdown).
