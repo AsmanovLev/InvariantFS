@@ -121,8 +121,29 @@ static size_t g_tmp_max_bytes = 128 * 1024 * 1024;
  * thing anyone does to their root filesystem.
  *
  * So: OFF by default, ON for the initramfs, where the caller has already
- * decided this mount is the OS. */
+ * decided this mount is the OS.
+ *
+ * WP623: ignoring TERM is only HALF of what a boot-root daemon needs under
+ * systemd. systemd-shutdown's kill phase (TERM, fixed ~90s wait, KILL) applies
+ * to every remaining process, and a daemon that merely ignores TERM still
+ * pays the full wait and then dies by SIGKILL -- while PID 1 still needs its
+ * root, so the guest never reaches poweroff (CI debian serial: TERM at 187s,
+ * "Waiting for process: 98 (invf-fuse)" at 200s, SIGKILL at 280s, then
+ * silence -- no "Power down" inside the 300s budget). systemd's documented
+ * answer for exactly this process is the root-storage-daemon protocol
+ * (https://systemd.io/ROOT_STORAGE_DAEMONS): a root-owned daemon whose
+ * argv[0] starts with '@' is EXCLUDED from both shutdown kill broadcasts
+ * (ignore_proc/argv_has_at in systemd's src/shared/killall.c -- it reads one
+ * byte, the first of /proc/PID/cmdline). With the mark, shutdown skips the
+ * daemon, unmounts what it can (the busy FUSE root is left mounted, logged
+ * and ignored), and powers off with the root still served -- "Power down"
+ * lands ~seconds after poweroff.target instead of never. The mark is set
+ * ONLY here, next to the SIG_IGN takeback, so non-survive_term mounts keep
+ * the plain SIGTERM-unmounts contract byte for byte. */
 static int g_survive_term = 0;
+/* WP623: argv[0] of this process, stashed at main() entry so the daemon can
+ * mark itself a systemd root-storage daemon (see g_survive_term). */
+static char *g_argv0 = NULL;
 /* WP59: codec-policy mount gate flags (-o ignore-missing-codecs,
  * -o ignore-codec-versions) */
 static int g_ignore_missing_codecs = 0;
@@ -3810,6 +3831,7 @@ int main(int argc, char *argv[])
     /* usage: invf-fuse [-f] [-o opt[,opt...]] <image> <mountpoint> */
     const char *img = NULL, *mnt = NULL, *opts = NULL;
     int fg = 0, err, i;
+    g_argv0 = (argc > 0) ? argv[0] : NULL;   /* WP623: root-storage mark */
 
     /* WP50: --probe-uuid <dev> — print the volume's 16-byte uuid as hex if
      * <dev> carries an InvariantFS superblock, else exit nonzero. Reads
@@ -4110,6 +4132,28 @@ int main(int argc, char *argv[])
             else
                 fprintf(stderr, "[survive_term] ignoring SIGTERM: this mount "
                                 "is the boot root\n");
+            /* WP623: mark this daemon a systemd root-storage daemon
+             * (https://systemd.io/ROOT_STORAGE_DAEMONS). systemd-shutdown
+             * excludes a root-owned process whose argv[0] starts with '@'
+             * from BOTH kill broadcasts -- without the mark the daemon pays
+             * the fixed ~90s TERM wait and then dies by SIGKILL while PID 1
+             * still needs its root, and the guest never powers off (see
+             * g_survive_term). systemd's check reads exactly ONE byte (the
+             * first of /proc/PID/cmdline), so one byte is all that is
+             * rewritten: "invf-fuse" shows as "@nvf-fuse". A full rename
+             * to "@invf-fuse" does NOT fit the argv[0] slot when invoked by
+             * bare name (10 bytes live there, 11 needed). comm stays
+             * "invf-fuse", so pidof/pkill -x patterns (the documented
+             * `kill -USR1 $(pidof invf-fuse)` trigger) are unaffected; only
+             * pgrep -f "invf-fuse" substring matches miss the marked form,
+             * and no in-tree pgrep -f targets a survive_term mount.
+             * Daemon-side (post-fork) is the right place: the parent exits
+             * at once, and with -f there is no fork at all. */
+            if (g_argv0 && g_argv0[0] && g_argv0[0] != '@') {
+                g_argv0[0] = '@';
+                fprintf(stderr, "[survive_term] root-storage mark set "
+                                "(argv[0] now starts with '@')\n");
+            }
         }
 
         /* The sweep thread belongs to the DAEMON, so it is created here --

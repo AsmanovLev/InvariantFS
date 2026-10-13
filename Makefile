@@ -1658,6 +1658,15 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuse-sweep-thread.sh green
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
+# tools/test-sigterm-exit.sh (WP623): SIGTERM disposition. A plain mount
+# must exit within seconds on SIGTERM (idle and mid-sweep) with the volume
+# CLEAN; a survive_term boot-root mount must ignore SIGTERM (unchanged)
+# while carrying systemd's '@' root-storage-daemon mark so a systemd guest
+# shutdown skips it in both kill broadcasts instead of waiting ~90s and
+# then SIGKILLing its own root (CI debian serial: TERM 187s, "Waiting for
+# process: 98 (invf-fuse)" 200s, SIGKILL 280s, silence, no Power down).
+# ISOLATED (foreground mounts under /dev/shm, pid-tracked, no /tmp/ paths).
+	$(TESTENV) bash tools/run-e2e.sh tools/test-sigterm-exit.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-acl.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-flushfail.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sweep-flushfail.sh
