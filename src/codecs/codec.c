@@ -1347,7 +1347,7 @@ static const invfs_codec registry[] = {
       sniff_exer, NULL, NULL, NULL },
     /* WP620: the NBLI lane's placeholder (same shape as the WP16e jxl one:
      * sniff + probe only, the transcode lives in the nbli fat pack). A
-     * manifest claiming algo 16 OVERRIDES this entry; while no pack is
+     * manifest claiming algo 25 OVERRIDES this entry; while no pack is
      * loaded the sweep defers PNGs RAW and unstamped under photo_codec=nbli
      * instead of letting them fall to the generic floor. */
     { INVFS_ALGO_NBLI, "nbli",

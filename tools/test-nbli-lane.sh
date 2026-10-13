@@ -21,15 +21,15 @@
 #   everything bit-exact; re-sweep idle.
 # Leg 2 (nbli): fresh image, same corpus -> RGB/gray/real-pixels ->
 #   CONTAINER{NBLI=16,gen=1} ("[sweep] f: nbli (pack)" lines), RGBA ->
-#   GENERIC_GUARD{16} RAW (alpha dropped: the pixel guard refuses), the
-#   rest GUARD{16}, JPEG STILL CODEC{4}; everything bit-exact; re-sweep
+#   GENERIC_GUARD{25} RAW (alpha dropped: the pixel guard refuses), the
+#   rest GUARD{25}, JPEG STILL CODEC{4}; everything bit-exact; re-sweep
 #   idle (GUARD stamps settle, no refire).
 # Leg 3 (pack absent, nbli mode): every PNG RAW and UNSTAMPED (waiting,
 #   never a GUARD pin -- installing the pack grows no generation), JPEG
 #   still JXL; stage the pack -> re-sweep claims RGB (wait-not-stuck).
 # Leg 4 (broken PATH namesake): bin/ gone but an exit-1 `nbli` on PATH ->
 #   the pack registers, the probe passes, the encode fails ->
-#   GENERIC_GUARD{16}, file stays RAW, bytes exact, re-sweep settles
+#   GENERIC_GUARD{25}, file stays RAW, bytes exact, re-sweep settles
 #   (present-but-broken is a refusal, not a wait: the vol_pack_sweep
 #   convention; INVFS_HELPER_VERBOSE's exec line proves the PATH fallback
 #   really ran -- a marker file cannot, the sandbox lets pack children
@@ -192,7 +192,7 @@ open(os.path.join(D, "real_raw.png"), "wb").write(
 print("  real_raw.png", os.path.getsize(os.path.join(D, "real_raw.png")), "bytes")
 Image.fromarray(mkpx(320, 240, 6), "RGB").save(os.path.join(D, "photo.jpg"), quality=85)
 # Try-last pin: opaque binary no pack claims. The nbli pack (a PNG-magic
-# claim) must never trial-encode it -- any GUARD{16}/CONTAINER{16} stamp
+# claim) must never trial-encode it -- any GUARD{25}/CONTAINER{25} stamp
 # here is try-last interference, failing the leg by name below.
 open(os.path.join(D, "rand.bin"), "wb").write(rng.integers(0, 256, (20000,)).astype(np.uint8).tobytes())
 PY
@@ -293,7 +293,7 @@ done
 [ "$(classof leg1.img photo.jpg)" = "cls=2 algo=4 gen=1" ] \
     || fail "leg1 photo.jpg: $(classof leg1.img photo.jpg) (want CODEC{JXL,1})"
 case "$(classof leg1.img rand.bin)" in
-    *"algo=16"*) fail "leg1 rand.bin: $(classof leg1.img rand.bin) (nbli touched an unclaimed binary)" ;;
+    *"algo=25"*) fail "leg1 rand.bin: $(classof leg1.img rand.bin) (nbli touched an unclaimed binary)" ;;
 esac
 check_bytes leg1.img
 "$B/invf-sweep" leg1.img > sweep1b.log 2>&1 || fail "leg1 re-sweep rc=$?"
@@ -312,21 +312,21 @@ grep -q ": nbli (pack)" sweep2.log || fail "leg2: no 'nbli (pack)' sweep lines"
 grep -q "nbli.codecpack/bin/nbli" sweep2.log \
     || fail "leg2: no bundled-bin exec in the sweep log"
 for f in grad_rgb.png gray_sub.png real_raw.png; do
-    [ "$(classof leg2.img "$f")" = "cls=3 algo=16 gen=1" ] \
+    [ "$(classof leg2.img "$f")" = "cls=3 algo=25 gen=1" ] \
         || fail "leg2 $f: $(classof leg2.img "$f") (want CONTAINER{NBLI,1})"
 done
 # RGBA is THE contrast: jxl keeps alpha (leg1 transcodes), nbli drops it
-# (pixel guard refuses) -- RAW behind GUARD{16}, bytes intact.
-[ "$(classof leg2.img rgba_up.png)" = "cls=6 algo=16 gen=1" ] \
+# (pixel guard refuses) -- RAW behind GUARD{25}, bytes intact.
+[ "$(classof leg2.img rgba_up.png)" = "cls=6 algo=25 gen=1" ] \
     || fail "leg2 rgba_up.png: $(classof leg2.img rgba_up.png) (want GUARD{NBLI,1})"
 for f in wrapped.png gray16.png noise64.png; do
-    [ "$(classof leg2.img "$f")" = "cls=6 algo=16 gen=1" ] \
+    [ "$(classof leg2.img "$f")" = "cls=6 algo=25 gen=1" ] \
         || fail "leg2 $f: $(classof leg2.img "$f") (want GUARD{NBLI,1})"
 done
 [ "$(classof leg2.img photo.jpg)" = "cls=2 algo=4 gen=1" ] \
     || fail "leg2 photo.jpg: $(classof leg2.img photo.jpg) (knob must not touch JPEG)"
 case "$(classof leg2.img rand.bin)" in
-    *"algo=16"*) fail "leg2 rand.bin: $(classof leg2.img rand.bin) (nbli touched an unclaimed binary)" ;;
+    *"algo=25"*) fail "leg2 rand.bin: $(classof leg2.img rand.bin) (nbli touched an unclaimed binary)" ;;
 esac
 check_bytes leg2.img
 [ ! -e "$WORK/marker-nbli" ] || fail "leg2: fake PATH nbli RAN (bundle not preferred)"
@@ -349,7 +349,7 @@ done
 check_bytes leg3.img
 export INVFS_CODECPACKS="$WORK/packs2"
 "$B/invf-sweep" leg3.img > sweep3b.log 2>&1 || fail "leg3 re-sweep rc=$?"
-[ "$(classof leg3.img grad_rgb.png)" = "cls=3 algo=16 gen=1" ] \
+[ "$(classof leg3.img grad_rgb.png)" = "cls=3 algo=25 gen=1" ] \
     || fail "leg3 grad_rgb.png: $(classof leg3.img grad_rgb.png) (wait-not-stuck)"
 check_bytes leg3.img
 echo "leg3 OK: packless wait is unstamped; staging the pack claims on re-sweep"
@@ -357,7 +357,7 @@ echo "leg3 OK: packless wait is unstamped; staging the pack claims on re-sweep"
 echo "== leg 4: broken PATH namesake (guard, not corruption) =="
 # bin/ removed, but a broken `nbli` (exit 1) sits on PATH: the pack
 # registers (argv0 resolves), the probe passes (it is executable), the
-# encode fails -> GENERIC_GUARD{16} with the file left RAW, bytes exact,
+# encode fails -> GENERIC_GUARD{25} with the file left RAW, bytes exact,
 # settled on re-sweep. Present-but-broken is a refusal, not a wait -- the
 # vol_pack_sweep convention. The marker proves the attempt really exec'd
 # the PATH namesake (fallback) and still refused safely.
@@ -372,7 +372,7 @@ fill leg4.img
 # append never lands; its exit 1 is what refuses).
 env -u INVFS_TOOLS INVFS_HELPER_VERBOSE=1 "$B/invf-sweep" leg4.img > sweep4.log 2>&1 \
     || fail "leg4 sweep rc=$?"
-[ "$(classof leg4.img grad_rgb.png)" = "cls=6 algo=16 gen=1" ] \
+[ "$(classof leg4.img grad_rgb.png)" = "cls=6 algo=25 gen=1" ] \
     || fail "leg4 grad_rgb.png: $(classof leg4.img grad_rgb.png) (want GUARD{NBLI,1})"
 grep -q "fakebin/nbli" sweep4.log \
     || fail "leg4: no PATH-fallback exec in the sweep log"

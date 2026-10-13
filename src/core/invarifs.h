@@ -103,13 +103,15 @@
  * splice at the offsets; the sweep stores nothing before a full in-memory
  * rebuild memcmps the original (the house 1:1 invariant). */
 #define INVFS_ALGO_EXER 15
-/* WP620: NBLI prototype lane -- a PNG's pixels NBLI-coded in a "name!nbli"
- * sibling plus the same IVPN recipe PNGR stores (deflate replica of the
- * original IDAT). Same stored shape as PNGR with the pixel codec swapped
- * (JXL blob <-> NBLI blob); the recipe format is unchanged. Opt-in via
- * photo_codec=nbli (default jxl); the NBLI tool arrives as a fat pack,
- * never a builtin. */
-#define INVFS_ALGO_NBLI 16
+/* WP627: NBLI prototype lane -- id 25. WP620 first shipped this as 16,
+ * which collides with the rawdisk containerpack's long-owned algo 16
+ * ("the first production containerpack id"): every rawdisk segment then
+ * matched algo==NBLI in the read path and died in pngx_parse_recipe
+ * (e2e-full red: qcow2/vdi/rawdisk "corrupt after sweep 2"). Builtins
+ * own 0..15, WINDOW_SRC owns 24, packs own 4/13/16-23, tests own 40/41 --
+ * 25 is the first free id. Volumes swept with photo_codec=nbli under the
+ * 609ef4b window carry ambiguous algo-16 stamps; re-sweep after upgrade. */
+#define INVFS_ALGO_NBLI 25
 /* ADR-010 amendment 2: a recipe entry that is a WINDOW into another inode
  * instead of a stored segment. The entry's own pba is unused (a window owns
  * no blocks) and carries src_inode_id; the rest of the descriptor lives in a
