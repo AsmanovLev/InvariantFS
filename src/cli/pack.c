@@ -56,6 +56,7 @@
 
 #include "blake3.h"
 #include "pack_sig.h"
+#include "../core/vol_plugin_inproc.h" /* WP625: inproc gates */
 #include "tool_scratch.h"
 #include "volume.h"   /* vol_open for --volume (links CORE_O) */
 
@@ -3786,6 +3787,75 @@ static int verify_pack(const char *name, const char *root,
     return sig_status_of(dir, keyring);
 }
 
+/* WP625: pack-side trust metadata for in-process eligibility.
+ * Reports the three load gates for one installed pack (signature,
+ * local/anchored origin, pilot) plus the mount-time opt-in the operator
+ * still owes. Exit 0 = eligible modulo the mount flag; 1 = refused
+ * (fails closed to IPC) or pack not found. Read-only: verifies, never
+ * installs or stages. */
+static int cmd_inproc(const char *name)
+{
+    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    char keyring[MAX_PATH];
+    char dir[MAX_PATH];
+    char err[256];
+    const char *found = NULL;
+    pack_sig_status st;
+    int anchored, pilot;
+
+    if (!name || !*name) {
+        fprintf(stderr, "usage: invf-pack inproc <pack>\n");
+        return 2;
+    }
+    resolve_keyring(keyring, sizeof keyring);
+    for (int r = 0; roots[r]; r++) {
+        struct stat stbuf;
+        if (!roots[r] || !*roots[r]) continue;
+        if (pathf(dir, sizeof dir, "%s/%s.codecpack", roots[r], name) != 0)
+            continue;
+        if (stat(dir, &stbuf) == 0 && S_ISDIR(stbuf.st_mode) &&
+            is_codecpack(dir)) {
+            found = roots[r];
+            break;
+        }
+    }
+    if (!found) {
+        printf("pack %-12s: not installed under any pack root\n", name);
+        return 1;
+    }
+    printf("pack %-12s dir %s/%s.codecpack\n", name, found, name);
+    if (pathf(dir, sizeof dir, "%s/%s.codecpack", found, name) != 0)
+        return 1;
+
+    pilot = (strcmp(name, INVFS_INPROC_PILOT_JXL) == 0);
+    printf("  gate pilot    : %s (only '%s' loads in-process in this WP)\n",
+           pilot ? "PASS" : "REFUSE — not a pilot pack",
+           INVFS_INPROC_PILOT_JXL);
+
+    anchored = invfs_inproc_origin_anchored(dir, 0);
+    printf("  gate origin   : %s (%s)\n",
+           anchored ? "PASS — local/anchored" : "REFUSE — not under an admin root",
+           dir);
+
+    st = pack_sig_verify_dir(dir, keyring, err, sizeof err);
+    printf("  gate signature: %s (%s)\n",
+           st == PACK_SIG_OK ? "PASS — ed25519 verifies" :
+           st == PACK_SIG_UNSIGNED ? "REFUSE — unsigned (in-process needs a signature)" :
+           "REFUSE — BAD",
+           st == PACK_SIG_OK ? keyring : err);
+
+    printf("  gate opt-in   : mount-time (-o allow_inprocess_plugins=%s); this shell: '%s'\n",
+           name, invfs_inproc_allow_spec());
+
+    if (pilot && anchored && st == PACK_SIG_OK) {
+        printf("  verdict       : ELIGIBLE with -o allow_inprocess_plugins=%s (else IPC fallback)\n",
+               name);
+        return 0;
+    }
+    printf("  verdict       : REFUSED — runs IPC/exec only\n");
+    return 1;
+}
+
 static int cmd_verify(const char *name)
 {
     const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
@@ -3915,6 +3985,7 @@ static void usage(void)
         "       invf-pack keygen [--keyring DIR] [name]\n"
         "       invf-pack sign --key SECFILE <pack|./path>\n"
         "       invf-pack alternatives <family>\n"
+       "       invf-pack inproc <pack>\n"
         "       invf-pack use <family> <pack>\n"
         "       invf-pack where [--repo URL]\n"
         "\n"
@@ -4152,6 +4223,9 @@ int main(int argc, char **argv)
         cmd_remove(argv[2]);
     } else if (strcmp(cmd, "verify") == 0) {
         return cmd_verify(argc > 2 ? argv[2] : NULL);
+    } else if (strcmp(cmd, "inproc") == 0) {
+        if (argc < 3) { fprintf(stderr, "usage: invf-pack inproc <pack>\n"); return 2; }
+        return cmd_inproc(argv[2]);
     } else if (strcmp(cmd, "alternatives") == 0) {
         if (argc < 3) { fprintf(stderr, "usage: invf-pack alternatives <family>\n"); return 2; }
         cmd_alternatives(argv[2]);

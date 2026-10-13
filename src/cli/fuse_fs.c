@@ -27,6 +27,7 @@
 #include "volume.h"
 #include "vol_delta.h"   /* WP607: op-abort doom on write error paths */
 #include "codec.h"   /* P0-1 guard: invfs_set_no_autopack for -o noautopack */
+#include "vol_plugin_inproc.h" /* WP625: -o allow_inprocess_plugins + stats */
 #include "vol_spt0.h"
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "tmpstore.h"
@@ -3399,7 +3400,7 @@ static int invf_getxattr(const char *path, const char *name, char *value,
      * reads); per-CONTENT-CLASS physical usage is the offline walk in
      * vol_compute_stats (invf-stats). */
     if (strcmp(path, "/") == 0 && strcmp(name, "user.invfs.stats") == 0) {
-        char buf[1024];
+        char buf[2048];
         int n;
         const invfs_superblock *sb;
         uint64_t raw_used = 0, shadow_used = 0;
@@ -3412,12 +3413,20 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                                           sb->shadow_zone_start + sb->shadow_zone_blocks);
         uint64_t hfiles, hdirs, htombs, hlogic;
         vol_hot_counters(g_vol, &hfiles, &hdirs, &htombs, &hlogic);
+        /* WP625: the in-process opt-in choice is recorded here (the
+         * daemon's stdout is /dev/null under fuse_daemonize, so xattrs
+         * are the only place this decision is visible). Route counters
+         * show whether the pilot actually served anything in-process. */
         n = snprintf(buf, sizeof buf,
                 "files=%llu\ndirs=%llu\ntombstones=%llu\n"
                 "logical_bytes=%llu\n"
                 "raw_used_bytes=%llu\nshadow_used_bytes=%llu\n"
                 "free_blocks=%llu\n"
-                "photo_codec=%s\n",
+                "photo_codec=%s\n"
+                "inprocess_allow=%s\n"
+                "inprocess_hit=%llu\n"
+                "inprocess_fallback=%llu\n"
+                "inprocess_route=%s\n",
                 (unsigned long long)hfiles,
                 (unsigned long long)hdirs,
                 (unsigned long long)htombs,
@@ -3425,7 +3434,11 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                 (unsigned long long)raw_used,
                 (unsigned long long)shadow_used,
                 (unsigned long long)vol_count_free(g_vol),
-                invfs_photo_codec_nbli() ? "nbli" : "jxl");
+                invfs_photo_codec_nbli() ? "nbli" : "jxl",
+                invfs_inproc_allow_spec(),
+                (unsigned long long)invfs_inproc_count_hit(),
+                (unsigned long long)invfs_inproc_count_fallback(),
+                invfs_inproc_last_route());
         pthread_mutex_unlock(&g_io_lock);
         if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
         if (!value || size == 0) return n;
@@ -3980,6 +3993,12 @@ int main(int argc, char *argv[])
                 g_ignore_missing_codecs = 1;
             } else if (strcmp(tok, "ignore-codec-versions") == 0) {
                 g_ignore_codec_versions = 1;
+            } else if (strncmp(tok, "allow_inprocess_plugins=", 24) == 0) {
+                /* WP625: explicit opt-in for in-process .so plugins
+                 * (default OFF — unset leaves stock IPC/exec behaviour
+                 * byte-for-byte). Pilot: "jxl" is the only name the
+                 * loader honors; anything else is recorded, ignored. */
+                invfs_inproc_set_allow(tok + 24);
             } else {
                 size_t tl = strlen(tok);
                 if (fl + tl + 2 < sizeof fbuf) {

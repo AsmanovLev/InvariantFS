@@ -46,22 +46,22 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1441:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:1738:SKIP
-src/cli/fuse_fs.c:2074:SKIP
-src/cli/fuse_fs.c:2745:SKIP
-src/cli/fuse_fs.c:2959:SKIP
-src/cli/fuse_fs.c:3014:SKIP
-src/cli/fuse_fs.c:3275:SKIP
-src/cli/fuse_fs.c:3444:SKIP
-src/cli/fuse_fs.c:3516:SKIP
-src/cli/fuse_fs.c:3551:SKIP
-src/cli/fuse_fs.c:3588:SKIP
+src/cli/fuse_fs.c:1442:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:1739:SKIP
+src/cli/fuse_fs.c:2075:SKIP
+src/cli/fuse_fs.c:2746:SKIP
+src/cli/fuse_fs.c:2960:SKIP
+src/cli/fuse_fs.c:3015:SKIP
+src/cli/fuse_fs.c:3276:SKIP
+src/cli/fuse_fs.c:3457:SKIP
+src/cli/fuse_fs.c:3529:SKIP
+src/cli/fuse_fs.c:3564:SKIP
+src/cli/fuse_fs.c:3601:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
-src/cli/pack.c:2838:SKIP   # list --volume: unreadable manifest skips the pack row
-src/cli/pack.c:2871:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
-src/cli/pack.c:3341:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
+src/cli/pack.c:2839:SKIP   # list --volume: unreadable manifest skips the pack row
+src/cli/pack.c:2872:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
+src/cli/pack.c:3342:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
 src/cli/lane_release_test.c:242:SKIP
 src/cli/ls.c:121:SKIP
 src/cli/ls.c:135:SKIP
@@ -107,21 +107,21 @@ src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement need
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
-src/core/vol_cpack.c:395:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:2949:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3292:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3293:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3389:SKIP   # map-gen probe: miss means no map (gen 0)
-src/core/vol_cpack.c:3390:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:3634:SKIP   # leftover-sibling check: absent means nothing to purge
-src/core/vol_cpack.c:4130:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:4212:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:4227:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:4228:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:4232:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:4253:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:4313:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:4345:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:396:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
+src/core/vol_cpack.c:2969:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3312:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3313:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3409:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3410:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:3654:SKIP   # leftover-sibling check: absent means nothing to purge
+src/core/vol_cpack.c:4150:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:4232:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:4247:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:4248:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:4252:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:4273:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:4333:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:4365:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP

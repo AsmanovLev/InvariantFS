@@ -182,6 +182,102 @@ separately-launched `invf-plugin-host` pool (the operator starts it
 deliberately). Proven by `src/cli/noautopack_test.c`: hostile fixtures
 that fingerprint on execution, with guard-off controls.
 
+### In-process plugins (WP625): a .so runs as the daemon
+
+Out-of-process execution (subprocess exec, plugin-host IPC) contains a
+hostile pack behind a process boundary: the worst it does is lie about
+bytes (caught by the decode-back guard) or crash the child. In-process
+loading (`dlopen`) removes that boundary on purpose, for the estimate hot
+path, and a `.so` then runs with the daemon's address space, privileges,
+file descriptors and malloc identity. It can corrupt volumes silently,
+exfiltrate key material from memory, and turn a segfault into a dead
+daemon. This WP lands ONLY with the trust model below enforced; the
+orchestrator reviews the gates line-by-line before merge.
+
+What the loader does (`src/core/vol_plugin_inproc.c`):
+
+- **Pilot allowlist.** Only pack name `jxl` (libjxlest.so's estimate) may
+  load in-process. Any other name refuses before any filesystem access.
+- **Gate 1 — signature.** `pack_sig_verify_dir` must return PACK_SIG_OK
+  over the pack dir at LOAD time. UNSIGNED refuses here even though the
+  install gate may have prompted past it: a prompted install runs
+  out-of-process, where a tampered helper is contained; in-process there
+  is no containment left. (This is the one place load-time re-verify
+  exists; the exec/IPC paths keep their install-gate shape.)
+- **Gate 2 — local/anchored origin.** The pack dir's realpath must sit
+  under `/.invariantfs/codecpacks` (the signature-gated install
+  destination), `/.invfs/codecpacks`, `/usr/lib/invfs/codecpacks`, or an
+  explicit `$INVFS_CODECPACKS` entry. Realpath on BOTH sides: a symlink
+  pointing out of an anchored root refuses. Relative paths, absent dirs,
+  tool-scratch staging (`/dev/shm`, `/tmp`, `/var/tmp` trees),
+  volume-staged dirs and volume packs (`origin_vol != NULL`) refuse.
+- **Gate 3 — explicit opt-in.** `-o allow_inprocess_plugins=<names>`
+  (daemon) or `$INVFS_ALLOW_INPROCESS_PLUGINS` (offline tools, same
+  syntax; an explicit `-o` wins). Default OFF — default mounts behave
+  byte-for-byte as before. The choice is recorded in
+  `user.invfs.stats` (`inprocess_allow`, `inprocess_hit`,
+  `inprocess_fallback`, `inprocess_route`).
+- **Any gate failing falls back to IPC/exec, never to refuse-to-codec.**
+  The sweep sees a decline and runs the existing path.
+- **Hostile-.so legs fail closed without killing the daemon.** The `.so`
+  probe-loads in a forked child first (dlopen + three `dlsym`s +
+  descriptor read + ABI-major + name check); a constructor that crashes
+  shows up as a dead child, one that hangs trips the 10 s ceiling
+  (SIGKILL). The daemon maps the `.so` only after a clean probe, then
+  re-checks the descriptor post-load. `dlclose` on registry reset.
+- **dlopen hygiene.** `RTLD_NOW|RTLD_LOCAL`, deliberately WITHOUT
+  `RTLD_DEEPBIND`: the pilot is libc-only (no vendored static deps to
+  collide), so DEEPBIND would only add a second libc identity to one
+  address space. `LOCAL` keeps plugin exports out of the global
+  namespace. The soname is FIXED (`libjxlest.so`) — never
+  manifest-controlled, so a signed manifest cannot smuggle an arbitrary
+  `.so` name past review (the name would be self-licensed manifest
+  bytes). No `LD_LIBRARY_PATH` dependence.
+
+Why the three gates are EACH load-bearing:
+
+1. Without the signature, an attacker who can write the pack dir (or win
+   a TOCTOU on it) gets code execution as the daemon user.
+2. Without the anchored origin, a signature alone is not enough: any
+   signed pack from any fetched-at-runtime URL would qualify, and the
+   fetch path is network-reachable.
+3. Without opt-in, every existing mount silently gains daemon-privileged
+   third-party code on upgrade — the default must stay byte-identical.
+
+Still explicitly UNTRUSTED (not fixed by this WP):
+
+- Everything not passing all three gates (runs IPC/exec as before).
+- Call-time behaviour of a loaded `.so`: the probe guards load
+  (constructors, symbols, ABI), not every future call. A signed,
+  anchored, opted-in pack that turns hostile is daemon-privileged —
+  that is what the signature (who do you trust) and opt-in (say so
+  explicitly) are for. (Mitigating detail: the pilot's estimate body
+  runs in a forked child via `ivpack_run_child`, so even the
+  in-process call keeps a process boundary around the parsing — but
+  that fork is WITHOUT exec, inside a multithreaded daemon, so a
+  sibling thread holding a libc lock at the fork instant can deadlock
+  the child. The loader therefore runs the estimate on a worker thread
+  with a 5 s `pthread_timedjoin_np` ceiling (`est_call_bounded`,
+  `src/core/vol_plugin_inproc.c`): a wedged child becomes an IPC
+  fallback, never a wedged sweep. The abandoned worker is
+  self-draining and holds no loader locks.)
+- Probe/exec containment gaps inherited from the pack trust policy
+  above (full-environment probe child, WP210-NEW-2).
+- TOCTOU between probe and load (a swapped file misses the dev+ino
+  cache and re-probes next call; worst case one stale mapping — the
+  same race any `dlopen` has).
+- Windows plugin loading: parked, every entry declines.
+- `LD_LIBRARY_PATH`/`LD_PRELOAD` in the daemon's environment affect
+  `dlopen` in both the probe child and the daemon itself. The daemon's
+  environment is operator-controlled (same privilege as the mount
+  options), so this is documented, not gated — but do not run an
+  opted-in daemon with an untrusted environment.
+
+Operator surface: `invf-pack inproc <pack>` reports the three gates for
+one installed pack (read-only). Trust matrix: `tools/test-dlopen-trust.sh`
+plus the `invf-dlopen_trust_test` unit binary (signed/unsigned x
+local/remote x opt-in/opt-out x good/bad-ABI/crashing/hanging .so).
+
 ### Crash safety
 
 InvariantFS is not crash-safe against arbitrary power loss. Crash recovery

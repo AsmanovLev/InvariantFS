@@ -150,6 +150,14 @@ typedef struct invfs_pack_def {
  * records, so callers cannot rely on pointer identity). */
 const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c);
 
+/* WP625: in-process trust metadata (implemented in codec.c). reg_dir is
+ * the registered pack dir (host path, or volume-relative when
+ * is_volume is nonzero — volume packs are never in-process eligible).
+ * Unknown codec (no pack record) reports dir NULL + is_volume 1, which
+ * the loader's gate refuses. */
+const char *invfs_codec_pack_reg_dir(const invfs_codec *c);
+int invfs_codec_pack_is_volume(const invfs_codec *c);
+
 /* Reserve 3/3: exec materialization (owner request). A host pack's dir
  * is already a host path; a volume pack's dir is volume-relative
  * (.invariantfs/... as scanned) and unusable until staged to the host.

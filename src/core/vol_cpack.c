@@ -10,6 +10,7 @@
 #include "helper_exec.h"
 #include "tool_scratch.h"
 #include "vol_plugin_client.h"
+#include "vol_plugin_inproc.h"
 #include "../codecs/deflate_repro.h"
 #include <dirent.h>
 #include <sys/stat.h>
@@ -786,6 +787,25 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
 
     if (!def || !def->estimate || !in_path) return -1;
     if (!hd) return -1;
+
+    /* WP625: pilot in-process estimate (jxl only, all three trust gates).
+     * 0 = served in-process; -1 = fall through to the pool/exec path
+     * below (the default when not opted in — byte-identical behaviour).
+     * Never a silent refuse: every decline lands on the existing path. */
+    if (c && c->name && invfs_inproc_allowed(c->name)) {
+        const char *regdir = invfs_codec_pack_reg_dir(c);
+        int isvol = invfs_codec_pack_is_volume(c);
+        uint64_t ino_est = 0;
+        /* regdir is the anchored admin path for host packs; the staged
+         * host dir (hd) is where the .so runs from for volume packs —
+         * which are never eligible (isvol=1 refuses in the gate). Pass
+         * regdir so the origin check sees the admin path, not scratch. */
+        if (regdir && invfs_inproc_estimate(c->name, regdir, isvol,
+                                            in_path, &ino_est) == 0) {
+            if (out_bytes) *out_bytes = ino_est;
+            return 0;
+        }
+    }
 
     /* ADR-007: Try worker pool daemon first for estimate */
     if (invfs_plugin_pool_is_available() && c && c->name) {

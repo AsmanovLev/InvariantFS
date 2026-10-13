@@ -45,13 +45,13 @@ CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pt
            -DINVFS_BUILD_DATE=\"$(BUILD_DATE)\" \
            -DINVFS_AUTHOR_NAME=\"$(AUTHOR_NAME)\" \
            -DINVFS_LICENSE=\"$(LICENSE)\"
-LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread
+LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 STOCK_ZLIB_SRC := $(wildcard $(SRC)/zlib/*.c)
 STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SRC))
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_png vol_seal vol_repair \
+CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
@@ -293,10 +293,15 @@ $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 # and resolves tools/codecpacks/... relative to the repo root.
 $(eval $(call TOOL_RULE,ivpack_packs_test,-ldl))
 
+# WP625: in-process loader trust matrix (dlopen gates + hostile-.so
+# probe legs + estimate routing). Needs -ldl, resolves the pilot .so
+# relative to the repo root like ivpack_packs_test.
+$(eval $(call TOOL_RULE,dlopen_trust_test,-ldl))
+
 # WP203: pack signatures (src/cli/pack_sig.o) gate install; ed25519.o
 # comes in through CORE_O above.
-$(OUT)/invf-pack: $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
-	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack.o $(OBJ)/pack_sig.o $(CORE_O) $(LDLIBS)
+$(OUT)/invf-pack: $(OBJ)/pack.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack.o $(CORE_O) $(LDLIBS)
 $(OBJ)/pack.o: $(SRC)/cli/pack.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
@@ -316,8 +321,8 @@ $(OUT)/invf-zip: $(OBJ)/invf-zip.o $(filter-out $(OBJ)/miniz.o,$(CORE_O))
 # ed25519, the malformed-sidecar corpus, and the install-gate matrix.
 # Explicit rules (not CLI_MAINS): like readdir_error_test, the link needs
 # pack_sig.o beside the test object, which TOOL_RULE cannot express.
-$(OUT)/invf-pack_sign_test: $(OBJ)/pack_sign_test.o $(OBJ)/pack_sig.o $(CORE_O) | $(OUT)
-	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack_sign_test.o $(OBJ)/pack_sig.o $(CORE_O) $(LDLIBS)
+$(OUT)/invf-pack_sign_test: $(OBJ)/pack_sign_test.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $(OBJ)/pack_sign_test.o $(CORE_O) $(LDLIBS)
 $(OBJ)/pack_sign_test.o: src/cli/pack_sign_test.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 $(OBJ)/pack_sig.o: src/cli/pack_sig.c | $(OBJ)
@@ -765,7 +770,11 @@ clean:
 # unit tier: fast, no I/O images
 # codec.o reaches tool_tmpdir (the scratch decision), so every link that
 # pulls codec.o in without CORE_O has to pull tool_scratch.o in too.
-$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(OBJ)/tool_scratch.o
+# WP625: codec.o also reaches invfs_inproc_unload_all (registry reset drops
+# in-process mappings), so the same links pull vol_plugin_inproc.o plus its
+# own deps (pack_sig.o + blake3 + ed25519; -ldl is global in LDLIBS).
+INPROC_MIN_O := $(OBJ)/vol_plugin_inproc.o $(OBJ)/pack_sig.o $(OBJ)/blake3.o $(OBJ)/blake3_dispatch.o $(OBJ)/blake3_portable.o $(OBJ)/ed25519.o
+$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(OBJ)/tool_scratch.o $(INPROC_MIN_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 # WP61: unit coverage for the shared helper containment launcher.
@@ -792,7 +801,7 @@ $(OBJ)/groupcommit_test.o: tools/groupcommit_test.c | $(OBJ)
 # NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
 #   bin/invf-fuzz [iterations] [seed]
 FUZZ_O := $(OBJ)/codec.o $(OBJ)/tool_scratch.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
-          $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o
+          $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(INPROC_MIN_O)
 $(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
@@ -866,6 +875,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-seal_test \
       $(OUT)/sealfuzz \
       $(OUT)/invf-pack_sign_test \
+      $(OUT)/invf-dlopen_trust_test \
       $(OUT)/invf-arc_concurrency_test \
       $(OUT)/invf-arc-conc-tsan $(OUT)/invf-arc-conc-asan \
       $(OUT)/invf-gz_header_test \
@@ -1521,6 +1531,9 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # smoke script, which no gate invoked. check-test-shards caught it.
 	$(TESTENV) $(TESTISO) bash tools/plugin-daemon-smoke.sh
 	$(TESTENV) $(TESTISO) $(OUT)/invf-ivpack_packs_test
+# WP625: in-process loader trust matrix (opt-in/origin/signature gates +
+# hostile-.so probe legs + estimate routing). Fixture dirs under argv /tmp.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-dlopen_trust_test /tmp
 	$(TESTENV) $(TESTISO) bash tools/test-sweep-ui.sh
 	$(TESTENV) $(TESTISO) bash tools/lint-test-heredocs.sh
 	$(TESTENV) bash tools/check-repo-hygiene.sh

@@ -762,6 +762,14 @@ int invfs_binary_family(const uint8_t *head, size_t head_len, const char *name)
 { (void)head; (void)head_len; (void)name; return 0; }
 const invfs_codec *invfs_codec_by_algo(uint32_t algo) { (void)algo; return NULL; }
 const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c) { (void)c; return NULL; }
+/* WP625: the pilot estimate block in invfs_codec_pack_estimate is off the
+ * path under test (no codecpack here); allowed()=0 keeps it skipped, and
+ * the rest are link ballast that must still resolve. */
+int invfs_inproc_allowed(const char *name) { (void)name; return 0; }
+const char *invfs_codec_pack_reg_dir(const invfs_codec *c) { (void)c; return NULL; }
+int invfs_codec_pack_is_volume(const invfs_codec *c) { (void)c; return 1; }
+int invfs_inproc_estimate(const char *packname, const char *packdir, int is_volume, const char *in_path, uint64_t *out_bytes)
+{ (void)packname; (void)packdir; (void)is_volume; (void)in_path; (void)out_bytes; return -1; }
 int invfs_deflate_repro_encode(const uint8_t *raw, size_t raw_len, const invfs_deflate_params *params, uint8_t **out_stream, size_t *out_len)
 { (void)raw; (void)raw_len; (void)params; (void)out_stream; (void)out_len; return -1; }
 int invfs_helper_exec(char *const argv[], uint64_t mem_cap, const invfs_helper_sandbox *sb, const char *work_dir, int no_path_search, char *out, size_t out_cap, uint64_t timeout_ms)

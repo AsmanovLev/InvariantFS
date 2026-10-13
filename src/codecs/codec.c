@@ -21,6 +21,7 @@
 
 #include "codec.h"
 #include "../core/tool_scratch.h"
+#include "../core/vol_plugin_inproc.h"
 #include "lz4.h"
 #include "ppmd_codec.h"
 #include "zstd.h"
@@ -1285,6 +1286,9 @@ void invfs_codec_probe_reset(void)
     stage_n = 0;
     for (i = 0; i < packs_n; i++) pack_entry_free(&packs[i]);
     packs_n = 0;
+    /* WP625: a registry reset drops every in-process mapping too (the
+     * pack dirs the handles came from no longer resolve). */
+    invfs_inproc_unload_all();
     packs_built = 0;
     packs_dirty = 1;   /* the view rebuilds (empty) on next lookup */
     g_all_n = 0;
@@ -1876,6 +1880,23 @@ const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
 {
     pack_entry *p = pack_record_for(c);
     return p ? &p->def : NULL;
+}
+
+/* WP625: in-process trust metadata (the loader's pack-side inputs).
+ * reg_dir is the REGISTERED dir — a host path for host packs,
+ * volume-relative for volume packs (never eligible: is_volume gates
+ * the origin check before any filesystem access). Both stay valid
+ * under the same rule as the registry view. */
+const char *invfs_codec_pack_reg_dir(const invfs_codec *c)
+{
+    pack_entry *p = pack_record_for(c);
+    return p ? p->dir : NULL;
+}
+
+int invfs_codec_pack_is_volume(const invfs_codec *c)
+{
+    pack_entry *p = pack_record_for(c);
+    return p ? (p->origin_vol != NULL) : 1;
 }
 
 /* Does this pack carry any claim rule -- a sniff.magic or a sniff.ext?
