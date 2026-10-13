@@ -1,0 +1,126 @@
+#!/usr/bin/env bpftrace
+/*
+ * leg3-sync.bt — WP622 leg 3: the fsync critique, quantified.
+ *
+ * Time a sync()/fsync()/fdatasync() RETURN against the TAIL of actual
+ * device writeback completion (block_rq_complete). Report
+ * "returned at T, last byte at T+delta" for ext4 and invfs alike.
+ *
+ * Why request completion, not bio completion: on this kernel the
+ * block_bio_complete tracepoint only fires for bios carrying the
+ * BIO_TRACE_COMPLETION flag, which the tracepoint path never sets
+ * (only blktrace does) -- 137 queued / 0 completed measured. The
+ * request completion event fires unconditionally and is the better
+ * durability signal anyway (whole-request, not fragment).
+ *
+ * How to read the output
+ *   - @sync_exit / @fsync_exit / @fdatasync_exit record the return
+ *     timestamp (boot-ns, same clock as the completions) with the
+ *     calling comm. The workload comm is `dd`, `python3`, or `sync`.
+ *   - @last_rq_dev records the last request-completion timestamp per
+ *     raw dev_t (major = dev >> 20, minor = dev & 0xFFFFF);
+ *     @rq_n counts volume per device so the runner can tell signal
+ *     from noise.
+ *   - delta = last completion on the workload's device AFTER the
+ *     syscall returned, minus the return timestamp. A positive delta
+ *     is writeback the syscall did not wait for; ~0 with no later
+ *     completions means the return really is the durability point
+ *     (within what the block layer can see).
+ *
+ * Device attribution is by table, not by filter: completions are
+ * keyed per device ("major:minor") and run-leg.sh resolves which
+ * loop device backs each test image, so the reader can pick the
+ * workload's row out of the noise. The tmpfs leg's honest answer
+ * is "zero bios on any device while the workload ran".
+ *
+ * Run: sudo bpftrace tools/ebpf/leg3-sync.bt
+ * Stop with Ctrl-C after the workload; END prints the table.
+ */
+
+BEGIN
+{
+  @fs_seq = 0;
+  @rq_seq = 0;
+}
+
+tracepoint:syscalls:sys_enter_sync
+{
+  @sync_enter = nsecs;
+  @sync_comm = comm;
+}
+
+tracepoint:syscalls:sys_exit_sync
+/@sync_enter/
+{
+  @sync_exit = nsecs;
+  @sync_lat_us = (nsecs - @sync_enter) / 1000;
+  @sync_exit_comm = comm;
+  @sync_enter = 0;
+}
+
+tracepoint:syscalls:sys_enter_fsync,
+tracepoint:syscalls:sys_enter_fdatasync
+{
+  @fs_start[tid] = nsecs;
+  @fs_comm[tid] = comm;
+  @fs_is_sync[tid] = (probe == "tracepoint:syscalls:sys_enter_fsync");
+}
+
+/* Sequence-keyed exits: on a shared box last-wins maps lose the
+ * workload's own events to background fsync traffic. The runner
+ * correlates by timestamp (workload logs CLOCK_MONOTONIC markers
+ * on the same boot clock, see wl_leg3_sync). */
+tracepoint:syscalls:sys_exit_fsync,
+tracepoint:syscalls:sys_exit_fdatasync
+/@fs_start[tid]/
+{
+  $dt = nsecs - @fs_start[tid];
+  $seq = @fs_seq;
+  @fs_seq = $seq + 1;
+  @fs_exit[$seq] = nsecs;
+  @fs_lat_us[$seq] = $dt / 1000;
+  @fs_comm[$seq] = @fs_comm[tid];
+  if (@fs_is_sync[tid]) {
+    @fs_kind[$seq] = "fsync";
+    @fsync_n = count();
+    @fsync_lat_hist = hist($dt / 1000);
+  } else {
+    @fs_kind[$seq] = "fdatasync";
+    @fdatasync_n = count();
+    @fdatasync_lat_hist = hist($dt / 1000);
+  }
+  delete(@fs_start[tid]); delete(@fs_comm[tid]); delete(@fs_is_sync[tid]);
+}
+
+/* key is the raw dev_t: major = dev >> 20, minor = dev & 0xFFFFF.
+ * Per-event records (seq-keyed) so a single fsync return can be
+ * matched against the NEXT completion on its device; last-wins
+ * alone cannot do that on a shared box. */
+tracepoint:block:block_rq_complete
+{
+  $seq = @rq_seq;
+  @rq_seq = $seq + 1;
+  @rq_ts[$seq] = nsecs;
+  @rq_dev[$seq] = args->dev;
+  @last_rq_dev[args->dev] = nsecs;
+  @rq_n[args->dev] = count();
+}
+
+END
+{
+  printf("=== leg3 syscall returns (boot-ns, same clock as rqs) ===\n");
+  print(@sync_exit); print(@sync_lat_us); print(@sync_exit_comm);
+  print(@fsync_n); print(@fdatasync_n);
+  printf("--- per-event exits: ts -> lat_us comm kind ---\n");
+  print(@fs_exit); print(@fs_lat_us); print(@fs_comm); print(@fs_kind);
+  printf("=== leg3 fsync latency (us, log2 hist) ===\n");
+  print(@fsync_lat_hist);
+  print(@fdatasync_lat_hist);
+  printf("=== leg3 last rq completion per dev (boot-ns) ===\n");
+  print(@last_rq_dev);
+  printf("=== leg3 rq counts per dev ===\n");
+  print(@rq_n);
+  printf("--- per-event completions: ts -> dev (delta vs a return = next ts on that dev minus return) ---\n");
+  print(@rq_ts); print(@rq_dev);
+  clear(@fs_start); clear(@fs_comm); clear(@fs_is_sync);
+}

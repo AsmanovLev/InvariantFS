@@ -1,0 +1,55 @@
+#!/usr/bin/env bpftrace
+/*
+ * leg4-pressure.bt — WP622 leg 4: vfs_cache_pressure behaviour,
+ * including 0, on invfs vs ext4 vs tmpfs.
+ *
+ * What it measures
+ *   - tracepoint mm_shrink_slab_start/end: every slab-shrinker
+ *     invocation, symbolized with ksym() so the dentry/inode
+ *     shrinkers (super_cache_scan) are distinguishable from the
+ *     workload-specific shrinkers (ext4's es_shrinker, the journal
+ *     shrinker, etc.). Counts invocations, sums objects scanned
+ *     (start: nr_objects_to_shrink) and objects freed
+ *     (end: retval; retval is "objects freed", SHRINK_EMPTY is
+ *     encoded separately so a plain sum is the reclaimed count).
+ *   - The pressure knob itself is NOT read by this probe; run-leg.sh
+ *     records /proc/sys/vm/vfs_cache_pressure before/after each run.
+ *
+ * Method (see run-leg.sh leg4): build a dentry-heavy tree on the
+ * target mount, warm it (stat everything twice), set the pressure,
+ * drop nothing (the cache must be warm), re-walk + create churn,
+ * then read /proc/slabinfo dentry/inode_cache deltas as the
+ * corroborating counter. Run once at 100, once at 0.
+ *
+ * Run: sudo bpftrace tools/ebpf/leg4-pressure.bt
+ * Stop with Ctrl-C; END prints the shrinker tables.
+ */
+
+tracepoint:vmscan:mm_shrink_slab_start
+{
+  $sym = ksym(args->shrink);
+  @scan_n[$sym] = count();
+  @scan_objs[$sym] = sum(args->nr_objects_to_shrink);
+}
+
+tracepoint:vmscan:mm_shrink_slab_end
+{
+  $sym = ksym(args->shrink);
+  @free_n[$sym] = count();
+  /* retval < 0 is SHRINK_EMPTY/STOP corralled as 0; freed count only */
+  if (args->retval > 0) {
+    @freed[$sym] = sum(args->retval);
+  }
+  @retval_hist[$sym] = hist(args->retval);
+}
+
+END
+{
+  printf("=== leg4 shrinker invocations ===\n");
+  print(@scan_n);
+  printf("=== leg4 objects scanned (start nr_objects_to_shrink) ===\n");
+  print(@scan_objs);
+  printf("=== leg4 objects freed (end retval>0) ===\n");
+  print(@freed);
+  print(@free_n);
+}

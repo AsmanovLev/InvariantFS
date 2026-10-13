@@ -1,0 +1,124 @@
+#!/usr/bin/env bpftrace
+/*
+ * leg1-rw.bt — WP622 leg 1: vfs_read/vfs_write latency split into
+ * pagecache-served vs FUSE-daemon roundtrips.
+ *
+ * What it measures
+ *   - kprobe vfs_read / vfs_write entry+return: per-call latency,
+ *     bucketed by the file's superblock magic (ext4 vs FUSE vs tmpfs
+ *     vs other). This is the total VFS latency the application sees.
+ *   - kretprobe fuse_get_req / kprobe fuse_request_end joined on the
+ *     request pointer: the FUSE-daemon roundtrip span per opcode
+ *     (READ/WRITE plus the metadata opcodes for reference). This is
+ *     the "daemon half", measured alloc-to-completion (includes the
+ *     pending-queue wait, which is part of the roundtrip).
+ *     (Why not the fuse_request_send/end tracepoints? The send event
+ *     fires BEFORE the unique is assigned, so its unique field is
+ *     always 0 and the pair is unjoinable. Verified instrument
+ *     finding, see docs/benchmarks/VFS-PROBE.md.)
+ *   - pagecache-hit estimate: vfs_read calls on a FUSE mount that had
+ *     NO accompanying FUSE_READ request while the probe ran are reads
+ *     served without a daemon roundtrip (pagecache or kernel-served).
+ *
+ * Superblock magics (include/uapi/linux/magic.h):
+ *   FUSE_SUPER_MAGIC 0x65735546, EXT4_SUPER_MAGIC 0xEF53,
+ *   TMPFS_MAGIC 0x01021994.
+ *
+ * Run: sudo bpftrace tools/ebpf/leg1-rw.bt
+ * (or bash tools/ebpf/run-leg.sh leg1 <mount>)
+ * Stop with Ctrl-C; END prints the histograms and counters.
+ */
+
+kprobe:vfs_read
+{
+  $f = (struct file *)arg0;
+  $magic = $f->f_inode->i_sb->s_magic;
+  $cls = "other";
+  if ($magic == 0x65735546) { $cls = "fuse"; }
+  else if ($magic == 0xEF53) { $cls = "ext4"; }
+  else if ($magic == 0x01021994) { $cls = "tmpfs"; }
+  @rd_start[tid] = nsecs;
+  @rd_cls[tid] = $cls;
+  @rd_is_read[tid] = 1;
+  @vfs_read_n[$cls] = count();
+}
+
+kprobe:vfs_write
+{
+  $f = (struct file *)arg0;
+  $magic = $f->f_inode->i_sb->s_magic;
+  $cls = "other";
+  if ($magic == 0x65735546) { $cls = "fuse"; }
+  else if ($magic == 0xEF53) { $cls = "ext4"; }
+  else if ($magic == 0x01021994) { $cls = "tmpfs"; }
+  @rd_start[tid] = nsecs;
+  @rd_cls[tid] = $cls;
+  @rd_is_read[tid] = 0;
+  @vfs_write_n[$cls] = count();
+}
+
+kretprobe:vfs_read, kretprobe:vfs_write
+/@rd_start[tid]/
+{
+  $dt = nsecs - @rd_start[tid];
+  $cls = @rd_cls[tid];
+  if (@rd_is_read[tid]) { @vfs_read_us[$cls] = hist($dt / 1000); }
+  else { @vfs_write_us[$cls] = hist($dt / 1000); }
+  delete(@rd_start[tid]); delete(@rd_cls[tid]); delete(@rd_is_read[tid]);
+}
+
+/* alloc-to-completion join on the request pointer. fuse_request_end
+ * takes the req as its single argument (arg0); the opcode comes from
+ * req->in.h.opcode via BTF (u32, no layout hazard). */
+kretprobe:fuse_get_req
+{
+  @fuse_start[retval] = nsecs;
+}
+
+kprobe:fuse_request_end
+{
+  $req = (struct fuse_req *)arg0;
+  $op = $req->in.h.opcode;
+  @fuse_end_n[$op] = count();
+  if (@fuse_start[arg0]) {
+    $dt = nsecs - @fuse_start[arg0];
+    $name = "op_UNKNOWN";
+    if ($op == 1) { $name = "op_LOOKUP"; }
+    else if ($op == 3) { $name = "op_GETATTR"; }
+    else if ($op == 4) { $name = "op_SETATTR"; }
+    else if ($op == 9) { $name = "op_MKDIR"; }
+    else if ($op == 10) { $name = "op_UNLINK"; }
+    else if ($op == 14) { $name = "op_OPEN"; }
+    else if ($op == 15) { $name = "op_READ"; }
+    else if ($op == 16) { $name = "op_WRITE"; }
+    else if ($op == 20) { $name = "op_FSYNC"; }
+    else if ($op == 25) { $name = "op_FLUSH"; }
+    else if ($op == 27) { $name = "op_OPENDIR"; }
+    else if ($op == 28) { $name = "op_READDIR"; }
+    else if ($op == 35) { $name = "op_CREATE"; }
+    @fuse_rt_us[$name] = hist($dt / 1000);
+    @fuse_rt_n[$name] = count();
+    delete(@fuse_start[arg0]);
+  } else {
+    /* allocated before attach, or a no-complete path (forget) */
+    @fuse_unmatched = count();
+  }
+}
+
+END
+{
+  printf("=== leg1 vfs latency (us, log2 hist) ===\n");
+  print(@vfs_read_us);
+  print(@vfs_write_us);
+  printf("=== leg1 vfs call counts ===\n");
+  print(@vfs_read_n);
+  print(@vfs_write_n);
+  printf("=== leg1 FUSE daemon roundtrip (us, log2 hist) ===\n");
+  print(@fuse_rt_us);
+  printf("=== leg1 FUSE request counts (joined) + all ends ===\n");
+  print(@fuse_rt_n);
+  print(@fuse_end_n);
+  print(@fuse_unmatched);
+  clear(@rd_start); clear(@rd_cls); clear(@rd_is_read);
+  clear(@fuse_start);
+}

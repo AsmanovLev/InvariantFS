@@ -1,0 +1,170 @@
+#!/usr/bin/env bpftrace
+/*
+ * leg2-meta.bt — WP622 leg 2: metadata-op latency, kernel-side vs
+ * daemon-side, plus the dentry-cache hit rate alongside.
+ *
+ * What it measures
+ *   - kprobe filename_lookup / vfs_unlink / notify_change
+ *     entry+return: per-call kernel-side latency histograms. (6.12
+ *     has no vfs_lookup/vfs_setattr symbols: verified against
+ *     /proc/kallsyms; filename_lookup is the exported path-lookup
+ *     entry and notify_change is the VFS setattr entry that
+ *     chmod/chown/truncate funnel through.)
+ *   - creates bypass vfs_create entirely on this kernel: every
+ *     local fs implements atomic_open, so open(O_CREAT) never
+ *     reaches it (attached + zero hits on touch/echo-redir seldom
+ *     lie). Create counts come from the universal
+ *     security_inode_create hook; create LATENCY from the
+ *     fs-specific ops: ext4_create, shmem_mknod (tmpfs),
+ *     fuse_create_open (FUSE). Each fires only for its own fs,
+ *     which is attribution by construction.
+ *   - kretprobe fuse_get_req / kprobe fuse_request_end joined on the
+ *     request pointer (alloc-to-completion): the daemon-side span of
+ *     the same operations, by opcode (LOOKUP=1, CREATE=35, UNLINK=10,
+ *     SETATTR=4, plus context opcodes). The fuse tracepoints are NOT
+ *     used: the send event fires before unique assignment, so the
+ *     pair is unjoinable (see leg1-rw.bt).
+ *   - dentry-cache hit rate: every vfs_lookup first tries the fast
+ *     path; lookup_fast returning 0 means the dentry was usable
+ *     straight from the cache (no slow-path descent, no daemon
+ *     roundtrip on a warm cache). hit% = rets==0 / calls.
+ *
+ * NOTE on attribution: the kprobe side counts every caller on the
+ * box. Run one mount's workload at a time (the runner does this)
+ * and treat the counts as belonging to that workload; the summary
+ * step in run-leg.sh records `uptime` + slabinfo deltas to confirm
+ * the box was otherwise quiet.
+ *
+ * Run: sudo bpftrace tools/ebpf/leg2-meta.bt
+ * Stop with Ctrl-C; END prints histograms and the hit-rate counters.
+ */
+
+kprobe:filename_lookup
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 0;
+  @lookup_n = count();
+}
+
+kprobe:security_inode_create
+{
+  @create_n = count();
+}
+
+kprobe:ext4_create
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 1;
+}
+
+kprobe:shmem_mknod
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 4;
+  @create_shmem_n = count();
+}
+
+kprobe:fuse_create_open
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 5;
+  @create_fuse_n = count();
+}
+
+kprobe:vfs_unlink
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 2;
+  @unlink_n = count();
+}
+
+kprobe:notify_change
+{
+  @m_start[tid] = nsecs;
+  @m_op[tid] = 3;
+  @setattr_n = count();
+}
+
+kretprobe:filename_lookup, kretprobe:ext4_create, kretprobe:shmem_mknod, kretprobe:fuse_create_open, kretprobe:vfs_unlink, kretprobe:notify_change
+/@m_start[tid]/
+{
+  $dt = nsecs - @m_start[tid];
+  if (@m_op[tid] == 0) { @lookup_us = hist($dt / 1000); }
+  else if (@m_op[tid] == 1) { @create_ext4_us = hist($dt / 1000); }
+  else if (@m_op[tid] == 2) { @unlink_us = hist($dt / 1000); }
+  else if (@m_op[tid] == 4) { @create_shmem_us = hist($dt / 1000); }
+  else if (@m_op[tid] == 5) { @create_fuse_us = hist($dt / 1000); }
+  else { @setattr_us = hist($dt / 1000); }
+  delete(@m_start[tid]); delete(@m_op[tid]);
+}
+
+/* dentry-cache fast path: ret 0 == usable dentry, no slow path */
+kprobe:lookup_fast
+{
+  @fast_calls = count();
+}
+
+kretprobe:lookup_fast
+{
+  if (retval == 0) { @fast_hits = count(); }
+  else { @fast_miss = count(); }
+}
+
+kretprobe:fuse_get_req
+{
+  @m_fuse_start[retval] = nsecs;
+}
+
+kprobe:fuse_request_end
+{
+  $req = (struct fuse_req *)arg0;
+  $op = $req->in.h.opcode;
+  @m_fuse_end_n[$op] = count();
+  if (@m_fuse_start[arg0]) {
+    $dt = nsecs - @m_fuse_start[arg0];
+    $name = "op_UNKNOWN";
+    if ($op == 1) { $name = "op_LOOKUP"; }
+    else if ($op == 3) { $name = "op_GETATTR"; }
+    else if ($op == 4) { $name = "op_SETATTR"; }
+    else if ($op == 6) { $name = "op_SYMLINK"; }
+    else if ($op == 8) { $name = "op_MKNOD"; }
+    else if ($op == 9) { $name = "op_MKDIR"; }
+    else if ($op == 10) { $name = "op_UNLINK"; }
+    else if ($op == 11) { $name = "op_RMDIR"; }
+    else if ($op == 12) { $name = "op_RENAME"; }
+    else if ($op == 35) { $name = "op_CREATE"; }
+    else if ($op == 44) { $name = "op_READDIRPLUS"; }
+    else if ($op == 3) { $name = "op_GETATTR"; }
+    else if ($op == 14) { $name = "op_OPEN"; }
+    else if ($op == 15) { $name = "op_READ"; }
+    else if ($op == 16) { $name = "op_WRITE"; }
+    else if ($op == 20) { $name = "op_FSYNC"; }
+    else if ($op == 25) { $name = "op_FLUSH"; }
+    else if ($op == 18) { $name = "op_RELEASE"; }
+    @m_fuse_us[$name] = hist($dt / 1000);
+    @m_fuse_n[$name] = count();
+    delete(@m_fuse_start[arg0]);
+  } else {
+    @m_fuse_unmatched = count();
+  }
+}
+
+END
+{
+  printf("=== leg2 kernel-side metadata latency (us, log2 hist) ===\n");
+  printf("--- filename_lookup ---\n"); print(@lookup_us);
+  printf("--- create: ext4_create / shmem_mknod / fuse_create_open ---\n"); print(@create_ext4_us); print(@create_shmem_us); print(@create_fuse_us);
+  printf("--- vfs_unlink ---\n"); print(@unlink_us);
+  printf("--- vfs_setattr ---\n"); print(@setattr_us);
+  printf("=== leg2 kernel-side counts ===\n");
+  print(@lookup_n); print(@create_n); print(@create_shmem_n); print(@create_fuse_n); print(@unlink_n); print(@setattr_n);
+  printf("=== leg2 dentry-cache fast path ===\n");
+  print(@fast_calls); print(@fast_hits); print(@fast_miss);
+  printf("=== leg2 daemon-side spans (us, log2 hist) ===\n");
+  print(@m_fuse_us);
+  print(@m_fuse_n);
+  print(@m_fuse_end_n);
+  print(@m_fuse_unmatched);
+  clear(@m_start); clear(@m_op);
+  clear(@m_fuse_start);
+}

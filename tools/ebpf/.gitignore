@@ -1,0 +1,5 @@
+# generated CO-RE headers and compiled objects (regenerate with make)
+.build/
+vmlinux.h
+*.bpf.o
+leg1-rwpdf
