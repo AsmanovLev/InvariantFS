@@ -854,7 +854,9 @@ void vol_retire_pbas(invfs_volume *v, uint64_t inode_id,
 /* Drain at a successful fence (caller holds g_delta_lock): move entries
  * whose mutation is still live into `out` (caller frees them after
  * unlock), drop the rest in place. Supersede: slot must still name the
- * recorded span+seq. Delete: the key must still be absent. */
+ * recorded span+seq. Delete: the slot must still carry the DELETE
+ * tombstone of the SAME generation (recorded span+seq); a stale entry
+ * from a doomed fence must drop even when the flag is re-armed. */
 static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
                               size_t *nout)
 {
@@ -876,11 +878,30 @@ static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
         if (e->del) {
             /* Row-delete retirement: the delete stages a tombstone-flagged
              * slot (di_put updates in place, never removes), so live means
-             * the slot still carries DELETE. A restored/recreated row (or
-             * a missing slot) drops the entry and keeps the blocks. */
-            still_live = (idx != (size_t)-1 &&
-                          (v->delta_index->slot[idx].flags &
-                           INVFS_DELTA_FLAG_DELETE));
+             * the slot still carries DELETE -- of the same generation.
+             * WP630: a fence-failure doom rewinds the slot (dl_doom_entry
+             * restores prev or deletes it) but never touches delta_retire,
+             * so a recreated and re-unlinked row re-arms DELETE under a
+             * NEWER span+seq while the stale entry is still queued. Firing
+             * it would charge pba_ref a second time for blocks the newer
+             * entry already owns (double -1: floor at 0, double bitmap
+             * free, live-sharer blocks freed under EIO). Require the
+             * recorded tombstone triple to match, exactly like supersedes.
+             * Entries whose span capture missed (all-zero: no tombstone
+             * was staged, e.g. an overlay-absent delete) keep the legacy
+             * flag-only test -- a genuine tombstone always has seq >= 1,
+             * so the fallback can never match a live generation. */
+            if (idx != (size_t)-1 &&
+                (v->delta_index->slot[idx].flags &
+                 INVFS_DELTA_FLAG_DELETE)) {
+                if (e->seg == 0 && e->off == 0 && e->seq == 0) {
+                    still_live = 1;
+                } else {
+                    const delta_slot *s = &v->delta_index->slot[idx];
+                    still_live = (s->seg == e->seg && s->off == e->off &&
+                                  s->seq == e->seq);
+                }
+            }
         } else if (idx != (size_t)-1) {
             delta_slot *s = &v->delta_index->slot[idx];
             still_live = (s->seg == e->seg && s->off == e->off &&

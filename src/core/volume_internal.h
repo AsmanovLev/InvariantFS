@@ -265,7 +265,8 @@ typedef struct {
  * the first successful fence covering it -- and only if the mutation is
  * still the live one. `del` marks row-DELETE retirements (unlink,
  * rename-victim): free iff the slot still carries the DELETE tombstone
- * (a delete stages a flagged slot, never a removal). Otherwise
+ * of the recorded generation (span+seq bound at retire time; a delete
+ * stages a flagged slot, never a removal). Otherwise
  * (supersede) free iff the slot still names the recorded span+seq. */
 typedef struct {
     uint8_t *key;                    /* row key (copied) */
