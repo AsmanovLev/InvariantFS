@@ -366,10 +366,24 @@ fi
 # made an optional extra leg load-bearing again, which is the mistake the
 # serial-based assertions were introduced to remove.
 if [ "$SSH_OK" = 1 ]; then
-    wait_marker 'reboot: (Power down|System Powered Off|Reached target.*(Power-Off|Reboot|Shutdown))' "$POWEROFF_TIMEOUT" \
+    # The 'reboot: ' prefix belongs INSIDE its own alternative: written
+    # outside the group it silently required every alternative to be
+    # preceded by 'reboot: ', which made the Reached-target fallbacks
+    # dead -- a guest that reached poweroff.target without the kernel
+    # ever printing 'Power down' (slow TCG shutdown) could never match
+    # and burned the whole budget. With live fallbacks the marker fires
+    # as soon as systemd finishes the shutdown targets; the qemu-exit
+    # poll below is what proves the guest actually left.
+    wait_marker '(reboot: (Power down|System Powered Off)|Reached target.*(Power-Off|Reboot|Shutdown))' "$POWEROFF_TIMEOUT" \
         || fail "systemctl poweroff was issued over SSH but the guest did not \
 shut down within ${POWEROFF_TIMEOUT}s -- a clean shutdown on a FUSE root IS worth failing on"
-    qpid_alive && { sleep 20; qpid_alive && fail "QEMU still running 20s after poweroff"; }
+    # The marker above can fire early (shutdown.target is reached long
+    # before the kernel powers off), and under TCG the tail of shutdown
+    # is slow -- so give QEMU its own bounded budget instead of one 20s
+    # glance. A guest that truly wedged still fails here, with a message
+    # that names it.
+    for _w in $(seq 1 30); do qpid_alive || break; sleep 20; done
+    qpid_alive && fail "QEMU still running 600s after the poweroff marker -- guest wedged before poweroff";
     say "poweroff OK (QEMU exited)"
 else
     note "no SSH channel, so no clean poweroff was requested -- stopping the"
