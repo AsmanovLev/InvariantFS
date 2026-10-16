@@ -4140,6 +4140,32 @@ int main(int argc, char *argv[])
         fa.allocated = 0;
 
         rc = 1;
+        /* WP623: mark this daemon a systemd root-storage daemon BEFORE
+         * fuse_mount publishes the mount (https://systemd.io/ROOT_STORAGE_DAEMONS).
+         * systemd-shutdown excludes a root-owned process whose argv[0]
+         * starts with '@' from BOTH kill broadcasts -- without the mark
+         * the daemon pays the fixed ~90s TERM wait and then dies by
+         * SIGKILL while PID 1 still needs its root, and the guest never
+         * powers off (see g_survive_term). systemd's check reads exactly
+         * ONE byte (the first of /proc/PID/cmdline), so one byte is all
+         * that is rewritten: "invf-fuse" shows as "@nvf-fuse". A full
+         * rename to "@invf-fuse" does NOT fit the argv[0] slot when
+         * invoked by bare name (10 bytes live there, 11 needed). comm
+         * stays "invf-fuse", so pidof/pkill -x patterns (the documented
+         * `kill -USR1 $(pidof invf-fuse)` trigger) are unaffected; only
+         * pgrep -f "invf-fuse" substring matches miss the marked form,
+         * and no in-tree pgrep -f targets a survive_term mount.
+         * Pre-mount is the point: the old post-mount placement left a
+         * publish-then-mark race -- a reader that observes the mount
+         * first (test-sigterm-exit leg C does exactly this) could see
+         * the unmarked argv[0] and fail spuriously. The fork in
+         * fuse_daemonize below inherits the rewritten byte, so
+         * daemonized mounts are marked from birth too. */
+        if (g_survive_term && g_argv0 && g_argv0[0] && g_argv0[0] != '@') {
+            g_argv0[0] = '@';
+            fprintf(stderr, "[survive_term] root-storage mark set "
+                            "(argv[0] now starts with '@')\n");
+        }
         f = fuse_new(&fa, &invf_ops, sizeof(invf_ops), NULL);
         if (!f || fuse_mount(f, (char *)mnt) != 0) {
             fprintf(stderr, "[fuse_mount failed]\n");
@@ -4166,28 +4192,6 @@ int main(int argc, char *argv[])
             else
                 fprintf(stderr, "[survive_term] ignoring SIGTERM: this mount "
                                 "is the boot root\n");
-            /* WP623: mark this daemon a systemd root-storage daemon
-             * (https://systemd.io/ROOT_STORAGE_DAEMONS). systemd-shutdown
-             * excludes a root-owned process whose argv[0] starts with '@'
-             * from BOTH kill broadcasts -- without the mark the daemon pays
-             * the fixed ~90s TERM wait and then dies by SIGKILL while PID 1
-             * still needs its root, and the guest never powers off (see
-             * g_survive_term). systemd's check reads exactly ONE byte (the
-             * first of /proc/PID/cmdline), so one byte is all that is
-             * rewritten: "invf-fuse" shows as "@nvf-fuse". A full rename
-             * to "@invf-fuse" does NOT fit the argv[0] slot when invoked by
-             * bare name (10 bytes live there, 11 needed). comm stays
-             * "invf-fuse", so pidof/pkill -x patterns (the documented
-             * `kill -USR1 $(pidof invf-fuse)` trigger) are unaffected; only
-             * pgrep -f "invf-fuse" substring matches miss the marked form,
-             * and no in-tree pgrep -f targets a survive_term mount.
-             * Daemon-side (post-fork) is the right place: the parent exits
-             * at once, and with -f there is no fork at all. */
-            if (g_argv0 && g_argv0[0] && g_argv0[0] != '@') {
-                g_argv0[0] = '@';
-                fprintf(stderr, "[survive_term] root-storage mark set "
-                                "(argv[0] now starts with '@')\n");
-            }
         }
 
         /* The sweep thread belongs to the DAEMON, so it is created here --
