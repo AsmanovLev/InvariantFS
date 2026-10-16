@@ -282,13 +282,18 @@ say "systemd reached multi-user.target"
 }
 
 BOOT_OK=0
-for _att in 1 2; do
+# Single attempt: the 2-attempt retry (9cb4604) doubled the worst case
+# under the 60-min job cap on slow TCG hosts (two 1500 s timeouts back
+# to back, both burning fully on a guest that is SLOW not stuck).
+# boot_once machinery stays for a future re-arm; the loop below runs
+# it exactly once.
+for _att in 1; do
     if boot_once "$_att"; then BOOT_OK=1; break; fi
     say "boot attempt $_att missed multi-user.target; killing guest before retry"
     cleanup_guest
     sleep 3
 done
-[ "$BOOT_OK" = 1 ] || fail "systemd did not reach multi-user.target in 2 boot attempts (attempt-1 serial saved as $SERIAL.att1)"
+[ "$BOOT_OK" = 1 ] || fail "systemd did not reach multi-user.target in a single boot attempt (serial saved as $SERIAL)"
 
 # ---- THE KI3b ASSERTION, from the serial log ------------------------------
 # WP224: asserted from the SERIAL LOG, not over SSH. Two reasons, both learned
