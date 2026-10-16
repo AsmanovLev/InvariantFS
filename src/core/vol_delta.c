@@ -1729,17 +1729,23 @@ static int di_skey_cmp(const void *pa, const void *pb)
     return vol_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
+static pthread_key_t  g_di_sorted_key;
+static pthread_once_t g_di_sorted_once = PTHREAD_ONCE_INIT;
+
 static void di_sorted_release(void *p)
 {
     di_sorted *s = (di_sorted *)p;
     if (!s)
         return;
+    /* WP633: clear the key so pthread does not re-fire the destructor
+     * on the dangling pointer (PTHREAD_DESTRUCTOR_ITERATIONS). Without
+     * this the exiting thread double-frees s->v/s, corrupting the heap
+     * globally -- the next thread's s->v can then be smaller than its
+     * s->cap claims, i.e. a "guarded" store still overflows. */
+    pthread_setspecific(g_di_sorted_key, NULL);
     free(s->v);
     free(s);
 }
-
-static pthread_key_t  g_di_sorted_key;
-static pthread_once_t g_di_sorted_once = PTHREAD_ONCE_INIT;
 
 static void di_sorted_key_init(void)
 {
@@ -1776,6 +1782,24 @@ static int di_sorted_build(const struct delta_index *di, di_sorted *s)
         const delta_slot *sl = &di->slot[i];
         if (!sl->key)
             continue;
+        /* WP633: delta reads are lock-free while writers append under
+         * g_delta_lock, so a concurrent di_put between the sizing above
+         * and (or during) this loop can make the occupied count exceed
+         * the buffer: without this check that store is a heap overflow
+         * (guest-boot killer: readdir storm + writer threads hit it in
+         * ~12s, every time). Grow the view instead of trusting the
+         * sampled count -- single-threaded the branch never fires.
+         * (A concurrent di_grow swapping the slot array under this loop
+         * is the older, explicitly accepted window; this does not
+         * widen it.) */
+        if (n == s->cap) {
+            size_t ncap = s->cap ? s->cap * 2 : 32;
+            di_skey *nv = (di_skey *)realloc(s->v, ncap * sizeof *nv);
+            if (!nv)
+                return -1;
+            s->v = nv;
+            s->cap = ncap;
+        }
         s->v[n].key = sl->key;
         s->v[n].klen = sl->klen;
         s->v[n].slot = (uint32_t)i;
