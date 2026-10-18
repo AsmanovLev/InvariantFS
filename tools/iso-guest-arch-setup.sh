@@ -81,15 +81,18 @@ pacman-key --init || { say "STEP FAILED: pacman-key --init"; exit 1; }
 say "pacman-key --populate..."
 # TCG guest flake (2 of 3 CI runs): --populate races the keyboxd/agent
 # startup from --init -- gpg lock contention ("waiting for lock") and
-# keydb errors on a slow first attempt. The failed attempt's locks are
-# stale (its gpg exited), so clear + retry; a first-try success behaves
-# exactly as before.
+# keydb errors on a slow first attempt. Run 39117699396 showed a harder
+# variant: a broken gnupg home (missing pubring.gpg trustdb, "no secret
+# key", then "insufficient permissions to read the keyring" on every
+# retry) -- stale-lock clearing can't fix that. So reset the whole home
+# and re-init before retrying; a first-try success behaves as before.
 pop_ok=0
 for attempt in 1 2 3; do
     if pacman-key --populate archlinux; then pop_ok=1; break; fi
-    say "populate attempt $attempt failed; clearing stale gpg locks..."
-    rm -f /etc/pacman.d/gnupg/*.lock
+    say "populate attempt $attempt failed; resetting gnupg home + re-init..."
     gpgconf --kill gpg-agent 2>/dev/null || true
+    rm -rf /etc/pacman.d/gnupg
+    pacman-key --init || say "re-init failed; populate retry may fail as well..."
     sleep 20
 done
 [ "$pop_ok" = 1 ] || { say "STEP FAILED: pacman-key --populate"; exit 1; }
