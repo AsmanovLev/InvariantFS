@@ -146,6 +146,22 @@ KERNEL="$(readable_kernel "$KERNEL")" || exit 1
 # invfs.init is named EXPLICITLY so the assertion below is about systemd
 # starting, not about /sbin/init happening to resolve.
 CMDLINE="console=ttyS0,115200 invfs.init=/lib/systemd/systemd"
+# WP629: mask the units that do no useful work on an emulated CPU but are
+# enough to lose the multi-user.target race on a shared TCG runner.
+# 2026-10-18 CI: the deadline fired with basic.target already reached and
+# systemd-journal-catalog-update.service having reported an error -- the
+# same unit 9b16f7a named as a 2m45 stall. The rest are timers that only
+# arm themselves. None of this is part of what the gate asserts: systemd
+# as PID 1, the root is FUSE, multi-user.target, clean poweroff.
+# systemd.mask= is a KERNEL-CMDLINE mask, deliberately: masking by writing
+# into $STAGE would change the tree that was imported, and the offline
+# check at the end compares $STAGE against the volume byte for byte.
+# INVFS_DEB_BOOT_MASK= (empty) boots unmasked.
+BOOT_MASK="${INVFS_DEB_BOOT_MASK-systemd-journal-catalog-update.service apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer fstrim.timer systemd-tmpfiles-clean.timer}"
+for _mu in $BOOT_MASK; do CMDLINE="$CMDLINE systemd.mask=$_mu"; done
+if [ -n "$BOOT_MASK" ]; then
+    echo "note: masking boot-noise units via systemd.mask=: $BOOT_MASK"
+fi
 # Accel: KVM when the runner actually has it, TCG otherwise. A host that has
 # /dev/kvm but refuses to open it (a container without the device mapped, or
 # without the supplementary group) otherwise fails with "failed to initialize
@@ -200,12 +216,52 @@ QEMU_ERR="$LOGDIR/qemu.err"
 _port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " ||                  netstat -ltn 2>/dev/null | grep -q ":$1 "; }
 # TCG-without-KVM boots are slow AND variable on shared runners: a boot
 # that reaches a login shell but never declares multi-user.target within
-# the budget is a known environmental stall, not a filesystem verdict
-# (first boot may have been generating host keys etc. on emulated CPU).
-# So: try the boot twice on the staged image before failing. Attempt 1
-# keeps pristine single-attempt semantics; only a multi-user timeout
-# (or an earlier wait miss) triggers the reboot, with attempt 1 serial
-# saved for forensics.
+# the budget is a known environmental stall, not a filesystem verdict.
+# The 2-attempt retry that used to live here (9cb4604) was removed by
+# 9b16f7a because two 1500 s attempts back to back spend the whole 60-min
+# job cap on a guest that is SLOW rather than stuck; one 2100 s attempt
+# fits a slow boot and still catches a true hang. boot_once stays so the
+# retry can be re-armed in one word.
+#
+# diagnose_boot_stall -- WP629. The failure path used to report "the last
+# target it DID reach" with
+#     grep -aoE 'Reached target [A-Za-z0-9.-]+' | tail -1
+# on the RAW serial. systemd colorises the target name, so the character
+# after 'Reached target ' is an ANSI escape and not a name. On the
+# 2026-10-18 CI run that grep matched an early uncoloured line and printed
+# 'swap.target' while the 40-line dump printed immediately below it showed
+# sysinit/timers/sockets/basic/getty.target reached -- a diagnostic that
+# contradicts its own evidence, and it sent the first reading of that
+# failure after the wrong question. Strip the escapes before matching.
+#
+# The two facts reported are what a red boot gate actually has to answer:
+#   1. units that printed 'Starting' and never 'Started'/'Finished' -- the
+#      pending activation, i.e. what the boot is waiting on;
+#   2. whether the console is still producing output. A guest that is
+#      merely slow keeps writing; one blocked on a request that never
+#      returns goes silent, and the serial file's size says which.
+diagnose_boot_stall() {
+    local st="$LOGDIR/serial.stripped" sz0 sz1 pend
+    sed 's/\x1b\[[0-9;]*m//g' "$SERIAL" > "$st" 2>/dev/null || cp "$SERIAL" "$st"
+    echo "--- last targets reached (ANSI-stripped, newest last):"
+    grep -aoE 'Reached target [A-Za-z0-9@._-]+' "$st" | tail -3 | sed 's/^/      /' || true
+    echo "--- still activating at the deadline (said 'Starting', never 'Started'/'Finished'):"
+    pend="$(comm -23 \
+        <(grep -aoE 'Starting [A-Za-z0-9@._-]+' "$st" | awk '{print $2}' | sort -u) \
+        <(grep -aoE '(Started|Finished|Stopped) [A-Za-z0-9@._-]+' "$st" | awk '{print $2}' | sort -u))" || true
+    if [ -n "$pend" ]; then sed 's/^/      /' <<<"$pend"; else echo "      (none -- every unit that started also finished)"; fi
+    sz0="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+    echo "--- console activity: ${sz0} bytes; sampling 10s to tell SLOW from WEDGED..."
+    sleep 10
+    sz1="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+    if [ "$sz1" -gt "$sz0" ]; then
+        echo "      grew $((sz1 - sz0)) bytes in 10s -- STILL BOOTING (slow host, not a hang)"
+    else
+        echo "      no output in 10s (last write $(( $(date +%s) - $(stat -c %Y "$SERIAL" 2>/dev/null || date +%s) ))s ago) -- WEDGED"
+    fi
+    echo "--- last 40 lines of serial:"
+    tail -40 "$st"
+}
 boot_once() {   # $1 = attempt number (1-based)
     if [ "$1" != 1 ]; then
         cp "$SERIAL" "$SERIAL.att$(( $1 - 1 ))" 2>/dev/null || true
@@ -273,11 +329,8 @@ qpid_alive || { tail -30 "$SERIAL"; echo "guest died while systemd was starting"
 
 say "waiting for multi-user.target"
 wait_marker 'Reached target.*Multi-User|Startup finished' "$BOOT_TIMEOUT" || {
-    echo "--- last target it DID reach:" \
-        "$(grep -aoE 'Reached target [A-Za-z0-9.-]+' "$SERIAL" 2>/dev/null \
-            | sed 's/\x1b\[[0-9;]*m//g' | tail -1)"
-    echo "--- last 40 lines of serial:"; tail -40 "$SERIAL"; \
-    echo "systemd did not reach multi-user.target within ${BOOT_TIMEOUT}s (last target above -- a login prompt means getty.target, NOT multi-user)" >&2; return 1; }
+    diagnose_boot_stall
+    echo "systemd did not reach multi-user.target within ${BOOT_TIMEOUT}s (the pending units above are what it was waiting on -- a login prompt means getty.target, NOT multi-user)" >&2; return 1; }
 say "systemd reached multi-user.target"
 }
 
