@@ -13,6 +13,65 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
+## OPEN — a FUSE root cannot complete systemd's shutdown: `invf-fuse` is killed with no shutdown path
+
+  **Date:** Oct 19, 2026
+  **Severity:** High (no clean shutdown/poweroff when the root is FUSE; the debian boot gate is red on this alone)
+  **Status:** **OPEN — diagnosed, not fixed.** The boot half of the same gate was a console-witness failure and is fixed (`b0fd2df`); this shutdown half is a real defect and must not be papered over by accepting a kernel-level poweroff in the gate.
+
+  **Symptom.** `systemctl poweroff` in the guest reaches `Reached target
+  poweroff.target`, then `systemd-shutdown[1]` prints `Syncing filesystems and
+  block devices.`, `Sending SIGTERM to remaining processes...`, `Sending SIGKILL
+  to remaining processes...` and stops permanently. `reboot: Power down` never
+  appears, QEMU never exits, and the poweroff leg of `tools/boot-debian-qemu.sh`
+  fails after its budget. Reproduced in CI (run 39161205290, freshly imported
+  4 GiB volume, TCG runner) and locally under KVM with the same signature, so it
+  is neither a dirty-volume artefact nor TCG slowness.
+
+  **What it is NOT** (each one tested; recorded so it is not re-derived):
+  - *A kernel D-state.* The guest's hung-task detector armed at 30 s
+    (`kernel.hung_task_timeout_secs=30`) stayed silent across a 300 s window: no
+    "blocked for more than", no Call Trace.
+  - *A dead FUSE mount hanging the kernel.* Killing the daemon on a live guest
+    (`pkill -KILL -x invf-fuse`) breaks the root LOUDLY and immediately — read
+    `RC=1`, write `RC=1`, exec 127 because no binary can be loaded from it —
+    while SysRq `s` and `u` written to `/proc/sysrq-trigger` (a builtin redirect,
+    so no exec is needed) answer promptly.
+  - *journald writing its journal on the FUSE root.* Masking
+    `/var/log/journal` with a tmpfs before poweroff changed nothing: the stop is
+    still the line right after the SIGKILL message.
+
+  **What it is.** The kernel powers off perfectly: on a healthy guest,
+  `echo o > /proc/sysrq-trigger` gives `sysrq: Power Off`, `ACPI: PM: Preparing
+  to enter system sleep state S5`, `reboot: Power down`. So the wedge is
+  entirely inside `systemd-shutdown`'s userspace exit path — it never issues the
+  powerdown.
+
+  **Mechanism (supported, not yet proven).** `tools/initramfs-init.sh:197,229-233`
+  starts the guest's root daemon as `invf-fuse -o survive_term,allow_other -f
+  /dev/vda /mnt/invfs`, and `src/cli/fuse_fs.c:95` makes `survive_term`
+  deliberately ignore SIGTERM ("SIGTERM is ignored when set"). systemd's
+  shutdown opens with exactly SIGTERM-then-wait, then SIGKILL. There is therefore
+  no orderly-shutdown path: the process serving the root filesystem is killed
+  before `systemd-shutdown`'s final sync/umount, and the root cannot be released
+  afterwards.
+
+  **Fix direction.** Give the daemon a shutdown participation path for the
+  system-shutdown case — release the mount while the root is still usable (a
+  shutdown signal distinct from the ignored SIGTERM, or a unit ordered into the
+  shutdown transaction) — instead of killing it mid-flight. Do NOT simply drop
+  `survive_term`: `tools/test-sigterm-exit.sh` and the root-storage mark
+  (WP212, `eb9001c`) depend on it.
+
+  **Instrumentation note.** `systemd.log_level=debug` alone shows nothing on the
+  guest console: DEBUG is filtered by the kernel console loglevel.
+  `ignore_loglevel` has to accompany it, and that is what produced the evidence
+  above.
+
+  **Validation owed.** The poweroff leg of `tools/boot-debian-qemu.sh` must reach
+  `reboot: Power down`, and `tools/test-sigterm-exit.sh` must stay green (its
+  leg C is the `-o survive_term` case).
+
 ## READER RESOLVED / COLLECTOR SHIPPED; residual risk accepted (reclaimer by WP121, reader by WP-D) — the RT30 fallback root can be reclaimed while still live
 
   **Date:** Sep 27, 2026  

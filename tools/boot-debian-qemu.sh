@@ -51,6 +51,12 @@ BOOT_TIMEOUT="${INVFS_DEB_BOOT_TIMEOUT:-900}"
 # DefaultTimeoutStopSec instead: a systemd SIGKILL of a hung FUSE unmount
 # would still "power off" and the gate would stop proving CLEAN shutdown.
 POWEROFF_TIMEOUT="${INVFS_DEB_POWEROFF_TIMEOUT:-300}"
+# WP629: how long the guest's console may stay SILENT during the wait for QEMU
+# to leave, before the poweroff is declared wedged instead of slow. See
+# INCIDENTS.md ("a FUSE root cannot complete systemd's shutdown"): the stall
+# happens with the console already quiet, so watching only the clock burns
+# QEMU_EXIT_TIMEOUT on nothing.
+POWEROFF_SILENCE_TIMEOUT="${INVFS_DEB_POWEROFF_SILENCE_TIMEOUT:-120}"
 MODE="${INVFS_DEB_MODE:-single}"
 
 # STAGE is required only when this run will IMPORT it. With
@@ -601,8 +607,29 @@ shut down within ${POWEROFF_TIMEOUT}s -- a clean shutdown on a FUSE root IS wort
     # (exits late) apart from wedged (never exits). Default 600 preserves
     # old behaviour everywhere the knob is unset.
     QEMU_EXIT_TIMEOUT="${INVFS_DEB_QEMU_EXIT_TIMEOUT:-600}"
-    for _w in $(seq 1 $(( QEMU_EXIT_TIMEOUT / 20 ))); do qpid_alive || break; sleep 20; done
-    qpid_alive && fail "QEMU still running ${QEMU_EXIT_TIMEOUT}s after the poweroff marker -- guest wedged before poweroff";
+    # Watch the console as well as the clock: on a FUSE root the guest can stop
+    # talking forever right after systemd-shutdown's SIGKILL message, and then
+    # the full QEMU_EXIT_TIMEOUT is spent learning nothing. The serial is the
+    # evidence, so give it up front rather than only as a CI artefact.
+    _po_quiet=0
+    _po_last="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+    for _w in $(seq 1 $(( QEMU_EXIT_TIMEOUT / 5 ))); do
+        qpid_alive || break
+        sleep 5
+        _po_cur="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+        if [ "$_po_cur" -gt "$_po_last" ]; then
+            _po_last="$_po_cur"; _po_quiet=0
+        else
+            _po_quiet=$((_po_quiet + 5))
+            if [ "$_po_quiet" -ge "$POWEROFF_SILENCE_TIMEOUT" ]; then break; fi
+        fi
+    done
+    if qpid_alive; then
+        echo "--- the guest never powered down; its console has been silent for ${_po_quiet}s." >&2
+        echo "--- last 25 lines of the guest console:" >&2
+        sed 's/\x1b\[[0-9;]*m//g' "$SERIAL" 2>/dev/null | tail -25 >&2
+        fail "QEMU still running after the poweroff marker -- the guest wedged before poweroff. A kernel-level poweroff works here (SysRq 'o' reaches 'reboot: Power down'), so the wedge is inside systemd-shutdown: see INCIDENTS.md, 'a FUSE root cannot complete systemd's shutdown'"
+    fi
     say "poweroff OK (QEMU exited)"
 else
     note "no SSH channel, so no clean poweroff was requested -- stopping the"
