@@ -386,9 +386,12 @@ shut down within ${POWEROFF_TIMEOUT}s -- a clean shutdown on a FUSE root IS wort
     # before the kernel powers off), and under TCG the tail of shutdown
     # is slow -- so give QEMU its own bounded budget instead of one 20s
     # glance. A guest that truly wedged still fails here, with a message
-    # that names it.
-    for _w in $(seq 1 30); do qpid_alive || break; sleep 20; done
-    qpid_alive && fail "QEMU still running 600s after the poweroff marker -- guest wedged before poweroff";
+    # that names it. Knobbed for CI diagnosis: a raised budget tells slow
+    # (exits late) apart from wedged (never exits). Default 600 preserves
+    # old behaviour everywhere the knob is unset.
+    QEMU_EXIT_TIMEOUT="${INVFS_DEB_QEMU_EXIT_TIMEOUT:-600}"
+    for _w in $(seq 1 $(( QEMU_EXIT_TIMEOUT / 20 ))); do qpid_alive || break; sleep 20; done
+    qpid_alive && fail "QEMU still running ${QEMU_EXIT_TIMEOUT}s after the poweroff marker -- guest wedged before poweroff";
     say "poweroff OK (QEMU exited)"
 else
     note "no SSH channel, so no clean poweroff was requested -- stopping the"
