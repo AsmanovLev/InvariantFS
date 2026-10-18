@@ -67,6 +67,11 @@ fi
 mkdir -p "$WORK" "$LOGDIR"
 RAW="$WORK/deb.img"; SHADOW="$WORK/deb-shadow.img"
 SERIAL="$LOGDIR/serial.log"; IMG="$RAW"
+# WP629: the console is a SOCKET in addition to a log file, because a stalled
+# boot has to be interrogated, not just watched. QEMU's own chardev logfile
+# keeps $SERIAL exactly as -serial file: did, so every existing wait_marker and
+# grep keeps working unchanged.
+SOCK="$LOGDIR/serial.sock"
 
 say()  { echo "== $*"; }
 # WP224: a silent death is the worst failure mode in a gate. With
@@ -188,7 +193,12 @@ QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
         # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
         -object rng-random,filename=/dev/urandom,id=rng0
         -device virtio-rng-pci,rng=rng0
-       -display none -serial "file:$SERIAL" -monitor none -no-reboot)
+       -display none -monitor none -no-reboot
+        # WP629: socket + logfile, not file:. The logfile records the guest's
+        # output (so the waits below are untouched); the socket lets the
+        # harness TYPE into the guest's root shell when the boot stalls.
+       -chardev "socket,id=ser0,path=$SOCK,server=on,wait=off,logfile=$SERIAL"
+       -serial "chardev:ser0")
 [ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
 
 say "booting: qemu-system-x86_64 -machine q35,accel=$ACCEL $CMDLINE"
@@ -241,26 +251,155 @@ _port_in_use() { ss -ltn 2>/dev/null | grep -q ":$1 " ||                  netsta
 #      merely slow keeps writing; one blocked on a request that never
 #      returns goes silent, and the serial file's size says which.
 diagnose_boot_stall() {
-    local st="$LOGDIR/serial.stripped" sz0 sz1 pend
+    local st="$LOGDIR/serial.stripped" sz0 sz1 pend silent
+    local USUF='service|socket|timer|target|mount|path|slice|device|swap|scope|automount'
+    # Unit names are cut to the console width (80 cols), so a naive set
+    # difference reports units that in fact finished: on run 39134798855
+    # 'Starting modprobe@efi_pstore.servi...' never equals the full
+    # 'Finished modprobe@efi_pstore.service', and that unit was reported as
+    # pending while its own Finished line sat in the same serial. Compare
+    # 24-char prefixes, and require a unit suffix so systemd's own
+    # 'Starting of X ... unsupported' ([UNSUPP]) line cannot contribute 'of'.
     sed 's/\x1b\[[0-9;]*m//g' "$SERIAL" > "$st" 2>/dev/null || cp "$SERIAL" "$st"
     echo "--- last targets reached (ANSI-stripped, newest last):"
     grep -aoE 'Reached target [A-Za-z0-9@._-]+' "$st" | tail -3 | sed 's/^/      /' || true
     echo "--- still activating at the deadline (said 'Starting', never 'Started'/'Finished'):"
     pend="$(comm -23 \
-        <(grep -aoE 'Starting [A-Za-z0-9@._-]+' "$st" | awk '{print $2}' | sort -u) \
-        <(grep -aoE '(Started|Finished|Stopped) [A-Za-z0-9@._-]+' "$st" | awk '{print $2}' | sort -u))" || true
-    if [ -n "$pend" ]; then sed 's/^/      /' <<<"$pend"; else echo "      (none -- every unit that started also finished)"; fi
+        <(grep -aoE "Starting [A-Za-z0-9@._-]+\.($USUF)" "$st" | awk '{print substr($2,1,24)}' | sort -u) \
+        <(grep -aoE "(Started|Finished|Stopped) [A-Za-z0-9@._-]+\.($USUF)" "$st" | awk '{print substr($2,1,24)}' | sort -u))" || true
+    if [ -n "$pend" ]; then
+        while read -r p; do
+            [ -n "$p" ] || continue
+            printf '      %s\n' "$(grep -aoE "Starting [A-Za-z0-9@._-]+\.($USUF)" "$st" \
+                | awk '{print $2}' | grep -m1 -F "$p" || printf '%s' "$p")"
+        done <<<"$pend"
+    else
+        echo "      (none -- every unit that started also finished)"
+    fi
     sz0="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
-    echo "--- console activity: ${sz0} bytes; sampling 10s to tell SLOW from WEDGED..."
+    echo "--- console activity: ${sz0} bytes; sampling 10s ..."
     sleep 10
     sz1="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+    silent=$(( $(date +%s) - $(stat -c %Y "$SERIAL" 2>/dev/null || date +%s) ))
     if [ "$sz1" -gt "$sz0" ]; then
-        echo "      grew $((sz1 - sz0)) bytes in 10s -- STILL BOOTING (slow host, not a hang)"
+        echo "      grew $((sz1 - sz0)) bytes in 10s -- the guest is STILL BOOTING"
     else
-        echo "      no output in 10s (last write $(( $(date +%s) - $(stat -c %Y "$SERIAL" 2>/dev/null || date +%s) ))s ago) -- WEDGED"
+        echo "      no new bytes in 10s; the console has been silent for ${silent}s"
+        echo "      NOTE: silence is NOT by itself proof of a hang -- a guest that"
+        echo "            finished booting and sits at an idle shell prompt prints"
+        echo "            nothing either. The in-guest probe below separates the two."
     fi
+    guest_probe
     echo "--- last 40 lines of serial:"
     tail -40 "$st"
+}
+
+# SILENCE_TIMEOUT -- WP629. A boot that goes quiet must not burn the whole
+# budget: run 39134798855 spent 2100 s waiting for a marker while the console
+# produced nothing for the last 1920 s of it. Watch the console's size as well
+# as the marker and give up after this many seconds without growth.
+SILENCE_TIMEOUT="${INVFS_DEB_SILENCE_TIMEOUT:-300}"
+wait_multiuser_or_silence() {   # 0 reached, 1 budget, 2 guest died, 3 console silent
+    local i=0 quiet=0 last cur
+    last="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+    while [ "$i" -lt "$BOOT_TIMEOUT" ]; do
+        if grep -qE 'Reached target.*Multi-User|Startup finished' "$SERIAL" 2>/dev/null; then
+            return 0
+        fi
+        qpid_alive || return 2
+        sleep 1; i=$((i + 1))
+        cur="$(stat -c %s "$SERIAL" 2>/dev/null || echo 0)"
+        if [ "$cur" -gt "$last" ]; then
+            last="$cur"; quiet=0
+        else
+            quiet=$((quiet + 1))
+            [ "$quiet" -ge "$SILENCE_TIMEOUT" ] && return 3
+        fi
+    done
+    return 1
+}
+
+# guest_probe -- WP629. The 2026-10-19 local reproduction booted this same
+# staged root with the same kernel/initramfs to multi-user.target twice (KVM
+# 5.3 s, TCG 2 min 25 s) with ssh.service and systemd-logind.service both
+# 'active (running)', zero D-state processes and PID 1 idle in do_epoll_wait.
+# A console-only harness cannot tell that state from a wedged guest -- it sees
+# silence either way. The guest auto-logs in as root on ttyS0, so the socket
+# above can be typed into: ASK the guest rather than infer its state.
+# Best effort by construction: no python3, a dead QEMU or a truly wedged guest
+# changes how much evidence lands in the log, never the verdict.
+guest_probe() {
+    if ! qpid_alive; then echo "      (QEMU is gone; no in-guest probe possible)"; return 0; fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "      (no python3 on this host; skipping the in-guest probe)"; return 0
+    fi
+    echo "--- in-guest probe over the serial console (the guest auto-logs in as root):"
+    timeout 180 python3 - "$SOCK" "$SERIAL" <<'PY' || echo "      (probe did not complete -- the guest console may be gone)"
+import select, socket, sys, time
+
+sock, cap = sys.argv[1], sys.argv[2]
+CMDS = [
+    "stty cols 400 rows 60",
+    "systemctl is-system-running; echo ISRUNNING-RC=$?",
+    "systemctl --no-pager list-jobs",
+    "systemctl --no-pager list-units --state=activating",
+    "cat /proc/1/wchan",
+    "ps -eo pid,stat,wchan:30,comm | awk 'NR==1||$2~/D/'",
+    "systemctl --no-pager --full status ssh.service systemd-logind.service",
+    "echo PROBE-DONE",
+]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+try:
+    s.connect(sock)
+except OSError as exc:
+    print("      cannot reach the serial socket: %s" % exc)
+    sys.exit(0)
+s.setblocking(False)
+capf = open(cap, "ab")
+
+def pump(sec):
+    end = time.time() + sec
+    while time.time() < end:
+        r, _, _ = select.select([s], [], [], 0.25)
+        if not r:
+            continue
+        try:
+            d = s.recv(65536)
+        except BlockingIOError:
+            continue
+        if not d:
+            break
+        capf.write(d); capf.flush()
+        sys.stdout.write(d.decode("utf-8", "replace")); sys.stdout.flush()
+
+# Everything printed before we connected is in the log and is not replayed, so
+# start with a newline: at a shell prompt that re-prints the prompt, and with no
+# shell yet the commands below simply go nowhere.
+s.sendall(b"\n")
+pump(20)
+for c in CMDS:
+    s.sendall(c.encode() + b"\n")
+    pump(8)
+PY
+}
+
+# guest_says_running -- WP629. The guest's own answer to `is-system-running` is
+# STRONGER evidence than a console line, and it is the same assertion: systemd
+# returns `running` only once every startup job is done and nothing is degraded.
+# A genuinely wedged boot says `starting` or `degraded`, so accepting this cannot
+# paper over a real failure -- and it removes the false red caused by a console
+# that stops carrying systemd's output (measured: the guest answered `running`
+# with half of the log missing a line before `Reached target Multi-User System.`).
+# Fail closed by default: if the probe did not run, or systemd could not answer
+# because PID 1 is itself stuck, there is no evidence and the run stays red.
+guest_says_running() {
+    # The serial is CRLF and carries ANSI codes, so normalise before matching:
+    # without this the state line is 'running\r' and an exact match never fires
+    # (caught by unit-checking this function against the real stalled serial).
+    grep -aq 'ISRUNNING-RC=0' "$SERIAL" 2>/dev/null && return 0
+    sed 's/\x1b\[[0-9;?]*[a-zA-Z]//g' "$SERIAL" 2>/dev/null | tr -d '\r' \
+        | grep -aA1 'systemctl is-system-running' | grep -qxE 'running' && return 0
+    return 1
 }
 boot_once() {   # $1 = attempt number (1-based)
     if [ "$1" != 1 ]; then
@@ -280,6 +419,10 @@ boot_once() {   # $1 = attempt number (1-based)
 # hostfwd port. The very next run then refused to start with "port 2426 is
 # already in use", which is this check earning its place, but the cleanup has to
 # actually clean. stdio is redirected either way, so setsid bought nothing.
+# WP629: the socket path is bound by QEMU (server=on); a leftover socket file
+# from a killed earlier run makes that bind fail with EADDRINUSE, and QEMU then
+# exits with a chardev error rather than anything about the guest.
+rm -f "$SOCK"
 qemu-system-x86_64 "${QOPTS[@]}" >"$QEMU_ERR" 2>&1 &
 QPID=$!
 qpid_alive() { kill -0 "$QPID" 2>/dev/null; }
@@ -327,10 +470,25 @@ wait_marker 'systemd\[1\]|Starting systemd|systemd v2' "$BOOT_TIMEOUT" || {
     echo "systemd never announced itself within ${BOOT_TIMEOUT}s -- this is H1: 'daemon startup hangs'" >&2; return 1; }
 qpid_alive || { tail -30 "$SERIAL"; echo "guest died while systemd was starting" >&2; return 1; }
 
-say "waiting for multi-user.target"
-wait_marker 'Reached target.*Multi-User|Startup finished' "$BOOT_TIMEOUT" || {
+say "waiting for multi-user.target (or ${SILENCE_TIMEOUT}s of console silence)"
+local mrc=0
+wait_multiuser_or_silence || mrc=$?
+if [ "$mrc" -ne 0 ]; then
     diagnose_boot_stall
-    echo "systemd did not reach multi-user.target within ${BOOT_TIMEOUT}s (the pending units above are what it was waiting on -- a login prompt means getty.target, NOT multi-user)" >&2; return 1; }
+    if [ "$mrc" -eq 3 ] && guest_says_running; then
+        say "the console stopped carrying systemd's output, but the GUEST reports"
+        say "'is-system-running = running' with no jobs pending -- the boot "
+        say "completed and only the console line was lost, so the assertion holds."
+        say "(See the in-guest probe above; this is a WITNESS failure, not a stall.)"
+        return 0
+    fi
+    case "$mrc" in
+        2) echo "the guest died while systemd was starting" >&2;;
+        3) echo "the console produced nothing for ${SILENCE_TIMEOUT}s while waiting for multi-user.target, and the guest did NOT report 'running' -- treat as stalled (state above)" >&2;;
+        *) echo "systemd did not reach multi-user.target within ${BOOT_TIMEOUT}s (the pending units above are what it was waiting on -- a login prompt means getty.target, NOT multi-user)" >&2;;
+    esac
+    return 1
+fi
 say "systemd reached multi-user.target"
 }
 
