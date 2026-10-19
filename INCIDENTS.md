@@ -17,7 +17,15 @@
 
   **Date:** Oct 19, 2026
   **Severity:** High (no clean shutdown/poweroff when the root is FUSE; the debian boot gate is red on this alone)
-  **Status:** **OPEN — diagnosed, not fixed.** The boot half of the same gate was a console-witness failure and is fixed (`b0fd2df`); this shutdown half is a real defect and must not be papered over by accepting a kernel-level poweroff in the gate.
+  **Status:** **FIXED (WP630), measured.** The boot half of the same gate was a
+  console-witness failure and is fixed (`b0fd2df`). The shutdown half was a real
+  defect and was not papered over by accepting a kernel-level poweroff in the
+  gate: the gate still requires the guest's own `reboot: Power down`. Fixed by
+  not letting the root daemon survive the shutdown broadcast, and by removing
+  the job-control stop that parked it (see *Fix* below). Local KVM (Debian 13.7
+  guest, root = `invfs[vda] / fuse`): `reboot: Power down` in ~1 s. The CI
+  debian gate is the remaining confirmation — it has not been verdicted since
+  `ae2147c` because the scope gate skips it.
 
   **Symptom.** `systemctl poweroff` in the guest reaches `Reached target
   poweroff.target`, then `systemd-shutdown[1]` prints `Syncing filesystems and
@@ -47,21 +55,56 @@
   entirely inside `systemd-shutdown`'s userspace exit path — it never issues the
   powerdown.
 
-  **Mechanism (supported, not yet proven).** `tools/initramfs-init.sh:197,229-233`
-  starts the guest's root daemon as `invf-fuse -o survive_term,allow_other -f
-  /dev/vda /mnt/invfs`, and `src/cli/fuse_fs.c:95` makes `survive_term`
-  deliberately ignore SIGTERM ("SIGTERM is ignored when set"). systemd's
-  shutdown opens with exactly SIGTERM-then-wait, then SIGKILL. There is therefore
-  no orderly-shutdown path: the process serving the root filesystem is killed
-  before `systemd-shutdown`'s final sync/umount, and the root cannot be released
-  afterwards.
+  **Mechanism (measured, WP630).** Three instruments settled it, and the old
+  guess in this entry — "the daemon ignores SIGTERM, so systemd's TERM wait
+  expires" — was only the *first* layer:
 
-  **Fix direction.** Give the daemon a shutdown participation path for the
-  system-shutdown case — release the mount while the root is still usable (a
-  shutdown signal distinct from the ignored SIGTERM, or a unit ordered into the
-  shutdown transaction) — instead of killing it mid-flight. Do NOT simply drop
-  `survive_term`: `tools/test-sigterm-exit.sh` and the root-storage mark
-  (WP212, `eb9001c`) depend on it.
+  1. A heartbeat written from inside the daemon to a console fd it opened
+     before the volume could be frozen (probe D) stops at `t=20516 ms`, between
+     `systemd-shutdown`'s `Syncing filesystems and block devices.` (20.583) and
+     `Sending SIGTERM to remaining processes...` (20.587), and never resumes:
+     300 s of silence and no `Power down`.
+  2. `sysrq t` shows every thread of the daemon in `do_signal_stop` (state `T`),
+     and every other process trying to cross the FUSE root is parked in
+     `request_wait_answer` — PID 1 caught cold in
+     `do_faccessat -> user_path_at -> filename_lookup -> __lookup_slow ->
+     fuse_lookup`, the guest shell in `do_sys_openat2 ->
+     fuse_dentry_revalidate` (it could not even `exec /bin/true`).
+  3. So the daemon is *stopped*, not busy. The stopper is systemd's own
+     `kill(-1, SIGSTOP)` in `broadcast_signal` (systemd's killall.c), which
+     fences every remaining process before `killall()` so it cannot race a
+     fork. The `@` root-storage mark only makes `killall()` skip the daemon —
+     it does not exempt it from that SIGSTOP. `killall()` then walks `/proc`,
+     and for a FUSE root that walk needs the daemon it just froze, so the paired
+     `kill(-1, SIGCONT)` after `killall()` is never reached. systemd PR #22875
+     ("killall: resume storage daemons") reports the identical FUSE/NBD-root
+     deadlock; it is not in v257. A fresh SIGCONT does wake the daemon (probe 8:
+     manual STOP/CONT, `kill -STOP -1`/`kill -CONT -1`, and two STOPs with one
+     CONT all return it to state `S`), so the permanent stop is the missing
+     CONT, not a kernel quirk. Caching cannot dodge it: the blocking lookup is
+     a cold one and `-o attr_t=3600` still wedges.
+
+  The `@`-mark + `survive_term` disposition (WP212/WP623) is therefore the
+  defect, not the fix: it keeps the daemon alive *and* frozen, which is the one
+  combination that guarantees PID 1 blocks.
+
+  **Fix.** `tools/initramfs-init.sh` mounts the boot root without
+  `-o survive_term`, so the daemon takes the broadcast SIGTERM, unmounts and
+  exits. Its FUSE connection then aborts and every lookup PID 1 makes fails fast
+  with `ENOTCONN` — measured on the same guest as
+  `systemd-shutdown[1]: Failed to open /proc/: Transport endpoint is not
+  connected`, `Failed to parse /proc/self/mountinfo`, then `Unmounting file
+  systems.`, `Syncing filesystems and block devices.` and `reboot: Power down`
+  (~1 s, no wedge). The "only `reboot()` fixes it" property that the old
+  *What it is NOT* section measured on a live guest is what makes this safe: a
+  dead FUSE root fails loudly and promptly instead of hanging. The option
+  itself stays for callers that ask for it — `tools/test-sigterm-exit.sh` leg C
+  pins its semantics — but a boot root must never use it.
+
+  Second, measured layer, fixed in the same change: a job-control stop from the
+  daemon's controlling terminal (`SIGTSTP`/`SIGTTIN`/`SIGTTOU`) parked it for
+  ~90 s of unit-stop timeouts before `systemd-shutdown` even started.
+  `daemon_detach_from_tty()` ignores those three and calls `setsid()`.
 
   **Instrumentation note.** `systemd.log_level=debug` alone shows nothing on the
   guest console: DEBUG is filtered by the kernel console loglevel.

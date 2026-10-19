@@ -136,15 +136,78 @@ static size_t g_tmp_max_bytes = 128 * 1024 * 1024;
  * argv[0] starts with '@' is EXCLUDED from both shutdown kill broadcasts
  * (ignore_proc/argv_has_at in systemd's src/shared/killall.c -- it reads one
  * byte, the first of /proc/PID/cmdline). With the mark, shutdown skips the
- * daemon, unmounts what it can (the busy FUSE root is left mounted, logged
- * and ignored), and powers off with the root still served -- "Power down"
- * lands ~seconds after poweroff.target instead of never. The mark is set
- * ONLY here, next to the SIG_IGN takeback, so non-survive_term mounts keep
- * the plain SIGTERM-unmounts contract byte for byte. */
+ * daemon's kill, and the busy FUSE root is left mounted, logged and ignored.
+ * The mark is set ONLY here, next to the SIG_IGN takeback, so non-survive_term
+ * mounts keep the plain SIGTERM-unmounts contract byte for byte.
+ *
+ * WP630: the paragraph above used to end "...and powers off with the root
+ * still served -- 'Power down' lands ~seconds after poweroff.target instead
+ * of never". Every clause of that is FALSE as measured, and the disposition
+ * it justified is the defect. Measured, local KVM, Debian 13.7 guest:
+ *
+ *  - A heartbeat written from inside this daemon (console fd, WP630 probe D)
+ *    stops at t=20516 ms -- between systemd-shutdown's "Syncing filesystems"
+ *    (20.583) and "Sending SIGTERM to remaining processes..." (20.587) -- and
+ *    never resumes: 300 s of silence, no "Power down". Every thread is in
+ *    do_signal_stop (state T), i.e. the daemon is stopped, not merely busy.
+ *  - The stopper is systemd's own ``kill(-1, SIGSTOP)`` in broadcast_signal
+ *    (src/shared/killall.c in systemd's tree), which fences every remaining
+ *    process so that
+ *    killall() cannot race a fork. The '@' mark above only skips the daemon
+ *    in killall(); it does not exempt it from that SIGSTOP.
+ *  - killall() then walks /proc, and for a FUSE root that walk needs the
+ *    daemon it just froze; PID 1 ends up blocked in the shutdown path with a
+ *    cold fuse_lookup (measured stack: do_faccessat -> user_path_at ->
+ *    filename_lookup -> __lookup_slow -> fuse_lookup -> request_wait_answer),
+ *    so the paired ``kill(-1, SIGCONT)`` that follows killall() is never
+ *    reached and the freeze is permanent. This is not an InvariantFS-only
+ *    trap: systemd PR #22875 ("killall: resume storage daemons") reports the
+ *    same FUSE/NBD-root deadlock and is not in v257.
+ *  - A fresh SIGCONT does wake the daemon (WP630 probe 8: a manual
+ *    STOP/CONT pair, ``kill -STOP -1``/``kill -CONT -1``, and two STOPs
+ *    followed by one CONT all return the daemon to state S), so the permanent
+ *    stop is not a kernel quirk -- it is the missing CONT.
+ *  - Consequence: while the daemon is frozen, ANY path lookup crossing the
+ *    FUSE root blocks forever, for PID 1 and for everyone else (the guest
+ *    shell could not even exec /bin/true). "Just cache the dentries" does not
+ *    help: the blocking lookup is a cold one, and -o attr_t=3600 still wedges.
+ *
+ * The remedy is therefore NOT to survive the broadcast. A boot root must take
+ * the broadcast SIGTERM, unmount and exit: its FUSE connection then aborts and
+ * every lookup PID 1 makes fails fast with ENOTCONN, which is exactly what
+ * shutdown needs. Measured on the same guest with the boot root mounted
+ * without -o survive_term: "Failed to open /proc/: Transport endpoint is not
+ * connected", "Failed to parse /proc/self/mountinfo", then "Unmounting file
+ * systems." and "reboot: Power down" -- 1 s, no wedge. tools/initramfs-init.sh
+ * mounts the boot root that way; this option stays for callers that ask for it
+ * (tools/test-sigterm-exit.sh leg C pins its semantics). Also measured: TSTP/
+ * TTIN/TTOU from the controlling terminal parked the daemon for ~90 s of
+ * unit-stop timeouts, which daemon_detach_from_tty() below removes. */
 static int g_survive_term = 0;
 /* WP623: argv[0] of this process, stashed at main() entry so the daemon can
  * mark itself a systemd root-storage daemon (see g_survive_term). */
 static char *g_argv0 = NULL;
+
+/* WP630: a boot-root daemon must not be stoppable by its controlling
+ * terminal (measurement in the g_survive_term comment above). SIGTTIN,
+ * SIGTTOU and SIGTSTP are ignorable -- only SIGKILL and SIGSTOP are not --
+ * so ignoring them removes the class outright. setsid() is the structural
+ * half: with no controlling terminal the signals cannot be raised at all.
+ * It fails with EPERM when the caller is already a process-group leader,
+ * which is routine for an interactive foreground run and harmless here --
+ * the three ignores are what actually stop the stop, so the failure is
+ * deliberately not logged. */
+static void daemon_detach_from_tty(void)
+{
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = SIG_IGN;
+    sigemptyset(&sa.sa_mask);
+    (void)sigaction(SIGTTIN, &sa, NULL);
+    (void)sigaction(SIGTTOU, &sa, NULL);
+    (void)sigaction(SIGTSTP, &sa, NULL);
+    (void)setsid();
+}
 /* WP59: codec-policy mount gate flags (-o ignore-missing-codecs,
  * -o ignore-codec-versions) */
 static int g_ignore_missing_codecs = 0;
@@ -3870,6 +3933,11 @@ int main(int argc, char *argv[])
         return 0;
     }
 
+    /* WP630: before we can be asked to serve anything, make sure the tty
+     * cannot stop us -- a stopped root daemon wedges the guest's shutdown
+     * (see daemon_detach_from_tty). */
+    daemon_detach_from_tty();
+
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr, "usage: invf-fuse [-f] [-o opt,opt] <image> <mountpoint>\n");
@@ -4194,6 +4262,26 @@ int main(int argc, char *argv[])
                         strerror(errno));
             else
                 fprintf(stderr, "[survive_term] ignoring SIGTERM: this mount "
+                                "is the boot root\n");
+            /* WP630: SIGHUP too, and for a measured reason. systemd-shutdown
+             * calls broadcast_signal(SIGTERM, wait=true, send_sighup=TRUE),
+             * and killall() then sends a SIGHUP of its own to every process
+             * that has a controlling tty (src/shared/killall.c). The @-mark
+             * excludes this process from the KILL broadcasts, not from that
+             * SIGHUP, and fuse_set_signal_handlers() has just installed
+             * libfuse's exit handler on it: SIGHUP => fuse_session_exit() =>
+             * the daemon starts unmounting the root that PID 1 is still using.
+             * Measured with the tty-stop fix in place (so nothing was stopped):
+             * the guest still wedged right after "Sending SIGKILL to remaining
+             * processes..." with the daemon alive. A mount that IS the
+             * operating system must not be unmounted by a hangup -- the kernel
+             * drops it at reboot anyway, which is the same argument that
+             * justifies ignoring TERM above. */
+            if (sigaction(SIGHUP, &sa, NULL) != 0)
+                fprintf(stderr, "[survive_term: cannot ignore SIGHUP: %s]\n",
+                        strerror(errno));
+            else
+                fprintf(stderr, "[survive_term] ignoring SIGHUP: this mount "
                                 "is the boot root\n");
         }
 

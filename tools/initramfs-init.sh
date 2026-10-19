@@ -194,7 +194,8 @@ fi
 
 # ---- mount -----------------------------------------------------------------
 mkdir -p /tmp /mnt/invfs
-# WP212: survive_term, because this mount is the OS.
+# WP212's reason to ignore TERM on this mount is now one of two dispositions,
+# chosen per guest init by the WP630 block below; see it for both measurements.
 #
 # The daemon is backgrounded and the guest's /sbin/init is exec'd below, so
 # the daemon is a process in the GUEST's pid namespace. Void's shutdown runs
@@ -226,12 +227,45 @@ mkdir -p /tmp /mnt/invfs
 # Root may always request allow_other without /etc/fuse.conf, which the
 # initramfs has no reason to carry. INVFS_NO_ALLOW_OTHER=1 exists only so the
 # regression can be demonstrated by turning it back off.
-FUSE_OPTS="survive_term"
-if [ "${INVFS_NO_ALLOW_OTHER:-0}" = 1 ] || has_opt invfs.no_allow_other; then
-    FUSE_OPTS="survive_term"
+# WP630: not mounted with -o survive_term, and the reason is measured.
+# survive_term rewrites argv[0] to '@', which makes systemd's killall() skip
+# the daemon -- but systemd-shutdown's broadcast_signal fences EVERY process
+# with kill(-1, SIGSTOP) before killall() runs, and it does that to the '@'-
+# marked daemon too. killall() then walks /proc, and for a FUSE root that walk
+# needs the daemon it just froze: PID 1 blocks in the shutdown path, the
+# paired kill(-1, SIGCONT) is never reached, and the guest never powers off
+# (measured: no daemon heartbeat for 300 s; systemd PR #22875 is the same
+# deadlock). Without the option the daemon takes the broadcast SIGTERM,
+# unmounts and exits, its FUSE connection aborts, and PID 1's lookups fail
+# fast with ENOTCONN -- measured as "Failed to open /proc/: Transport endpoint
+# is not connected" followed by "reboot: Power down" in ~1 s.
+#
+# WP212 measured the opposite disposition on the other init system: with the
+# daemon gone, Void's runit stage 3 cannot run its own shutdown scripts,
+# because 70-pkill.sh and the sleep/pkill it execs live on this root --
+# ENOTCONN from exec(2) plus a SIGBUS, 2 of 2 runs. So the disposition follows
+# the guest's init: a systemd guest must let the root go at the end, a runit/
+# OpenRC guest must keep serving it. The guest is not asked -- that would need
+# its pid namespace -- it is read offline from the volume, before the daemon
+# starts, with the initramfs rescue tool (read-only, no mount, no daemon).
+#
+# The option itself stays; tools/test-sigterm-exit.sh leg C pins its semantics.
+if invf-cat "$INVFS_RAW" /lib/systemd/systemd >/dev/null 2>&1 ||
+   invf-cat "$INVFS_RAW" /usr/lib/systemd/systemd >/dev/null 2>&1; then
+    SURVIVE_TERM=""
 else
-    FUSE_OPTS="survive_term,allow_other"
+    SURVIVE_TERM="survive_term"
 fi
+if [ "${INVFS_NO_ALLOW_OTHER:-0}" = 1 ] || has_opt invfs.no_allow_other; then
+    ALLOW_OTHER=""
+else
+    ALLOW_OTHER="allow_other"
+fi
+FUSE_OPTS="${SURVIVE_TERM}${SURVIVE_TERM:+${ALLOW_OTHER:+,}}${ALLOW_OTHER}"
+# -o with an empty string is not worth the risk on every libfuse build; a
+# no-op token keeps the invocation shape unchanged (only reachable with
+# INVFS_NO_ALLOW_OTHER=1 on a systemd guest).
+[ -n "$FUSE_OPTS" ] || FUSE_OPTS="rw"
 
 if [ -n "$INVFS_DEV1" ]; then
     INVFS_DEV1="$INVFS_DEV1" invf-fuse -o "$FUSE_OPTS" -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
