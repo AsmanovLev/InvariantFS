@@ -1707,6 +1707,7 @@ static int wrc_eno(int rc)
 {
     if (rc == -2) return -ENOSPC;
     if (rc == -ESTALE) return -ESTALE;
+    if (rc == -EFBIG) return -EFBIG;   /* WP634: the engine names the bound */
     return -EIO;
 }
 
@@ -2129,8 +2130,10 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     if (!vol_write_enabled(g_vol))
         return -EROFS;
     /* WP22a: the 4 GB wall is gone -- the commit writes a v2 recipe header
-     * (u64 file_size) once v1's u32 overflows. MAX_FILE_SIZE (1 TB) remains
-     * as the format sanity bound. */
+     * (u64 file_size) once v1's u32 overflows. MAX_FILE_SIZE is only a
+     * sanity bound (2^48 since WP634); what actually binds a large file is
+     * the 2^24-entry recipe bound (MAX_SEGMENTS_V2) and the recipe stream
+     * cap, both reported as EFBIG through wrc_eno. */
     if ((uint64_t)offset + size > MAX_FILE_SIZE)
         return -EFBIG;
     (void)path;

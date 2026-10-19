@@ -37,8 +37,12 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
 
     if (!blob_out || !blen_out || (n && !ents) || (n_wins && !wins))
         return -1;
-    if (file_size > MAX_FILE_SIZE || n > MAX_SEGMENTS_V2)
+    if (file_size > MAX_FILE_SIZE || n > MAX_SEGMENTS_V2) {
+        fprintf(stderr, "invfs: recipe refused: %u entries (limit %u) for a "
+                "%llu-byte file (limit %llu)\n", n, (unsigned)MAX_SEGMENTS_V2,
+                (unsigned long long)file_size, (unsigned long long)MAX_FILE_SIZE);
         return -1;
+    }
     hlen = invfs_ast_hdr_write(hdr, file_size, n, 0);
     if (!hlen)
         return -1;
@@ -48,8 +52,14 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
         wlen = 8 + (size_t)n_wins * sizeof(*wins);
     }
     total = hlen + (size_t)n * sizeof(*ents) + wlen;
-    if (total > INVFS_RECIPE_STREAM_MAX)
-        return -1;   /* WP-M25: recipe stream capped at 64 MiB */
+    if (total > INVFS_RECIPE_STREAM_MAX) {
+        fprintf(stderr, "invfs: recipe refused: %zu bytes for %u entries "
+                "(file %llu bytes) exceeds the %u-byte recipe stream cap; "
+                "the file is too large or too fragmented for this format\n",
+                total, n, (unsigned long long)file_size,
+                (unsigned)INVFS_RECIPE_STREAM_MAX);
+        return -1;   /* WP-M25: recipe stream cap, INVFS_RECIPE_STREAM_MAX */
+    }
     blob = (uint8_t *)malloc(total ? total : 1);
     if (!blob)
         return -1;

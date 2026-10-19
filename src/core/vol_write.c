@@ -620,8 +620,13 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
 
     if (!s || s->committed || !data) return -1;
     if (len == 0) return 0;
-    if (offset + len > MAX_FILE_SIZE) return -1;   /* format sanity bound;
-            the v1->v2 recipe header choice happens at commit */
+    if (offset + len > MAX_FILE_SIZE) {
+        fprintf(stderr, "invfs: %s: write at offset %llu (+%zu) exceeds the "
+                "%llu-byte format sanity bound (EFBIG)\n",
+                s->name ? s->name : "?", (unsigned long long)offset, len,
+                (unsigned long long)MAX_FILE_SIZE);
+        return -EFBIG;   /* the v1->v2 recipe header choice happens at commit */
+    }
     /* WP85: refuse BEFORE touching the recipe or the segment writer. */
     rc = wsession_stale(s);
     if (rc != 0) return rc;
@@ -630,7 +635,12 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
 
     first = (uint32_t)(offset / SEGMENT_SIZE);
     last  = (uint32_t)((offset + len - 1) / SEGMENT_SIZE);
-    if ((uint64_t)last + 1 > MAX_SEGMENTS_V2) return -1;
+    if ((uint64_t)last + 1 > MAX_SEGMENTS_V2) {
+        fprintf(stderr, "invfs: %s: write to segment %u exceeds the %u-entry "
+                "recipe bound (EFBIG)\n", s->name ? s->name : "?",
+                (unsigned)(last + 1), (unsigned)MAX_SEGMENTS_V2);
+        return -EFBIG;
+    }
 
     /* Atomic ENOSPC precheck, same shape as vol_create_file: every
      * not-yet-materialized segment this call touches (plus any zero-fill
@@ -688,7 +698,12 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
     int rc;
 
     if (!s || s->committed) return -1;
-    if (len > MAX_FILE_SIZE) return -1;
+    if (len > MAX_FILE_SIZE) {
+        fprintf(stderr, "invfs: %s: truncate to %llu exceeds the %llu-byte "
+                "format sanity bound (EFBIG)\n", s->name ? s->name : "?",
+                (unsigned long long)len, (unsigned long long)MAX_FILE_SIZE);
+        return -EFBIG;
+    }
     /* WP85: ftruncate through a handle the rollback retired is the same
      * write as an append -- refuse it the same way. */
     rc = wsession_stale(s);
@@ -697,7 +712,13 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
     if (rc != 0) return rc;
     if (len == s->logical_size) return 0;
     keep = (uint32_t)((len + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
-    if (keep > MAX_SEGMENTS_V2) return -1;
+    if (keep > MAX_SEGMENTS_V2) {
+        fprintf(stderr, "invfs: %s: truncate to %llu needs %u entries, over "
+                "the %u-entry recipe bound (EFBIG)\n",
+                s->name ? s->name : "?", (unsigned long long)len, keep,
+                (unsigned)MAX_SEGMENTS_V2);
+        return -EFBIG;
+    }
 
     if (keep < s->n_ents) {
         /* shrink: drop tail segments. Session-owned pbas are freed;
@@ -809,8 +830,15 @@ static int vol_write_commit_v3(invfs_wsession *s)
     uint32_t i;
     int rc;
 
-    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2)
-        return -1;
+    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2) {
+        fprintf(stderr, "invfs: %s: commit refused: %llu bytes in %u entries "
+                "(bounds: %llu bytes, %u entries) -- the recipe cannot hold "
+                "this file as written; compact it or split it (EFBIG)\n",
+                s->name ? s->name : "?", (unsigned long long)s->logical_size,
+                s->n_ents, (unsigned long long)MAX_FILE_SIZE,
+                (unsigned)MAX_SEGMENTS_V2);
+        return -EFBIG;
+    }
     /* Drop any segment that lives entirely past the logical end, then
      * re-encode an unaligned tail at its exact length -- the same two
      * fixes the v2 commit applies, so entry.length always equals the

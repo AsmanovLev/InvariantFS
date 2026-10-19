@@ -47,16 +47,16 @@ src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/fuse_fs.c:1442:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:1739:SKIP
-src/cli/fuse_fs.c:2075:SKIP
-src/cli/fuse_fs.c:2746:SKIP
-src/cli/fuse_fs.c:2960:SKIP
-src/cli/fuse_fs.c:3015:SKIP
-src/cli/fuse_fs.c:3276:SKIP
-src/cli/fuse_fs.c:3457:SKIP
-src/cli/fuse_fs.c:3529:SKIP
-src/cli/fuse_fs.c:3564:SKIP
-src/cli/fuse_fs.c:3601:SKIP
+src/cli/fuse_fs.c:1740:SKIP
+src/cli/fuse_fs.c:2076:SKIP
+src/cli/fuse_fs.c:2749:SKIP
+src/cli/fuse_fs.c:2963:SKIP
+src/cli/fuse_fs.c:3018:SKIP
+src/cli/fuse_fs.c:3279:SKIP
+src/cli/fuse_fs.c:3460:SKIP
+src/cli/fuse_fs.c:3532:SKIP
+src/cli/fuse_fs.c:3567:SKIP
+src/cli/fuse_fs.c:3604:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2839:SKIP   # list --volume: unreadable manifest skips the pack row
@@ -143,7 +143,7 @@ src/core/vol_sweep.c:602:ACTS
 src/core/vol_sweep.c:622:ACTS
 src/core/vol_sweep.c:655:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:783:SKIP
-src/core/vol_tier.c:304:SKIP
+src/core/vol_tier.c:302:SKIP
 src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
 src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
 src/core/volume.c:1361:SKIP   # shifted by the PERF_PROFILING counters in volume.c

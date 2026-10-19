@@ -175,7 +175,11 @@ static void import_file(const char *spath, const char *vname)
 
     if (lstat(spath, &st) != 0) { skip(spath, SKIP_GONE, strerror(errno)); return; }
     if ((uint64_t)st.st_size > MAX_FILE_SIZE) {
-        skip(spath, SKIP_TOOBIG, "exceeds MAX_FILE_SIZE");
+        char detail[96];
+        snprintf(detail, sizeof detail, "%llu bytes exceeds MAX_FILE_SIZE (%llu)",
+                 (unsigned long long)st.st_size,
+                 (unsigned long long)MAX_FILE_SIZE);
+        skip(spath, SKIP_TOOBIG, detail);
         return;
     }
 

@@ -116,6 +116,47 @@ int main(int argc, char **argv)
            "range read near 16 MiB EOF bit-exact");
     }
 
+    /* 5b (WP634): the size bounds are REPORTED, not a bare -1. Before this,
+     * a write or truncate past MAX_FILE_SIZE and a recipe past the stream
+     * cap all returned -1, which the FUSE layer maps to EIO -- a lie that
+     * says "the device failed" when the truth is "this file does not fit
+     * this format". The engine now returns -EFBIG and names the bound on
+     * stderr. The assertions below pin the ERRNO, not the message: if a
+     * bound moves, this leg must move with it rather than keep passing. */
+    {
+        invfs_wsession *ws = NULL;
+        uint8_t probe[4096];
+        invfs_ast_block_entry e;
+        uint8_t *blob = NULL;
+        size_t blen = 0;
+        uint64_t probe_id;
+
+        memset(probe, 0, sizeof probe);
+        memset(&e, 0, sizeof e);
+
+        ok(vol_ast_recipe_serialize(MAX_FILE_SIZE + 1, NULL, 0,
+                                    &blob, &blen) == -1 && blob == NULL,
+           "a recipe for a file past MAX_FILE_SIZE is refused, with no blob");
+        /* n is past the stream cap. The cap is checked BEFORE the entry
+         * array is read, so a one-entry array is a valid argument here. */
+        blen = 0;
+        ok(vol_ast_recipe_serialize(0, &e,
+               (uint32_t)((INVFS_RECIPE_STREAM_MAX - 8) / sizeof e + 1),
+               &blob, &blen) == -1 && blob == NULL,
+           "a recipe past INVFS_RECIPE_STREAM_MAX is refused, with no blob");
+
+        probe_id = vol_write_begin(v, "limits_probe.bin", 0, &ws);
+        ok(probe_id != 0 && ws != NULL, "begin a session for the limit probe");
+        if (ws) {
+            ok(vol_write_truncate(ws, (uint64_t)MAX_FILE_SIZE + 1) == -EFBIG,
+               "truncate past MAX_FILE_SIZE reports EFBIG");
+            ok(vol_write_range(ws, (uint64_t)MAX_FILE_SIZE - 512, probe,
+                               sizeof probe) == -EFBIG,
+               "write past MAX_FILE_SIZE reports EFBIG");
+            vol_write_abort(ws);
+        }
+    }
+
     /* 6. Close and durable remount */
     vol_close(v);
     {

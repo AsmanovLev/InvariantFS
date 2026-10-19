@@ -231,10 +231,8 @@ static int wp25_owner_write_v3(invfs_volume *v, uint64_t *owner_slot,
         ae[i].block_offset = 0;
         ae[i].pba = ents[i].pba;
     }
-    /* file_size 0, not the cumulative copy length the v2 record header
-     * carries: this blob is an index, not a file, and the v3 recipe header
-     * refuses to serialize past MAX_FILE_SIZE (1 TB) -- which 65535 copies
-     * of the 64 MB per-segment ceiling exceeds. Nothing reads the field
+    /* file_size 0, not the cumulative copy length the record header would
+     * carry: this blob is an index, not a file, and nothing reads the field
      * (the loader walks the entries only). */
     if (vol_ast_recipe_serialize(0, ae, (uint32_t)n, &blob, &blen) != 0) {
         free(ae);

@@ -898,13 +898,16 @@ static inline uint64_t invfs_meta_ext_encode(uint64_t pba, uint8_t size_class) {
  * at pba) plus the entry's logical length for the per-segment codecs, so
  * a torn header degrades to a leak (fsck-reclaimable), never an over-free.
  *
- * block_id is 24 bits: at most 2^24 segments per file. At the 64 KB
- * SEGMENT_SIZE that is exactly 2^24 * 2^16 = 2^40 bytes == MAX_FILE_SIZE,
- * so the bitfield, the v2 recipe header's u32 num_blocks and the file-size
- * sanity bound are mutually consistent -- 64 KB segments never need a
- * wider block_id. (Files that large SHOULD rather use fewer, bigger
- * segments; the format simply allows the 64 KB worst case -- a 1 TB file
- * is a ~384 MB recipe, rec_len is u32 and holds it. See doc/02.)
+ * block_id is 24 bits: at most 2^24 entries per file, whatever their
+ * length. That is 1 TiB at 64 KB segments and 256 TiB at a 16 MiB extent,
+ * so the entry COUNT is the wall a large file meets first. The file_size
+ * sanity bound (MAX_FILE_SIZE, 1 TiB) merely coincides with the 64 KB
+ * case; the segment size does not decide it at all. A 1 TiB file at 64 KB
+ * segments is a 2^24-entry recipe, which is 512 MiB at the 32-byte WP27
+ * stride, and INVFS_RECIPE_STREAM_MAX is what decides whether the store
+ * accepts it. (The v1-era note here claimed a ~384 MB recipe for that
+ * file; 384 MB was the 24-byte entry and has not been the stride since
+ * WP27.)
  *
  * block_id REMAINS the semantic slot id: the owner-WAL key for
  * owner-referenced shapes (a batch member's block_id is its batch_seq,
@@ -975,10 +978,17 @@ typedef struct {
 #define MAX_AST_CHILDREN      65536u   /* max members per container */
 #define MAX_AST_CHILD_NAME    255u
 #define MAX_AST_DEPTH         16u      /* nested containers (zip-in-zip) */
-#define MAX_FILE_SIZE         (1ull << 40)  /* sanity bound for file_size */
+#define MAX_FILE_SIZE         (1ull << 40)  /* sanity bound for file_size.
+                       * NOT the bound that binds a large file:
+                       * MAX_SEGMENTS_V2 caps a file at 2^24 entries (1 TiB
+                       * of 64 KB segments, 256 TiB of 16 MiB extents) and,
+                       * below that, INVFS_RECIPE_STREAM_MAX caps the recipe
+                       * (2.09 M entries = 128 GiB of 64 KB segments). */
 #define MAX_SEGMENTS          0xFFFFu  /* v1: num_blocks fits u16 */
-#define MAX_SEGMENTS_V2       (1u << 24)  /* v2: block_id is 24 bits; at
-                       * 64 KB segments this reaches exactly MAX_FILE_SIZE */
+#define MAX_SEGMENTS_V2       (1u << 24)  /* v2: block_id is 24 bits, so a
+                       * file holds at most 2^24 entries -- 1 TiB of 64 KB
+                       * segments, 256 TiB of 16 MiB extents. This, and not
+                       * MAX_FILE_SIZE, is the entry-count wall. */
 
 /* AST recipe header, v1 (16 bytes) — the original layout. Still what every
  * writer emits for anything that fits (file_size <= 4 GB - 1 and
