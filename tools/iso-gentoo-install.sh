@@ -2,7 +2,8 @@
 # iso-gentoo-install.sh -- stock-Gentoo-minimal-ISO install onto InvariantFS.
 #
 # Same shape as tools/iso-arch-install.sh: the ISO boots PRISTINE
-# (checksum-verified against the pinned hash below) and everything
+# (checksum-verified against the SHA512 upstream publishes for the build it
+# currently points at) and everything
 # InvFS-specific comes from the local server. The automation hook is the
 # Handbook's own unattended-install pair: dosshd + passwd= on the kernel
 # cmdline. The driver then SSHes in (sshpass, throwaway CI-only password)
@@ -17,16 +18,38 @@
 set -u
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK="${WORK:?set WORK to a scratch dir}"
-# Pinned ISO (policy: reproducible inputs; bump with checksum together).
-ISO_VER="20261011T170049Z"
-ISO_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-install-amd64-minimal/install-amd64-minimal-$ISO_VER.iso"
-# Upstream publishes SHA512 in the .DIGESTS file; verified with sha512sum.
-ISO_SHA512="69fe76e75d63d09235f7309c7c1daa7b64b2aa2674a7aab81290a1c03ef78d304635d294ea3f15d641b51ef2313dcee3e343f8243984315bde7f8a862328a3ee  install-amd64-minimal-$ISO_VER.iso"
-# Kernel+initramfs paths INSIDE the ISO (confirmed against 20261011).
+# Inputs are RESOLVED, not pinned. Gentoo republishes current-install-* and
+# current-stage3-* every week, and a pinned DATED filename 404s the moment the
+# build rotates -- measured: 20261011T170049Z disappeared and this job died on
+# a download 404 with no code change behind it. Upstream publishes latest-*.txt
+# for exactly this, and the SHA512 comes from the .DIGESTS that names the same
+# artefact (there is no .iso.sha512; measured 404).
+GENTOO_BASE="https://distfiles.gentoo.org/releases/amd64/autobuilds"
+
+# resolve_latest <latest-txt-url> <ere>: the artefact name upstream currently
+# points at. Prints nothing (rc 1) when the listing cannot be read.
+resolve_latest() {
+    curl -fsSL "$1" 2>/dev/null | tr -d '\r' | grep -Eo "$2" | head -1
+}
+
+# digest_sha512 <digests-url> <exact-name>: the SHA512 line for that artefact.
+# A .DIGESTS file repeats "# SHA512 HASH" once per artefact (the .CONTENTS.gz
+# has its own), so the name must match exactly -- and the line is passed
+# through with its original two-space separator, which sha512sum -c requires.
+digest_sha512() {
+    curl -fsSL "$1" 2>/dev/null | tr -d '\r' \
+        | awk -v want="$2" 'length($1)==128 && $1 ~ /^[0-9a-f]+$/ && $2==want {print; exit}'
+}
+
+# Kernel+initramfs paths INSIDE the ISO. Stable across builds; the copy below
+# fails loudly if they are not there.
 ISO_KERNEL="boot/gentoo"
 ISO_INITRD="boot/gentoo.igz"
-# dracut live root lookup (confirmed: grub.cfg root=live:CDLABEL=...).
-ISO_LABEL="Gentoo-amd64-20261011"
+# dracut live root lookup (confirmed: grub.cfg root=live:CDLABEL=...). READ
+# from the downloaded ISO (see below), never derived from its name: it tracks
+# the build date, and a wrong label means the guest kernel never finds the
+# live root -- which reads as a boot hang, not as a wrong label.
+ISO_LABEL=""
 # Throwaway root password for the dosshd CI guest. Not a credential to
 # anything real; the guest is NATed, short-lived, and destroyed after.
 GUEST_PW="invfs-live-install"
@@ -36,7 +59,6 @@ MEM="${INVFS_ISO_MEM:-8G}"
 TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-100}"
 ACCEL="${INVFS_ACCEL:-auto}"
 
-ISO="$WORK/install-amd64-minimal-$ISO_VER.iso"
 VOL="$WORK/vol.img"
 STAGEDISK="$WORK/stage.img"
 SER="$WORK/serial.log"
@@ -47,6 +69,19 @@ SERVEDIR="$WORK/serve"
 MNT="$WORK/iso-mnt"
 fail() { echo "iso-gentoo-install: FAIL: $*" >&2; exit 1; }
 note() { echo "iso-gentoo-install: $*"; }
+
+# Resolve the current upstream artefacts. Fatal, not best-effort: a harness
+# that silently tested a stale artefact would be worse than one that fails.
+ISO_NAME=$(resolve_latest \
+    "$GENTOO_BASE/current-install-amd64-minimal/latest-install-amd64-minimal.txt" \
+    'install-amd64-minimal-[0-9]{8}T[0-9]{6}Z\.iso') || true
+[ -n "${ISO_NAME:-}" ] || fail "could not resolve the current Gentoo minimal ISO name"
+ISO_VER="${ISO_NAME#install-amd64-minimal-}"; ISO_VER="${ISO_VER%.iso}"
+ISO_URL="$GENTOO_BASE/current-install-amd64-minimal/$ISO_NAME"
+ISO_SHA512=$(digest_sha512 "$ISO_URL.DIGESTS" "$ISO_NAME") || true
+[ -n "${ISO_SHA512:-}" ] || fail "no SHA512 for $ISO_NAME in its .DIGESTS"
+ISO="$WORK/$ISO_NAME"
+note "upstream ISO: $ISO_NAME"
 
 mkdir -p "$WORK" "$SERVEDIR"
 [ -x "$REPO/bin/invf-mkfs" ] || fail "run make first (no $REPO/bin/invf-mkfs)"
@@ -85,6 +120,12 @@ if [ ! -f "$ISO" ]; then
     fetch_verify "$ISO_URL" "$ISO" "$ISO_SHA512" || fail "ISO download failed"
 fi
 ( cd "$WORK" && echo "$ISO_SHA512" | sha512sum -c - ) || fail "ISO checksum mismatch"
+# The label is read from the artefact, not derived from its name: it is what
+# the guest kernel searches for (CDLABEL=...), so a guess turns a label change
+# into "the live root never appeared".
+ISO_LABEL=$(sudo blkid -s LABEL -o value "$ISO" 2>/dev/null || true)
+[ -n "$ISO_LABEL" ] || fail "could not read the ISO volume label (blkid)"
+note "ISO label: $ISO_LABEL"
 note "ISO verified: $(basename "$ISO")"
 
 note "extracting kernel+initramfs from the ISO"
@@ -110,11 +151,27 @@ note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 # Stage3 comes from the host server, not the guest's internet: a guest-side
 # fetch failure is silent-or-cryptic (observed: curl rc=0 with no file,
 # then a bare sha512sum miss), while the host path is loud and shares the
-# already-proven NAT route. Pin mirrors tools/iso-guest-gentoo-setup.sh
-# STAGE3_VER/URL/SHA512 -- bump together (guest re-verifies authoritatively).
-STAGE3_VER="20261011T170049Z"
-STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
-STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac65aef8e28159c6657146a9a07bafd39e127d8b53270262123f2320c6f0c0e68c9d55da648866a4f57c  stage3.tar.xz"
+# already-proven NAT route. Resolved from the same upstream listing as the
+# ISO, and the served guest script is re-pointed at the same artefact below
+# -- otherwise the guest's own authoritative re-verify fails against a hash
+# that rotated under it.
+STAGE3_NAME=$(resolve_latest \
+    "$GENTOO_BASE/current-stage3-amd64-openrc/latest-stage3-amd64-openrc.txt" \
+    'stage3-amd64-openrc-[0-9]{8}T[0-9]{6}Z\.tar\.xz') || true
+[ -n "${STAGE3_NAME:-}" ] || fail "could not resolve the current stage3 name"
+STAGE3_VER="${STAGE3_NAME#stage3-amd64-openrc-}"; STAGE3_VER="${STAGE3_VER%.tar.xz}"
+STAGE3_URL="$GENTOO_BASE/current-stage3-amd64-openrc/$STAGE3_NAME"
+STAGE3_DIGEST=$(digest_sha512 "$STAGE3_URL.DIGESTS" "$STAGE3_NAME") || true
+[ -n "${STAGE3_DIGEST:-}" ] || fail "no SHA512 for $STAGE3_NAME in its .DIGESTS"
+# The host saves it as stage3.tar.xz, so the digest's name half must name the
+# LOCAL file; the guest writes the upstream name and keeps the raw line.
+STAGE3_SHA512="${STAGE3_DIGEST%%  *}  stage3.tar.xz"
+note "upstream stage3: $STAGE3_NAME"
+sed -i \
+    -e "s|^STAGE3_VER=.*|STAGE3_VER=\"$STAGE3_VER\"|" \
+    -e "s|^STAGE3_URL=.*|STAGE3_URL=\"$STAGE3_URL\"|" \
+    -e "s|^STAGE3_SHA512=.*|STAGE3_SHA512=\"$STAGE3_DIGEST\"|" \
+    "$SERVEDIR/iso-guest-gentoo-setup.sh"
 if [ ! -f "$SERVEDIR/stage3.tar.xz" ]; then
     note "downloading stage3 $STAGE3_VER"
     fetch_verify "$STAGE3_URL" "$SERVEDIR/stage3.tar.xz" "$STAGE3_SHA512" || fail "stage3 download failed"
