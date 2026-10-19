@@ -23,9 +23,11 @@
   gate: the gate still requires the guest's own `reboot: Power down`. Fixed by
   not letting the root daemon survive the shutdown broadcast, and by removing
   the job-control stop that parked it (see *Fix* below). Local KVM (Debian 13.7
-  guest, root = `invfs[vda] / fuse`): `reboot: Power down` in ~1 s. The CI
-  debian gate is the remaining confirmation — it has not been verdicted since
-  `ae2147c` because the scope gate skips it.
+  guest, root = `invfs[vda] / fuse`): `reboot: Power down` in ~1 s. **Confirmed
+  by CI**: run 39201404127 on `751eab6` is green in all 17 jobs, including
+  `installation-bootstrap-debian` (the poweroff leg, unverdicted since
+  `ae2147c`) and `installation-bootstrap-void` (the runit disposition, which
+  keeps `survive_term`).
 
   **Symptom.** `systemctl poweroff` in the guest reaches `Reached target
   poweroff.target`, then `systemd-shutdown[1]` prints `Syncing filesystems and
@@ -111,9 +113,10 @@
   `ignore_loglevel` has to accompany it, and that is what produced the evidence
   above.
 
-  **Validation owed.** The poweroff leg of `tools/boot-debian-qemu.sh` must reach
-  `reboot: Power down`, and `tools/test-sigterm-exit.sh` must stay green (its
-  leg C is the `-o survive_term` case).
+  **Validation owed.** None outstanding. The poweroff leg of
+  `tools/boot-debian-qemu.sh` reached `reboot: Power down` (CI run 39201404127,
+  `installation-bootstrap-debian` success) and `tools/test-sigterm-exit.sh`
+  stayed green, leg C included.
 
 ## READER RESOLVED / COLLECTOR SHIPPED; residual risk accepted (reclaimer by WP121, reader by WP-D) — the RT30 fallback root can be reclaimed while still live
 
