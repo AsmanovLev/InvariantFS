@@ -11,7 +11,9 @@
 # v1 scope (the helper declines, exit 3, so the FS stores such images
 # generically): sector size != 512, $ATTRIBUTE_LIST / extension records,
 # named $DATA (ADS) on user files, compressed (LZNT1) or encrypted (EFS)
-# $DATA on user files, images > 4 GiB, corrupt fixups/runlists. Sparse
+# $DATA on user files, images > 1 TiB (WP640: was 4 GiB; the NTRC format
+# is u64 where size matters, the AST block_id wall binds above 1 TiB),
+# corrupt fixups/runlists. Sparse
 # files ARE supported (holes extract as zeros, occupy no disk bytes).
 #
 # The helper is C11, libc only; build:

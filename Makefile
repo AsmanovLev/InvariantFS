@@ -1613,6 +1613,7 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs-big.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-vdi.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-resize.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rollback.sh

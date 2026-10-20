@@ -1427,7 +1427,13 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         }
         v->arc = arc_create(budget);     /* NULL == disabled, callers cope */
         v->arc_budget = (uint64_t)budget;
-        if (getenv("INVFS_DEBUG"))
+        /* WP640-debug-gate: a bare getenv() check treats a set-but-empty
+         * INVFS_DEBUG as ON (getenv returns ""), and these two printfs
+         * go to STDOUT -- so every data-on-stdout tool (invf-cat et al)
+         * silently prefixed its payload with log lines whenever the
+         * variable merely existed in the environment. Gate on a '1' like
+         * the rest of the tree (vol_sweep.c size guard et al). */
+        if (getenv("INVFS_DEBUG") && getenv("INVFS_DEBUG")[0] == '1')
             printf("[vol_open] content cache: %s (%llu bytes)\n",
                    v->arc ? "on" : "off", (unsigned long long)budget);
     }
@@ -1463,7 +1469,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
 #else
         setenv("INVFS_PROFILE", invfs_profile_name(p), 1);
 #endif
-        if (getenv("INVFS_DEBUG")) {
+        if (getenv("INVFS_DEBUG") && getenv("INVFS_DEBUG")[0] == '1') {
             int ga = invfs_profile_generic_algo(p);
             if (ga == INVFS_ALGO_ZSTD)
                 printf("[vol_open] profile: %s (generic zstd level %d)\n",

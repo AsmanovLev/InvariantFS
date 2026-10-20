@@ -48,14 +48,17 @@
  *                           are never members (their non-resident streams
  *                           — $LogFile, $Bitmap, $Secure:$SDS, $BadClus:
  *                           $Bad, $Extend\$UsnJrnl:$J ... — are recipe)
- *   image size              <= 4 GiB (the FS blob format is u32-sized)
+ *   image size              <= 1 TiB (pack gate; engine walls below apply
+ *                           first: dense content caps at the 64 MiB recipe
+ *                           stream cap, sparse content at holes/RMC2, both
+ *                           WP634's beat, not this pack's)
  *   members                 <= 65536 and every idx <= 65535 (FS ABI caps)
  *
  * --------------------------------------------------------------------
  * HONEST DECLINES (exit 3; the FS then stores the image generically)
  * --------------------------------------------------------------------
  *   - bad boot sector (magic/jump), sector size != 512, bad cluster
- *     factor, bad MFT record size, image > 4 GiB, truncated image
+ *     factor, bad MFT record size, image > 1 TiB, truncated image
  *   - fixup (update-sequence-array) mismatch on any IN-USE FILE record
  *   - $MFT described by an $ATTRIBUTE_LIST (multi-record $MFT)
  *   - ANY $ATTRIBUTE_LIST anywhere (attribute extents in other records)
@@ -171,7 +174,16 @@
 #define EXIT_DECLINE 3
 
 #define COPY_BUF_SZ   (4u << 20)     /* streaming window: <= 8 MiB (ABI) */
-#define MAX_IMAGE     (4ull << 30)   /* the FS blob format is u32-sized */
+#define MAX_IMAGE     (1ull << 40)   /* WP640: pack gate at 1 TiB.
+                       * The old 4 GiB read "u32-sized" but the NTRC
+                       * format is already u64 where size matters
+                       * (image_size, orig_off/len, usize, runs); u32
+                       * counts only small domains (idx, nruns, table
+                       * counts). The pack streams (COPY_BUF windows),
+                       * so RAM does not grow with the image. Above 1 TiB
+                       * the AST block_id wall binds (needs WP635/WP639
+                       * wide ids); below it the engine walls bind first
+                       * (recipe stream cap, no holes yet -- WP634). */
 #define MAX_MEMBERS   1048576u       /* FS ABI: CPACK_MAX_MEMBERS */
 #define MAX_IDX       1048575u       /* FS ABI: CPACK_MAX_IDX */
 #define MAX_MAP_ENTS  (4u * MAX_MEMBERS + 4u)   /* FS ABI cap */
