@@ -62,7 +62,7 @@ src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertio
 src/cli/pack.c:2839:SKIP   # list --volume: unreadable manifest skips the pack row
 src/cli/pack.c:2872:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
 src/cli/pack.c:3342:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
-src/cli/lane_release_test.c:242:SKIP
+src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP
 src/cli/ls.c:135:SKIP
 src/cli/read_parallel_bitexact_test.c:427:SKIP
@@ -108,20 +108,20 @@ src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/window_test.c:176:SKIP
 src/core/vol_cpack.c:396:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:2969:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3312:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:2970:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3314:SKIP   # map load: miss declines the load
 src/core/vol_cpack.c:3313:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3409:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3411:SKIP   # map-gen probe: miss means no map (gen 0)
 src/core/vol_cpack.c:3410:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:3654:SKIP   # leftover-sibling check: absent means nothing to purge
-src/core/vol_cpack.c:4150:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:4232:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:4247:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:3655:SKIP   # leftover-sibling check: absent means nothing to purge
+src/core/vol_cpack.c:4151:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:4233:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:4249:SKIP   # nested purge probe: absent/unreadable skips the purge
 src/core/vol_cpack.c:4248:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:4252:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:4273:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:4333:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:4365:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:4253:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:4274:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:4334:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:4366:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
@@ -129,20 +129,20 @@ src/core/vol_read.c:488:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "
 src/core/vol_read.c:503:SKIP
 src/core/vol_read.c:1232:SKIP
 src/core/vol_read.c:1270:ACTS
-src/core/vol_read.c:1481:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1488:SKIP
-src/core/vol_read.c:1679:ACTS
+src/core/vol_read.c:1483:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1490:SKIP
+src/core/vol_read.c:1683:ACTS
 src/core/vol_read.c:881:SKIP
 src/core/vol_read.c:898:SKIP
 src/core/vol_read.c:958:SKIP
 src/core/vol_read.c:1033:SKIP
-src/core/vol_sweep.c:1883:SKIP
-src/core/vol_sweep.c:278:SKIP
-src/core/vol_sweep.c:583:ACTS
-src/core/vol_sweep.c:602:ACTS
-src/core/vol_sweep.c:622:ACTS
-src/core/vol_sweep.c:655:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
-src/core/vol_textzone.c:783:SKIP
+src/core/vol_sweep.c:1886:SKIP
+src/core/vol_sweep.c:279:SKIP
+src/core/vol_sweep.c:584:ACTS
+src/core/vol_sweep.c:603:ACTS
+src/core/vol_sweep.c:623:ACTS
+src/core/vol_sweep.c:656:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:302:SKIP
 src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
 src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)

@@ -192,6 +192,7 @@ static uint64_t seg_pba(invfs_volume *v, const char *name, uint32_t idx)
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 && ents &&
         idx < n_ents)
         pba = ents[idx].pba;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return pba;
 }

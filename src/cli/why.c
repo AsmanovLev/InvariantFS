@@ -233,6 +233,7 @@ int main(int argc, char **argv)
                     }
                 }
             }
+            vol_ast_recipe_parsed_free(&hdr, ents);
             free(blob);
         }
     }

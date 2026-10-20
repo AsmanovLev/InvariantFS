@@ -222,6 +222,7 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
      * serialize without it would drop every window and corrupt the file.
      * Carried verbatim; never interpreted here. */
     if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 0;
     }
@@ -232,12 +233,13 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
      * v1 does not move them -- counted, never half-done. The window
      * interaction (republish + serialize_win) is a filed follow-up. */
     if (n_wins > 0) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 2;
     }
 
     ne = (invfs_ast_block_entry *)malloc(n_ents * sizeof *ne);
-    if (!ne) { free(blob); return 0; }
+    if (!ne) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return 0; }
     memcpy(ne, ents, n_ents * sizeof *ne);
 
     pba_ref_ensure(v);
@@ -531,6 +533,7 @@ static int migrate_file(invfs_volume *v, uint64_t inode_id, const char *name,
 done:
     free(moves);
     free(ne);
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return rc_out;
 }
@@ -572,15 +575,18 @@ static int migrate_recompress_file(invfs_volume *v, uint64_t inode_id,
         return 0;
     }
     if (n_ents != 1) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 2;               /* multi-entry: counted, not half-done */
     }
     if (ents[0].zone == INVFS_ZONE_TEXT ||
         ents[0].algo == INVFS_ALGO_WINDOW_SRC) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 0;
     }
     algo0 = ents[0].algo;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     blob = NULL;
     /* Current generation already? Generations keep gating retries as

@@ -213,6 +213,7 @@ static int cut_probe_run(invfs_volume *v, uint64_t id, const char *name,
      * Cutting a recipe the read path refuses for SHAPE reasons would bless
      * a disagreement as salvage. */
     if (vol_recipe_coherence(name, &in, blob, blen) != INVFS_COH_OK) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return -1;
     }
@@ -225,12 +226,14 @@ static int cut_probe_run(invfs_volume *v, uint64_t id, const char *name,
         p->ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof *p->ents);
         p->spans = (cut_span *)calloc(n_ents, sizeof *p->spans);
         if (!p->ents || !p->spans) {
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             cut_probe_free(p);
             return -1;
         }
         memcpy(p->ents, ents, n_ents * sizeof *p->ents);
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     blob = NULL;
     for (i = 0; i < n_ents; i++) {

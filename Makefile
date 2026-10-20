@@ -269,7 +269,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              lane_release_test pbaref_test v2_open_test \
              sweep_publish_rollback_test \
              rollback_symlink_test \
-             sibling_retire_test tar_cap_test fold_delta_read_test \
+             sibling_retire_test tar_cap_test entry_v3_test fold_delta_read_test \
              tz_reg_collapse_test \
              spn_walk_tear_test \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
@@ -863,6 +863,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
       $(OUT)/invf-keycmp_test $(OUT)/invf-tar_cap_test \
+      $(OUT)/invf-entry_v3_test \
       $(OUT)/invf-lane_release_test \
       $(OUT)/invf-pbaref_test \
       $(OUT)/invf-sweep_publish_rollback_test \
@@ -1238,6 +1239,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(OUT)/invf-cpack_guard_test
 	$(TESTENV) $(OUT)/invf-scratch_policy_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tar_cap_test /tmp
+	$(TESTENV) $(OUT)/invf-entry_v3_test
 
 test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
 # WP201: the two v2-era paths that kept running on Meta. The

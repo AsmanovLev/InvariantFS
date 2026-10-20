@@ -878,6 +878,7 @@ int vol_unlink(invfs_volume *v, const char *name)
                  vol_ast_recipe_parse(probe, probelen, &pah,
                                        &pents, &pnents) == 0 &&
                  pents != NULL);
+            vol_ast_recipe_parsed_free(&pah, pents);
             free(probe);
             if (!presolved) {
                 int rrb = vol_inode_delta_put(v, id, &in);

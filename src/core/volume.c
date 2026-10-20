@@ -2763,6 +2763,7 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
             pba_ref_modify(v, ents[i].pba, +1);
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

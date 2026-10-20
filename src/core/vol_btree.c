@@ -5836,20 +5836,28 @@ int vol_recipe_coherence(const char *name, const invfs_inode *in,
      * clamp". */
     if (ah.file_size != in->size)
         return INVFS_COH_SIZE;
+    /* WP639: converted v3 array dies with the coherence verdict. */
+    /* (freed at each exit below) */
     /* vol_decode_ast_entries: every entry inside the header size, no
      * wraparound, no overlap in entry order. */
     for (i = 0; i < n_ents; i++) {
         uint64_t end = ents[i].file_offset + ents[i].length;
         if (end < ents[i].file_offset ||
-            ents[i].file_offset > ah.file_size || end > ah.file_size)
+            ents[i].file_offset > ah.file_size || end > ah.file_size) {
+            vol_ast_recipe_parsed_free(&ah, ents);
             return INVFS_COH_BOUNDS;
-        if (i > 0 && ents[i].file_offset < prev_end)
+        }
+        if (i > 0 && ents[i].file_offset < prev_end) {
+            vol_ast_recipe_parsed_free(&ah, ents);
             return INVFS_COH_OVERLAP;
+        }
         prev_end = end;
         {
             uint64_t ncov = cov + ents[i].length;
-            if (ncov < cov)
+            if (ncov < cov) {
+                vol_ast_recipe_parsed_free(&ah, ents);
                 return INVFS_COH_COVERAGE;
+            }
             cov = ncov;
         }
     }
@@ -5858,8 +5866,11 @@ int vol_recipe_coherence(const char *name, const invfs_inode *in,
      * with malloc, not calloc), so a short sum is not a short file, it
      * is nondeterministic bytes -- damage, not sparseness (the format has
      * no sparse representation; ranged writes alias, never punch). */
-    if (cov != in->size)
+    if (cov != in->size) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         return INVFS_COH_COVERAGE;
+    }
+    vol_ast_recipe_parsed_free(&ah, ents);
     return INVFS_COH_OK;
 }
 
@@ -5938,6 +5949,7 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
         } else {
             kind = INVFS_RECIPE_BAD_CORRUPT;
         }
+        vol_ast_recipe_parsed_free(&ah, ents);
     } else {
         kind = INVFS_RECIPE_BAD_MISSING;
     }

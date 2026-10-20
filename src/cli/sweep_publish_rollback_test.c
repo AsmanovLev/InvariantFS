@@ -193,6 +193,7 @@ static int named_cb(invfs_volume *v, uint64_t inode_id, const char *name,
                 m->named[(pba + k) / 8] |= (uint8_t)(1u << ((pba + k) % 8));
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }
@@ -273,6 +274,7 @@ static int recipe_pbas(const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
         ents == NULL) { free(blob); return -1; }
     for (i = 0; i < n_ents && *n_out < cap; i++)
         out[(*n_out)++] = ents[i].pba;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

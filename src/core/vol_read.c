@@ -1388,6 +1388,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                 "recipe size %llu\n", (unsigned long long)inode_id,
                 (unsigned long long)in.size,
                 (unsigned long long)ah.file_size);
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return -1;
     }
@@ -1399,7 +1400,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
         fprintf(stderr, "inode %llu: corrupt window table\n",
                 (unsigned long long)inode_id);
-        free(data); free(blob);
+        free(data); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
         return -1;
     }
     /* WP120: the name is resolved by the lanes that need it, not here --
@@ -1411,10 +1412,11 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         rn.inode_id = inode_id;
         if (vol_decode_ast_entries(v, inode_id, &rn, &ah, ents,
                                    wins, n_wins, data) != 0) {
-            free(data); free(blob);
+            free(data); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
             return -1;
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     *out = data;
     *out_len = len;
@@ -1651,6 +1653,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         return -1;
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 ||
         ah.file_size != in.size) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return -1;
     }
@@ -1659,6 +1662,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         uint64_t end = ents[i].file_offset + ents[i].length;
         if (ents[i].file_offset > in.size || end > in.size ||
             end < ents[i].file_offset) {
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             return -1;
         }
@@ -1677,6 +1681,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 char mbn[640];
                 snprintf(mbn, sizeof mbn, "%s!mbrmap", iname);
                 if (vol_find(v, mbn) != 0) {
+                    vol_ast_recipe_parsed_free(&ah, ents);
                     free(blob);
                     return cpack_map_read(v, iname, inode_id, in.size, offset, (uint8_t *)buf, len);
                 }
@@ -1734,6 +1739,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
             if (vol_read_text_slice(v, inode_id, e, lo - seg_lo,
                                     (uint8_t *)buf + (size_t)(lo - offset),
                                     want) != 0) {
+                vol_ast_recipe_parsed_free(&ah, ents);
                 free(blob);
                 return -1;
             }
@@ -1748,6 +1754,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         if (container_no_map || algo_is_whole_file(v, e->algo)) {
             if (!all) {
                 if (vol_read_inode(v, inode_id, 0, &all, &all_len) != 0) {
+                    vol_ast_recipe_parsed_free(&ah, ents);
                     free(blob);
                     return -1;
                 }
@@ -1766,7 +1773,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         /* plain per-segment codec: decode the one segment, copy the window */
         if (e->length > sizeof tmp) {
             segheap = (uint8_t *)malloc((size_t)e->length);
-            if (!segheap) { free(all); free(blob); return -1; }
+            if (!segheap) { free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
             segbuf = segheap;
         }
         {
@@ -1774,14 +1781,14 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
             uint32_t hdr;
             uint8_t *sblob;
             if (pba == 0 || pba >= v->sb.total_blocks) {
-                free(segheap); free(all); free(blob);
+                free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                 return -1;
             }
             heat_touch_read(v, inode_id, e->block_id);
             if (seg_read_checked(v, pba, 0, 1, &hdr, &sblob) != 0) {
                 fprintf(stderr, "segment CRC mismatch: inode %llu seg %u\n",
                         (unsigned long long)inode_id, e->block_id);
-                free(segheap); free(all); free(blob);
+                free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                 return -1;
             }
             if (e->algo == INVFS_ALGO_LZ4) {
@@ -1789,18 +1796,18 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                                             (char *)segbuf, (int)hdr,
                                             (int)e->length);
                 if (d != (int)e->length) {
-                    free(sblob); free(segheap); free(all); free(blob);
+                    free(sblob); free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                     return -1;
                 }
             } else if (e->algo == INVFS_ALGO_ZSTD) {
                 size_t d = ZSTD_decompress(segbuf, e->length, sblob, hdr);
                 if (ZSTD_isError(d) || d != e->length) {
-                    free(sblob); free(segheap); free(all); free(blob);
+                    free(sblob); free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                     return -1;
                 }
             } else if (e->algo == INVFS_ALGO_NONE) {
                 if (hdr != e->length) {
-                    free(sblob); free(segheap); free(all); free(blob);
+                    free(sblob); free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                     return -1;
                 }
                 memcpy(segbuf, sblob, e->length);
@@ -1812,7 +1819,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                         "unexpected algo %u\n",
                         (unsigned long long)inode_id, e->block_id,
                         (unsigned)e->algo);
-                free(sblob); free(segheap); free(all); free(blob);
+                free(sblob); free(segheap); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
                 return -1;
             }
             free(sblob);
@@ -1824,6 +1831,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         got += want;
     }
     free(all);
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     /* The writer materializes zero segments for every gap (vol_write.c:
      * "no unmapped LBA ever exists"), and len was already clamped to

@@ -1413,6 +1413,7 @@ static void fsck_incoherent_note(invfs_volume *v, invfs_fsck_report *rep,
                 nshare++;
             }
         }
+        vol_ast_recipe_parsed_free(&ah, ents);
     }
     free(blob);
     /* Head: the offender and the reason. */
@@ -1501,12 +1502,14 @@ static void fsck_segment_note(invfs_volume *v, invfs_fsck_report *rep,
                                                   ents[i].length),
                              (unsigned long long)in.size,
                              (unsigned long long)ents[i].file_offset);
+                    vol_ast_recipe_parsed_free(&ah, ents);
                     free(blob);
                     fsck_note(rep, b);
                     return;
                 }
             }
         }
+        vol_ast_recipe_parsed_free(&ah, ents);
     }
     free(blob);
     snprintf(b, sizeof b,

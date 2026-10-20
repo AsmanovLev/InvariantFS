@@ -224,7 +224,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
         return -1;
     }
     new_ents = (invfs_ast_block_entry *)malloc(n_ents * sizeof(*new_ents));
-    if (!new_ents) { free(blob); return -1; }
+    if (!new_ents) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
     memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
     if (nm) {
         trk_cur = (uint64_t *)malloc(nm * sizeof *trk_cur);
@@ -258,6 +258,7 @@ static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
             }
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
 
     if (!applied) {
@@ -411,7 +412,7 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
             continue; /* skip giant monolithic blobs from segment dedupe */
         if (csize > ctx->blobcap) {
             uint8_t *nb = (uint8_t *)realloc(ctx->blob, csize);
-            if (!nb) { free(blob); ctx->err = 1; return 1; }
+            if (!nb) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); ctx->err = 1; return 1; }
             ctx->blob = nb;
             ctx->blobcap = csize;
         }
@@ -429,12 +430,13 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
             dedup_seg *ns;
             size_t ncap = ctx->cap * 2;
             ns = (dedup_seg *)realloc(ctx->segs, ncap * sizeof(dedup_seg));
-            if (!ns) { free(blob); ctx->err = 1; return 1; }
+            if (!ns) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); ctx->err = 1; return 1; }
             ctx->segs = ns;
             ctx->cap = ncap;
         }
         dedup_hash_progress(ctx);
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }
@@ -539,6 +541,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
 
                     {
                         if (s->inode != last_inode) {
+                            vol_ast_recipe_parsed_free(&cur_ah, cur_ents);
                             free(cur_blob);
                             cur_blob = NULL;
                             last_inode = s->inode;
@@ -582,7 +585,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                     if (nmi == capmi) {
                         size_t nc = capmi ? capmi * 2 : 256;
                         merge_ent *nm2 = (merge_ent *)realloc(mi, nc * sizeof *nm2);
-                        if (!nm2) { free(cur_blob); free(mi); rc = -1; goto out; }
+                        if (!nm2) { vol_ast_recipe_parsed_free(&cur_ah, cur_ents); free(cur_blob); free(mi); rc = -1; goto out; }
                         mi = nm2;
                         capmi = nc;
                     }
@@ -609,6 +612,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                 next_scan = i + progress_every;
             }
         }
+        vol_ast_recipe_parsed_free(&cur_ah, cur_ents);
         free(cur_blob);
         if (getenv("INVFS_DEBUG"))
             fprintf(stderr, "[dedupe] pass 2: n=%zu, duplicate candidates nmi=%zu\n", n, nmi);

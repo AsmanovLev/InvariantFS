@@ -425,7 +425,7 @@ static int poison_recipe(uint64_t id, uint8_t new_addr[INVFS_RECIPE_ADDR_LEN],
         pbas[n++] = ents[i].pba;
     if (npbas) *npbas = n;
 
-    /* the AST version word: neither V1 nor V2, so invfs_ast_hdr_parse
+    /* the AST version word: neither V1, V2 nor V3, so invfs_ast_hdr_parse
      * refuses and vol_ast_recipe_parse returns -1. Everything else about
      * the blob is untouched, so it still hashes to a valid address and
      * still names the same segments. */

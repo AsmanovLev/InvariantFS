@@ -331,6 +331,7 @@ static void wp25_index_load_v3(invfs_volume *v, uint64_t *owner_slot,
                      ents[i].block_id) != 0)
             break;   /* OOM: a partial index only costs redundancy */
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
 }
 
@@ -691,8 +692,9 @@ static int tier_heat_cb(invfs_volume *v, uint64_t inode_id,
         if (!pba || pba < v->sb.shadow_zone_start ||
             pba >= v->sb.total_blocks)
             continue;   /* only canonical (dev1) shadow segments */
-        if (tier_heat_put(c->m, pba, r) != 0) { free(blob); return -1; }
+        if (tier_heat_put(c->m, pba, r) != 0) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

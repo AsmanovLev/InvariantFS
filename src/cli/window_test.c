@@ -235,6 +235,7 @@ int main(int argc, char **argv)
                "a plain recipe reports no window table");
             ok(wins == NULL && nw == 0, "no windows in a plain recipe");
         }
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
     }
 

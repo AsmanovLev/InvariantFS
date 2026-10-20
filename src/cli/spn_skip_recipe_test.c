@@ -137,6 +137,7 @@ static int recipe_pbas(invfs_volume *v, const char *path, uint64_t *out,
         for (i = 0; i < n && m < max; i++)
             if (ents[i].pba)
                 out[m++] = ents[i].pba;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     *n_out = m;
     return 0;

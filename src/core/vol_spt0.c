@@ -756,8 +756,10 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
                 c->marked++;
             }
             c->broken++;
-            if (spn_dig_push(c, pba, 0, 0) != 0)
+            if (spn_dig_push(c, pba, 0, 0) != 0) {
+                vol_ast_recipe_parsed_free(&ah, ents);
                 return -1;
+            }
             continue;
         }
         {   /* the identity the restore re-checks: [4B csize][4B crc] */
@@ -768,8 +770,10 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
                 memcpy(&csize, hdr, 4);
                 memcpy(&crc, hdr + 4, 4);
             }
-            if (spn_dig_push(c, pba, csize, crc) != 0)
+            if (spn_dig_push(c, pba, csize, crc) != 0) {
+                vol_ast_recipe_parsed_free(&ah, ents);
                 return -1;
+            }
         }
         for (b = pba; b < pba + plen; b++)
             if (!bit_get(c->map, b)) {
@@ -777,6 +781,7 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
                 c->marked++;
             }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }
@@ -1504,6 +1509,7 @@ static int spt0_data_ino(invfs_volume *v, uint64_t inode_id,
                      "WP96 pin, so its segments can only be checked against "
                      "their own headers",
                      (unsigned long long)inode_id, i);
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             return 0;                     /* not a damage verdict: report once */
         }
@@ -1515,17 +1521,20 @@ static int spt0_data_ino(invfs_volume *v, uint64_t inode_id,
                      "not the one that was captured",
                      (unsigned long long)inode_id, i,
                      (unsigned long long)pba);
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             return -1;
         }
         if (spt0_seg_verify(v, pba, want, e, sizeof e) != 0) {
             snprintf(c->err, sizeof c->err, "inode %llu segment %zu: %s",
                      (unsigned long long)inode_id, i, e);
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             return -1;
         }
         c->segments++;
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

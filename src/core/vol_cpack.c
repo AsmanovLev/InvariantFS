@@ -2940,6 +2940,7 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
     if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
         pba = ents[0].pba;
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(rblob);
     if (!pba || pba >= v->sb.total_blocks) return -1;
     if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)

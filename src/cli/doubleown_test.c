@@ -287,6 +287,7 @@ int main(int argc, char **argv)
             if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nn) == 0 &&
                 ents && nn > 0)
                 pba0 = ents[0].pba;
+            vol_ast_recipe_parsed_free(&ah, ents);
         }
         ok(vol_recipe_store(g_v, blob, blen, addr) == 0,
            "leg D: blob re-stored");
@@ -338,6 +339,7 @@ int main(int argc, char **argv)
         mod = (invfs_ast_block_entry *)malloc(nn * sizeof *mod);
         ok(mod != NULL, "leg E: scratch for the modified recipe");
         if (!mod) {
+            vol_ast_recipe_parsed_free(&ah, ents);
             free(blob);
             printf("  out of memory\n");
             return 2;
@@ -352,6 +354,7 @@ int main(int argc, char **argv)
                                     &nblob, &nblen) == 0,
            "leg E: short-coverage recipe serializes");
         free(mod);
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         if (!nblob) {
             printf("  serialize failed\n");

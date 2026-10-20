@@ -1765,6 +1765,17 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
                          const invfs_ast_block_entry **ents_out,
                          size_t *nents_out);
+/* WP639: v3 parse heap-converts entries (see vol_ast.c ownership note).
+ * Static inline (not a .c symbol) so partial links that compile subsets
+ * of the core (cpack_map_conc_*: vol_cpack.c + a parse stub, no vol_ast.o)
+ * keep resolving it: the only dependency is free(). No-op for v1/v2,
+ * NULL hdr, or NULL ents. */
+static inline void vol_ast_recipe_parsed_free(const invfs_ast_hdr *hdr,
+                                const invfs_ast_block_entry *ents)
+{
+    if (hdr && ents && hdr->version == INVFS_AST_VERSION_V3)
+        free((void *)ents);
+}
 /* WP303: row/recipe coherence (vol_btree.c). The read path's own
  * predicates over a loaded+parsed blob: the row's size must equal the
  * recipe header's file_size (vol_read_inode refuses anything else), every

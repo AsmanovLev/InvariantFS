@@ -121,6 +121,7 @@ static uint64_t entry_pba(uint64_t id, size_t idx, size_t *n_out)
         if (n_out)
             *n_out = n;
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return pba;
 }

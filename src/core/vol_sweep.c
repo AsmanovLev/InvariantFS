@@ -232,6 +232,7 @@ int vol_inode_first_zone(invfs_volume *v, uint64_t inode_id)
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
         n_ents > 0)
         zone = ents[0].zone;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return zone;
 }
@@ -1379,6 +1380,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         /* a RAW inode whose segments have not been written yet (a sibling
          * re-created by this same sweep, e.g. a decomposition migration):
          * nothing stored, nothing to sweep -- not an error */
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 0;
     }
@@ -1414,7 +1416,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         pba_map_t *pmap = (pba_map_t *)calloc(map_cap, sizeof(*pmap));
 
         if (!new_ents || !pmap) {
-            free(blob); free(new_ents); free(pmap);
+            vol_ast_recipe_parsed_free(&ah, ents); free(blob); free(new_ents); free(pmap);
             return -1;
         }
         memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
@@ -1431,7 +1433,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
         sweep_task_t *tasks = (sweep_task_t *)calloc(SWEEP_BATCH_SIZE, sizeof(*tasks));
         if (!tasks) {
-            free(blob); free(new_ents); free(pmap);
+            vol_ast_recipe_parsed_free(&ah, ents); free(blob); free(new_ents); free(pmap);
             return -1;
         }
 
@@ -1600,7 +1602,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
         free(tasks);
         free(pmap);
-        free(blob);
+        vol_ast_recipe_parsed_free(&ah, ents); free(blob);
 
         if (any_swept) {
             uint8_t *new_blob = NULL;
@@ -1738,6 +1740,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
         return any_swept ? 1 : 0;
     }
 
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
 
     {
@@ -2365,6 +2368,7 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
             }
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

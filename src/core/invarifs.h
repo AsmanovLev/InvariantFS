@@ -923,6 +923,52 @@ typedef struct {
     uint64_t pba;                   /* physical block address (WP27) */
 } invfs_ast_block_entry;            /* 32 bytes */
 
+/* WP639 — recipe entry v3 (40 bytes, on-disk). The 32-bit entry word is
+ * full (zone:2 + algo:6 + block_id:24), with no free bits to steal, so a
+ * wider entry is a new stride, not a wider bitfield. Packing math (kept):
+ * 40 % 8 == 0, so every u64 field stays 8-byte aligned with no pragma and
+ * no unaligned access; page/chunk waste is 16 B per 4 KiB (0.4%) and 32 B
+ * per 3072-chunk (~1%) — noise against the +25% recipe bytes (40/32),
+ * which is the real price. 64 B packs exactly but costs +60% over 40 B
+ * for zero functional difference; a 48-bit block_id is dead weight (the
+ * recipe-size wall binds orders of magnitude before the count wall).
+ *
+ * The on-disk image is assembled ARITHMETICALLY (shifts/masks in the
+ * pack helper below), never by memcping this struct — so the v3 image
+ * does not depend on toolchain bitfield layout, unlike the v1/v2 memcpy
+ * discipline it replaces. The in-memory struct keeps its bitfield shape
+ * for debugger/lane convenience, but nothing serializes it directly.
+ *
+ * Layout (little-endian, 40 bytes):
+ *   [0:8]   file_offset | [8:16] length
+ *   [16:24] flags u64: zone:6 | algo:10 | block_id:32 | rsv:16 (=0)
+ *   [24:28] block_offset | [28:32] crc32c | [32:40] pba
+ * crc32c = invfs_crc32c over the 40-byte image with the crc field read
+ * as zero (the PCK0/RDP0 rule) — construction-path defense in depth:
+ * storage rot is already covered by the blob BLAKE3 + record CRC32C +
+ * frame CRCs; the per-entry CRC closes the session-memory-to-blob
+ * window (compute at pack, verify at parse AND at serialize).
+ * rsv MUST be zero; parse asserts it (free uninitialized-memory/garbage
+ * detector, zero bytes cost). */
+typedef struct {
+    uint64_t file_offset;           /* offset in original file */
+    uint64_t length;                /* length of range */
+    uint64_t zone : 6;              /* 0=raw 1=text 2=binary, 64 values */
+    uint64_t algo : 10;             /* codec id, 1024 values (today to 41) */
+    uint64_t block_id : 32;         /* segment index / owner map key */
+    uint64_t rsv : 16;              /* MUST be zero */
+    uint32_t block_offset;          /* offset within the decoded batch */
+    uint32_t crc32c;                /* over image with this field zero */
+    uint64_t pba;                   /* physical block address */
+} invfs_ast_block_entry_v3;         /* 40 bytes */
+
+/* Lock both strides: silent padding drift would desync every recipe.
+ * (C11, file scope, no linkage — safe in a widely-included header.) */
+_Static_assert(sizeof(invfs_ast_block_entry) == 32,
+                "v1/v2 recipe entry stride moved");
+_Static_assert(sizeof(invfs_ast_block_entry_v3) == 40,
+                "v3 recipe entry stride moved");
+
 /* ADR-010 amendment 2 -- the window table.
  *
  * A recipe blob is [header][num_blocks x 32 B entries][window table]. The
@@ -1020,10 +1066,25 @@ typedef struct {
 
 #define INVFS_AST_VERSION_V1  1u
 #define INVFS_AST_VERSION_V2  2u
+#define INVFS_AST_VERSION_V3  3u
 #define INVFS_AST_HDR_V1_LEN  16u
 #define INVFS_AST_HDR_V2_LEN  24u
+#define INVFS_AST_HDR_V3_LEN  24u
 
-/* Version-agnostic parsed view of either header. hdr_len is where the
+/* Entry stride by recipe version. v1/v2 headers both lead 32 B entries
+ * (the 24 B v1 entry lives only in retired v2 volumes, via invf-convert);
+ * v3 headers lead 40 B entries. 0 = unknown version (refuse). */
+static inline size_t invfs_ast_entry_stride(uint32_t version)
+{
+    if (version == INVFS_AST_VERSION_V1 ||
+        version == INVFS_AST_VERSION_V2)
+        return 32;
+    if (version == INVFS_AST_VERSION_V3)
+        return 40;
+    return 0;
+}
+
+/* Version-agnostic parsed view of any header version. hdr_len is where the
  * block entries begin (16 or 24); every consumer of the recipe MUST take
  * the entries offset from here -- a fixed 16 is the v1-only assumption
  * WP22a removed from every site. */
@@ -1082,6 +1143,27 @@ static inline int invfs_ast_hdr_parse(const void *buf, size_t avail,
             return -1;
         return 0;
     }
+    if (ver == INVFS_AST_VERSION_V3) {
+        uint64_t fs;
+        uint32_t nb, nc, ck;
+        if (avail < INVFS_AST_HDR_V3_LEN) return -1;
+        memcpy(&fs, p + 4, 8);
+        memcpy(&nb, p + 12, 4);
+        memcpy(&nc, p + 16, 4);
+        memcpy(&ck, p + 20, 4);
+        out->version      = ver;
+        out->file_size    = fs;
+        out->num_blocks   = nb;
+        out->num_children = nc;
+        out->checksum     = ck;
+        out->hdr_len      = INVFS_AST_HDR_V3_LEN;
+        /* WP639: same count caps as v2 for now (fail closed). Wider
+         * counts arrive with the stream-cap raise, never before it. */
+        if (out->file_size > MAX_FILE_SIZE ||
+            out->num_blocks > MAX_SEGMENTS_V2)
+            return -1;
+        return 0;
+    }
     return -1;
 }
 
@@ -1116,6 +1198,39 @@ static inline size_t invfs_ast_hdr_write(void *buf, uint64_t file_size,
         h.num_children = (uint16_t)num_children;
         memcpy(buf, &h, sizeof h);
         return INVFS_AST_HDR_V1_LEN;
+    }
+}
+
+/* AST recipe header, v3 (24 bytes, same length as v2). Same field widths
+ * as v2; only the version differs — the ENTRY stride is what v3 changes
+ * (40 B, see invfs_ast_block_entry_v3). Written only by the v3 serialize
+ * path (WP639: force-knob until a producer needs wide fields); readers
+ * branch on version via invfs_ast_entry_stride. Values past the format
+ * caps return 0 (refuse, never fold). */
+typedef struct {
+    uint32_t version;               /* 3 */
+    uint64_t file_size;
+    uint32_t num_blocks;
+    uint32_t num_children;
+    uint32_t checksum;              /* reserved: 0 (same rule as v1/v2) */
+} invfs_ast_recipe_header_v3;       /* 24 bytes */
+
+/* Serialize a v3 header. buf must hold INVFS_AST_HDR_V3_LEN bytes. */
+static inline size_t invfs_ast_hdr_write_v3(void *buf, uint64_t file_size,
+                                            uint32_t num_blocks,
+                                            uint32_t num_children)
+{
+    if (file_size > MAX_FILE_SIZE || num_blocks > MAX_SEGMENTS_V2)
+        return 0;
+    {
+        invfs_ast_recipe_header_v3 h;
+        memset(&h, 0, sizeof h);
+        h.version      = INVFS_AST_VERSION_V3;
+        h.file_size    = file_size;
+        h.num_blocks   = num_blocks;
+        h.num_children = num_children;
+        memcpy(buf, &h, sizeof h);
+        return INVFS_AST_HDR_V3_LEN;
     }
 }
 
@@ -1431,6 +1546,85 @@ static inline uint32_t pck0_crc(const invfs_pck0 *p)
     invfs_pck0 t = *p;
     t.crc32c = 0;
     return invfs_crc32c(&t, sizeof t);
+}
+
+/* WP639 — v3 entry pack/unpack/verify. The image is assembled
+ * arithmetically (shifts/masks + memcpy of LE scalars), so the on-disk
+ * bytes do not depend on toolchain bitfield layout. CRC32C covers the
+ * 40-byte image with the crc field read as zero (RDP0 rule).
+ *
+ * Field offsets: [0:8] file_offset, [8:16] length, [16:24] flags
+ * (zone:6 | algo:10<<6 | block_id:32<<16, rsv MUST be 0),
+ * [24:28] block_offset, [28:32] crc32c, [32:40] pba. */
+static inline void invfs_ast_entry_v3_pack(uint8_t out[40],
+                                           uint64_t file_offset,
+                                           uint64_t length,
+                                           uint64_t zone, uint64_t algo,
+                                           uint64_t block_id,
+                                           uint32_t block_offset,
+                                           uint64_t pba)
+{
+    uint64_t flags = (zone & 0x3Fu) | ((algo & 0x3FFu) << 6) |
+                     ((block_id & 0xFFFFFFFFu) << 16);
+    uint32_t zero = 0;
+    uint32_t crc;
+    memcpy(out + 0, &file_offset, 8);
+    memcpy(out + 8, &length, 8);
+    memcpy(out + 16, &flags, 8);
+    memcpy(out + 24, &block_offset, 4);
+    memcpy(out + 28, &zero, 4);
+    memcpy(out + 32, &pba, 8);
+    crc = invfs_crc32c(out, 40);
+    memcpy(out + 28, &crc, 4);
+}
+
+/* Verify a v3 entry image in place. 0 = ok; -1 = CRC mismatch, nonzero
+ * reserved bits, or truncation. Wide values are NOT range-checked here —
+ * that is the unpack step's job (fail closed at representation). */
+static inline int invfs_ast_entry_v3_verify(const uint8_t *img, size_t avail)
+{
+    uint64_t flags;
+    uint32_t want, got;
+    uint8_t tmp[40];
+    if (!img || avail < 40) return -1;
+    memcpy(&want, img + 28, 4);
+    memcpy(tmp, img, 40);
+    memset(tmp + 28, 0, 4);
+    got = invfs_crc32c(tmp, 40);
+    if (got != want) return -1;
+    memcpy(&flags, img + 16, 8);
+    if (flags >> 48) return -1;     /* rsv MUST be zero */
+    return 0;
+}
+
+/* Unpack a VERIFIED v3 entry into the 32 B in-memory shape. Values that do
+ * not fit the in-memory widths (zone > 3, algo > 63, block_id > 2^24-1)
+ * are refused loudly — in-memory widening arrives with the stream-cap
+ * raise, never before it. 0 = ok, -1 = unrepresentable (fail closed). */
+static inline int invfs_ast_entry_v3_unpack(const uint8_t *img,
+                                            invfs_ast_block_entry *out)
+{
+    uint64_t file_offset, length, flags, pba;
+    uint64_t zone, algo, block_id;
+    uint32_t block_offset;
+    if (!img || !out) return -1;
+    memcpy(&file_offset, img + 0, 8);
+    memcpy(&length, img + 8, 8);
+    memcpy(&flags, img + 16, 8);
+    memcpy(&block_offset, img + 24, 4);
+    memcpy(&pba, img + 32, 8);
+    zone = flags & 0x3Fu;
+    algo = (flags >> 6) & 0x3FFu;
+    block_id = (flags >> 16) & 0xFFFFFFFFu;
+    if (zone > 3 || algo > 63 || block_id > 0xFFFFFFu) return -1;
+    out->file_offset = file_offset;
+    out->length = length;
+    out->zone = (uint32_t)zone;
+    out->algo = (uint32_t)algo;
+    out->block_id = (uint32_t)block_id;
+    out->block_offset = block_offset;
+    out->pba = pba;
+    return 0;
 }
 
 #endif /* INVARIFS_H */

@@ -637,6 +637,7 @@ static int tz_old_recipe_single_entry(invfs_volume *v,
         if (++nvis > 1)
             break;
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return nvis <= 1;
 }
@@ -1021,12 +1022,13 @@ static int tz_gc(invfs_volume *v)
                 if (n_live == cap_live) {
                     size_t nc = cap_live ? cap_live * 2 : 64;
                     uint64_t *nl = (uint64_t *)realloc(live, nc * sizeof *nl);
-                    if (!nl) { free(blob); free(ids); free(live); free(reg.ents); return -1; }
+                    if (!nl) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); free(ids); free(live); free(reg.ents); return -1; }
                     live = nl; cap_live = nc;
                 }
                 live[n_live++] = ents[j].pba;
             }
         }
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
     }
     free(ids);

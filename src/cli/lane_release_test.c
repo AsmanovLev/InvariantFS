@@ -171,6 +171,7 @@ static int recipe_pbas(const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
         ents == NULL) { free(blob); return -1; }
     for (i = 0; i < n_ents && *n_out < cap; i++)
         out[(*n_out)++] = ents[i].pba;
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }

@@ -148,6 +148,7 @@ static int heat_dump(invfs_volume *v, const char *name)
                    (unsigned long long)phys);
         }
         printf("entries=%zu\n", n_ents);
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 0;
     }

@@ -522,6 +522,7 @@ static int wsession_load_old_v3(invfs_wsession *s)
         return -1;
     }
     if (ah.file_size != in.size) {
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return -1;        /* row/blob disagreement: corruption */
     }
@@ -542,12 +543,13 @@ static int wsession_load_old_v3(invfs_wsession *s)
     s->old_n_ents = (uint32_t)nents;
     if (nents) {
         s->old_pbas = (uint64_t *)malloc(nents * sizeof(uint64_t));
-        if (!s->old_pbas) { free(blob); return -1; }
+        if (!s->old_pbas) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
         for (i = 0; i < nents; i++)
             s->old_pbas[i] = (ents[i].zone == INVFS_ZONE_TEXT)
                            ? 0 : ents[i].pba;
     }
     if (s->truncating) {   /* content dropped; commit frees the old pbas */
+        vol_ast_recipe_parsed_free(&ah, ents);
         free(blob);
         return 0;
     }
@@ -559,7 +561,7 @@ static int wsession_load_old_v3(invfs_wsession *s)
         s->ents = (invfs_ast_block_entry *)malloc(s->cap_ents * sizeof(*s->ents));
         s->touched_cap = (uint32_t)nents;
         s->touched = (uint8_t *)calloc(s->touched_cap, 1);
-        if (!s->ents || !s->touched) { free(blob); return -1; }
+        if (!s->ents || !s->touched) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
         memcpy(s->ents, ents, nents * sizeof(*s->ents));
         if (wsession_simple_old(&ah, s->ents)) {
             s->aliased_n = (uint32_t)nents;
@@ -574,7 +576,7 @@ static int wsession_load_old_v3(invfs_wsession *s)
             uint32_t nseg = (uint32_t)((s->old_size + SEGMENT_SIZE - 1) /
                                        SEGMENT_SIZE);
             uint8_t *plain = malloc(SEGMENT_SIZE);
-            if (!plain) { free(blob); return -1; }
+            if (!plain) { vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
             fprintf(stderr, "[wsession] %s: write to swept/container file: "
                     "materializing %u segment(s) to RAW\n", s->name, nseg);
             s->n_ents = 0;
@@ -587,13 +589,14 @@ static int wsession_load_old_v3(invfs_wsession *s)
                 int got, rc;
                 memset(plain, 0, SEGMENT_SIZE);
                 got = vol_read_range(s->v, s->old_id, off, want, plain);
-                if (got != (int)want) { free(plain); free(blob); return -1; }
+                if (got != (int)want) { free(plain); vol_ast_recipe_parsed_free(&ah, ents); free(blob); return -1; }
                 rc = wsession_write_seg(s, i, plain);
-                if (rc != 0) { free(plain); free(blob); return rc; }
+                if (rc != 0) { free(plain); vol_ast_recipe_parsed_free(&ah, ents); free(blob); return rc; }
             }
             free(plain);
         }
     }
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
     return 0;
 }
