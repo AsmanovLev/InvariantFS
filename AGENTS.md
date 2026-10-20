@@ -455,10 +455,16 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > windowless.
 
 `INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above, and it does
-**not** switch the pending drain on. The drain — and only the drain, never
-`transform`, never dedupe, never re-encode, never a savepoint — is what the
-sweep thread's 1 Hz tick does on every tick
-(`src/cli/fuse_fs.c:2510`, the drain at `:2556-2566`). The variable gates how
+**not** switch the pending drain on. The drain -- pending delta-group
+commits plus `vol_tz_flush` -- runs on every 1 Hz tick, AND the same
+tick also runs a full per-file sweep (`vol_sweep_pending` calls
+`vol_sweep_one` per pending inode: lanes + generic floor + stamps).
+Transform and re-encoding therefore DO happen in-daemon as files land
+(measured: a 16 GiB FUSE-written file was already GENERIC-stamped
+before its first offline sweep, which then correctly skipped it as
+already swept). What the tick genuinely never does is dedupe passes
+and savepoint captures (`src/cli/fuse_fs.c:2510`, the drain at
+`:2556-2566`; `vol_sweep.c:1944`, the pending drain). The variable gates how
 often the thread re-evaluates the *handle-open deferral* around it
 (`:2522-2554`): at `N` it checks every Nth tick, and with the default (unset,
 so `N == 0`) it never checks at all, which means the drain runs even while a
