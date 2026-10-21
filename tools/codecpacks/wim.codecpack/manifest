@@ -1,0 +1,80 @@
+# wim codecpack (WP637): Windows Imaging Format -> one VERBATIM member per
+# resource.
+#
+# Decomposes `sources/install.wim` (the bulk of every Windows install ISO)
+# and wimlib's solid `.esd` into one member per RESOURCE, holding the bytes
+# exactly as they lie in the file -- compressed resource bodies included,
+# never decoded. The recipe (strip) is the WIR1 blob: WIM size + the member
+# (idx,off,len) table + every byte OUTSIDE the member extents, verbatim (the
+# 208-byte header, the offset/resource table, the XML data when it is not
+# itself a resource, every gap with its junk, trailing junk). Bit-exactness
+# is by construction: nothing is ever re-encoded, so no MS/wimlib encoder is
+# needed or trusted. The map command makes the pack SEEKABLE (WP16b MRMP;
+# one MEMBER range per resource extent, RECIPE ranges for the rest).
+#
+# WHY THIS IS A CONTAINERPACK AND NOT A CODEC. install.wim is entropy-coded
+# (LZX/XPRESS per resource, LZMS in a solid .esd) and Microsoft's encoder is
+# closed while wimlib's stream differs ("usually outperforms and outcompresses
+# their closed-source Microsoft equivalents", wimlib.net/compression.html), so
+# a bit-exact rebuild by re-encoding is unachievable. Keeping each resource as
+# its own content-addressed member is what buys POSITION INDEPENDENCE: a size
+# change in one file shifts every later resource's offset in the WIM, which is
+# why segment-aligned dedupe finds ~nothing across two Windows versions; a
+# member at its own address is the same bytes at the same address wherever the
+# encoder put it.
+#
+# Solid/LZMS: resources that ALIAS one solid block have overlapping extents,
+# and the helper unions overlapping extents into ONE member, so a solid WIM
+# gets one verbatim member per solid chunk -- no decomposition inside solid
+# compression, still bit-exact, still dedupable at chunk granularity.
+#
+# The helper is a single C11 binary (wim.c), libc only, streaming in <= 8 MiB
+# windows (a WIM resource can be gigabytes; no command ever holds one in RAM).
+# argv0 is the pack-dir-relative "bin/wim": the FS resolves a relative argv0
+# containing '/' against the pack dir both at probe and at exec time (a BARE
+# "wim" probes OK via <pack>/bin/ but the exec layer resolves $INVFS_TOOLS ->
+# /usr/lib/invfs/tools -> PATH instead, so the pack would never fire).
+# See wim.c for the full format doc and the refuse list.
+# algo 26: builtins own 0..15, WINDOW_SRC 24, NBLI 25, packs 4/13/16-23,
+# tests 40/41 (src/core/invarifs.h) -- 26 is the next free id.
+name = wim
+type = container
+algo = 26
+codec_id = 26
+pack_version = 1
+version = 1
+min_read = 1
+generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
+caps = container|external
+dec_mem = 0
+# "MSWIM\0\0\0" at offset 0. The helper's strict header parse is the real
+# gate: a magic-only match declines with exit 3.
+sniff.offset = 0
+sniff.magic = 4D5357494D000000
+sniff.ext = wim,esd
+enumerate = bin/wim enumerate {in} {out}
+extract = bin/wim extract {in} {idx} {out}
+# WP140: the whole member set in ONE header parse. install.wim carries ~10^5
+# resources; the per-member path re-reads and re-parses the offset table on
+# every call, which is O(n^2). This command parses once and writes
+# "<dir>/<idx>" for every member the enumerate table names -- the same
+# stream_copy over the same (off,len) extents, so the bytes are bit-identical
+# to the per-member path by construction. Optional: a pack without this key is
+# still extracted one member per exec, as before.
+batch = bin/wim extract_batch {in} {dir} {out}
+strip = bin/wim strip {in} {out}
+rebuild = bin/wim rebuild {recipe} {dir} {out}
+map = bin/wim map {in} {out}
+# Opt into the FS-owned decomposition generation. This pack renders a v1
+# (MRMP) map today, so the stamp is a no-op -- but a pack that emits v2
+# without this key gets a map header whose generation is whatever the pack
+# happened to write, and a later generation bump re-decomposes nothing.
+decomp_gen = 1
+# estimate = sum(member bytes) + 64 MiB (header-derived, never a trial run)
+estimate = bin/wim estimate {in}

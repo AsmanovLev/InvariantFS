@@ -1644,6 +1644,11 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-p7z.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-qcow2-zlib.sh
+# WP637: the wim container pack. Offline image suite (pack CLI + mkfs/import/
+# sweep/fsck), no FUSE, no root, no loop device; its corpus leg grades a REAL
+# Microsoft boot.wim out of an ISO when the host has one and skips loudly when
+# it does not -- which is how it found that the lane declined every real WIM.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-wim.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
 # tools/test-sweepboot.sh was written in the WP23 era and never put in
 # a target or a workflow, so it counted as coverage and ran nowhere.

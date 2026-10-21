@@ -106,3 +106,15 @@ xfs          fork    -           -
 # WP of its own; until then the two generation numbers MUST NOT be made to
 # agree, which is why they are excepted here instead of "fixed".
 qcow2        independent  generation,pack_version  QCOW2_DECOMP_GEN
+
+# --- wim: engine-ORIGINATED, the registry has no copy at all. --------------
+# WP637 vendored this pack here first; the registry was seeded from this tree
+# (see PROVENANCE above) and has never carried wim, so layers B and C have
+# nothing to compare and layer A only checks that the manifest generation
+# agrees with the source (it carries no GEN macro: the pack is verbatim, it
+# re-encodes nothing, so there is no decomposition generation to bump).
+# Its one real bug so far is recorded where the format is: wim.c's header
+# comment, 56/8/56 -- the lane declined every real WIM until WP637 fixed the
+# resource-header parse, and the fixtures had been written from the same
+# misreading, which is why no sync check could ever have caught it.
+wim          independent  -           -
