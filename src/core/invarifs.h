@@ -117,6 +117,17 @@
  * no blocks) and carries src_inode_id; the rest of the descriptor lives in a
  * trailing window table addressed by block_id. See invfs_ast_window_entry. */
 #define INVFS_ALGO_WINDOW_SRC 24
+/* WP635: a recipe entry that is a REFERENCE to a child recipe, not a payload.
+ * The child is a recipe blob stored through the same content-addressed path as
+ * every other recipe (0x04 || BLAKE3), so a child whose bytes repeat is shared
+ * by content. The entry names no data block: pba is 0, block_id indexes the
+ * trailing CHLD table (see invfs_ast_child_ref), and file_offset/length are the
+ * span the child covers. A reference entry exists so a multi-TB dense file is
+ * ONE recipe of at most MAX_SEGMENTS_V2 references (2^24 x 4 GiB = 64 PiB at
+ * the default INVFS_CHILD_SEGS) instead of 2^24 segment entries per recipe.
+ * 27 was the first free id (builtins 0..15, packs 16..23, WINDOW_SRC 24, NBLI
+ * 25, holes reserved 26, tests 40/41). */
+#define INVFS_ALGO_CHILD 27
 
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
@@ -986,6 +997,44 @@ _Static_assert(sizeof(invfs_ast_block_entry_v3) == 40,
  * path already replays). 2/3 are reserved for zstd/lz4 and refused. */
 #define INVFS_AST_WINDOW_MAGIC "WINW"
 
+/* WP635 -- the child table.
+ *
+ * A recipe blob is [header][num_blocks x 32 B entries][trailing section].
+ * Like the window table it is a NEW trailing section, so every recipe written
+ * before the change parses unchanged (it simply has zero trailing bytes) and
+ * an old reader that meets one sees a reference entry with pba == 0 and
+ * refuses loudly instead of misreading. No header version bump.
+ *
+ *   [4B "CHLD"][u32 count] count x 32B BLAKE3 child address
+ *
+ * A child IS a recipe blob: same header, same entries, and its entries carry
+ * ABSOLUTE file_offset, so the reader binary-searches inside a child directly
+ * and no base is ever added. Its header file_size is the byte offset just past
+ * its own coverage (a self-consistent prefix recipe), which keeps every entry
+ * bounds-check valid against the child's own header; the top recipe's
+ * file_size is the authority on how long the FILE is.
+ *
+ * Span: INVFS_CHILD_SEGS segments per child. 2^16 = 4 GiB of coverage and a
+ * 2 MiB child blob (24 + 2^16*32, RMC1-chunked: 683 chunks of 3072 B). The
+ * session only ever holds ONE open child, which is what bounds writer RAM
+ * independently of file size.
+ */
+#define INVFS_AST_CHILD_MAGIC "CHLD"
+/* 2^16 segments = 4 GiB of coverage per child. Smaller = more top entries and
+ * more btree keys, but cheaper rewrite granularity on a small write into an
+ * already-flushed child; larger = fewer keys, bigger rewrite unit. The mount
+ * knob (-o child_segs=N) and INVFS_CHILD_SEGS exist so the e2e legs can force
+ * several children with a small file. */
+#define INVFS_CHILD_SEGS_DEFAULT 65536u
+/* A child blob is 24 + n*32 bytes and must fit the recipe stream cap, which
+ * bounds n at 2,097,150; 2^21 leaves headroom and keeps the session's window
+ * (32 B entry + 1 B touched per segment) at 66 MiB worst case. */
+#define INVFS_CHILD_SEGS_MAX (1u << 21)
+/* One level of references is what the format and the lifecycle (free/retire/
+ * pin) implement. A child carrying a CHLD table of its own is refused. */
+#define INVFS_AST_CHILD_DEPTH_MAX 1u
+
+
 typedef struct {
     uint64_t src_off;      /* byte offset in the source inode */
     uint64_t src_len;      /* exact source byte length (a whole cluster) */
@@ -997,6 +1046,22 @@ typedef struct {
     int8_t   window_bits;  /* -12 for a qcow2 cluster */
     uint8_t  reserved[3];
 } invfs_ast_window_entry;
+
+/* WP635: one CHLD-table slot. The stride is INVFS_RECIPE_ADDR_LEN (32) bytes,
+ * spelled out here because that macro is defined further down the header (in
+ * the WP-M8 recipe-blob section); the _Static_assert below ties the two. */
+typedef struct {
+    uint8_t addr[32];                      /* BLAKE3-256 of the child blob */
+} invfs_ast_child_ref;                     /* 32 bytes */
+
+/* Version-agnostic view of a recipe blob's trailing section. At most one is
+ * present: a recipe is either container windows or a child table, never both. */
+typedef struct {
+    const invfs_ast_window_entry *wins;    /* NULL when absent */
+    uint32_t n_wins;
+    const uint8_t *chld;                   /* n_chld x 32 B, NULL when absent */
+    uint32_t n_chld;
+} invfs_ast_tail;
 
 /* The format-v1 entry (24B, no pba): physical addresses lived only in the
  * L2P journal, keyed (inode, block_id). Read now only by invf-convert,
@@ -1024,12 +1089,17 @@ typedef struct {
 #define MAX_AST_CHILDREN      65536u   /* max members per container */
 #define MAX_AST_CHILD_NAME    255u
 #define MAX_AST_DEPTH         16u      /* nested containers (zip-in-zip) */
-#define MAX_FILE_SIZE         (1ull << 40)  /* sanity bound for file_size.
-                       * NOT the bound that binds a large file:
-                       * MAX_SEGMENTS_V2 caps a file at 2^24 entries (1 TiB
-                       * of 64 KB segments, 256 TiB of 16 MiB extents) and,
-                       * below that, INVFS_RECIPE_STREAM_MAX caps the recipe
-                       * (2.09 M entries = 128 GiB of 64 KB segments). */
+#define MAX_FILE_SIZE         (1ull << 48)  /* sanity bound for file_size: 256 TiB.
+                       * WP635 moved this from 2^40 (1 TiB) because the recipe
+                       * TREE is what makes it true: a top recipe holds at most
+                       * MAX_SEGMENTS_V2 references, each covering
+                       * INVFS_CHILD_SEGS segments, so the format's own entry
+                       * wall no longer lands inside the address space of the
+                       * file. 64 PiB (2^24 children x 4 GiB) is the tree's
+                       * ceiling, well past this check, which is why the two
+                       * are not the same number. A FLAT recipe (every file that
+                       * fits one child) still meets MAX_SEGMENTS_V2 and
+                       * INVFS_RECIPE_STREAM_MAX directly. */
 #define MAX_SEGMENTS          0xFFFFu  /* v1: num_blocks fits u16 */
 #define MAX_SEGMENTS_V2       (1u << 24)  /* v2: block_id is 24 bits, so a
                        * file holds at most 2^24 entries -- 1 TiB of 64 KB
@@ -1361,6 +1431,10 @@ typedef struct invfs_meta_ext_hdr {
 #define INVFS_INODE_ROW_VERSION 2u
 #define INVFS_INODE_XATTR_MAX   4096u
 #define INVFS_RECIPE_ADDR_LEN   32u
+/* WP635: the CHLD table's stride, declared next to invfs_ast_window_entry,
+ * must stay exactly one content address. */
+_Static_assert(sizeof(invfs_ast_child_ref) == INVFS_RECIPE_ADDR_LEN,
+               "a CHLD slot is one recipe address");
 /* WP-M8: a recipe blob must fit one base page (4096 B). Header 20 +
  * key record (2+33) + value record (2+n) must fit with split headroom;
  * 3800 B is ~7.7 MiB of file at 64 KiB segments. Larger recipes need a

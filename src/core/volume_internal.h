@@ -1750,6 +1750,28 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
                                  const invfs_ast_window_entry *wins,
                                  uint32_t n_wins,
                                  uint8_t **blob_out, size_t *blen_out);
+/* WP635: the same serializer for a recipe carrying a CHLD table (a reference
+ * recipe), and a tail scanner that reports whichever trailing section the blob
+ * has. `wins` and `chld` are mutually exclusive; serialize_win and
+ * serialize_tree are thin wrappers so no caller can pass both. */
+int vol_ast_recipe_serialize_tail(uint64_t file_size,
+                                  const invfs_ast_block_entry *ents, uint32_t n,
+                                  const invfs_ast_window_entry *wins,
+                                  uint32_t n_wins,
+                                  const invfs_ast_child_ref *chld,
+                                  uint32_t n_chld,
+                                  uint8_t **blob_out, size_t *blen_out);
+int vol_ast_recipe_serialize_tree(uint64_t file_size,
+                                  const invfs_ast_block_entry *ents, uint32_t n,
+                                  const invfs_ast_child_ref *chld,
+                                  uint32_t n_chld,
+                                  uint8_t **blob_out, size_t *blen_out);
+int vol_ast_recipe_tail(const uint8_t *blob, size_t blen,
+                        const invfs_ast_hdr *hdr,
+                        invfs_ast_tail *out);
+int vol_ast_recipe_children(const uint8_t *blob, size_t blen,
+                            const invfs_ast_hdr *hdr,
+                            const uint8_t **chld_out, uint32_t *n_out);
 int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
                            const invfs_ast_hdr *hdr,
                            const invfs_ast_window_entry **wins_out,

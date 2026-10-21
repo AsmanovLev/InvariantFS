@@ -31,6 +31,36 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
                                  uint32_t n_wins,
                                  uint8_t **blob_out, size_t *blen_out)
 {
+    return vol_ast_recipe_serialize_tail(file_size, ents, n, wins, n_wins,
+                                         NULL, 0, blob_out, blen_out);
+}
+
+/* WP635: the same serializer for a recipe carrying a CHLD table. Kept a
+ * separate entry point so no caller can pass windows and children at once --
+ * the two tails are mutually exclusive by shape, not by caller discipline. */
+int vol_ast_recipe_serialize_tree(uint64_t file_size,
+                                  const invfs_ast_block_entry *ents, uint32_t n,
+                                  const invfs_ast_child_ref *chld,
+                                  uint32_t n_chld,
+                                  uint8_t **blob_out, size_t *blen_out)
+{
+    return vol_ast_recipe_serialize_tail(file_size, ents, n, NULL, 0, chld,
+                                         n_chld, blob_out, blen_out);
+}
+
+/* WP635: the one serializer both tail forms go through. `wins` and `chld` are
+ * mutually exclusive (a recipe is container windows OR a child table); passing
+ * neither is the flat blob every pre-WP635 volume holds, byte for byte. The
+ * child table is BLAKE3 addresses of child recipes, appended exactly like the
+ * window table so an old reader refuses (pba == 0) rather than misreads. */
+int vol_ast_recipe_serialize_tail(uint64_t file_size,
+                                  const invfs_ast_block_entry *ents, uint32_t n,
+                                  const invfs_ast_window_entry *wins,
+                                  uint32_t n_wins,
+                                  const invfs_ast_child_ref *chld,
+                                  uint32_t n_chld,
+                                  uint8_t **blob_out, size_t *blen_out)
+{
     uint8_t hdr[INVFS_AST_HDR_V3_LEN];
     size_t hlen, total, wlen = 0;
     uint8_t *blob;
@@ -45,8 +75,11 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
     if (f3 && f3[0] == '1' && f3[1] == '\0')
         force_v3 = 1;
 
-    if (!blob_out || !blen_out || (n && !ents) || (n_wins && !wins))
+    if (!blob_out || !blen_out || (n && !ents) || (n_wins && !wins) ||
+        (n_chld && !chld))
         return -1;
+    if (n_wins && n_chld)
+        return -1;   /* one trailing section, never two */
     if (file_size > MAX_FILE_SIZE || n > MAX_SEGMENTS_V2) {
         fprintf(stderr, "invfs: recipe refused: %u entries (limit %u) for a "
                 "%llu-byte file (limit %llu)\n", n, (unsigned)MAX_SEGMENTS_V2,
@@ -65,6 +98,10 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
         if (n_wins > MAX_SEGMENTS_V2)
             return -1;
         wlen = 8 + (size_t)n_wins * sizeof(*wins);
+    } else if (n_chld) {
+        if (n_chld > MAX_SEGMENTS_V2)
+            return -1;
+        wlen = 8 + (size_t)n_chld * sizeof(*chld);
     }
     total = hlen + (size_t)n * esz + wlen;
     if (total > INVFS_RECIPE_STREAM_MAX) {
@@ -102,44 +139,101 @@ int vol_ast_recipe_serialize_win(uint64_t file_size,
         memcpy(w, INVFS_AST_WINDOW_MAGIC, 4);
         memcpy(w + 4, &n_wins, 4);
         memcpy(w + 8, wins, (size_t)n_wins * sizeof(*wins));
+    } else if (n_chld) {
+        uint8_t *w = blob + hlen + (size_t)n * esz;
+        memcpy(w, INVFS_AST_CHILD_MAGIC, 4);
+        memcpy(w + 4, &n_chld, 4);
+        memcpy(w + 8, chld, (size_t)n_chld * sizeof(*chld));
     }
     *blob_out = blob;
     *blen_out = total;
     return 0;
 }
 
-/* Locate the trailing window table, if any. Returns 0 and sets *wins_out to
- * NULL / *n_out to 0 for every pre-ADR-010 recipe (their blob ends exactly
- * after the last entry), so the read path pays one length compare. -1 = the
- * section is present but malformed, which must fail the read loudly rather
- * than silently serve zeros. */
-int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
-                           const invfs_ast_hdr *hdr,
-                           const invfs_ast_window_entry **wins_out,
-                           uint32_t *n_out)
+/* Locate the trailing section, whichever form it takes. 0 and an all-NULL/
+ * all-zero view for every recipe written before either section existed (their
+ * blob ends exactly after the last entry), so the read path pays one length
+ * compare. -1 = the section is present but malformed, which must fail the read
+ * loudly rather than silently serve zeros. */
+int vol_ast_recipe_tail(const uint8_t *blob, size_t blen,
+                        const invfs_ast_hdr *hdr,
+                        invfs_ast_tail *out)
 {
     size_t used;
+    uint32_t nsec = 0;
     size_t stride = invfs_ast_entry_stride(hdr->version);
-    uint32_t nw = 0;
 
-    *wins_out = NULL;
-    *n_out = 0;
+    if (!out)
+        return -1;
+    memset(out, 0, sizeof *out);
     if (!blob || !hdr || !stride || blen < hdr->hdr_len)
         return -1;
     used = hdr->hdr_len + (size_t)hdr->num_blocks * stride;
     if (used > blen)
         return -1;                 /* the entries themselves are truncated */
     if (used == blen)
-        return 0;                  /* no window section: the v1 shape */
-    if (blen - used < 8 || memcmp(blob + used, INVFS_AST_WINDOW_MAGIC, 4) != 0)
-        return -1;                 /* trailing bytes we do not understand */
-    memcpy(&nw, blob + used + 4, 4);
-    if (nw == 0 || (size_t)nw > MAX_SEGMENTS_V2)
+        return 0;                  /* no trailing section: the v1 shape */
+    if (blen - used < 8)
         return -1;
-    if (blen - used - 8 != (size_t)nw * sizeof(invfs_ast_window_entry))
-        return -1;                 /* count/size disagree */
-    *wins_out = (const invfs_ast_window_entry *)(blob + used + 8);
-    *n_out = nw;
+    if (memcmp(blob + used, INVFS_AST_WINDOW_MAGIC, 4) == 0) {
+        memcpy(&nsec, blob + used + 4, 4);
+        if (nsec == 0 || (size_t)nsec > MAX_SEGMENTS_V2)
+            return -1;
+        if (blen - used - 8 != (size_t)nsec * sizeof(invfs_ast_window_entry))
+            return -1;             /* count/size disagree */
+        out->wins = (const invfs_ast_window_entry *)(blob + used + 8);
+        out->n_wins = nsec;
+        return 0;
+    }
+    if (memcmp(blob + used, INVFS_AST_CHILD_MAGIC, 4) == 0) {
+        memcpy(&nsec, blob + used + 4, 4);
+        if (nsec == 0 || (size_t)nsec > MAX_SEGMENTS_V2)
+            return -1;
+        if (blen - used - 8 != (size_t)nsec * sizeof(invfs_ast_child_ref))
+            return -1;             /* count/size disagree */
+        out->chld = blob + used + 8;
+        out->n_chld = nsec;
+        return 0;
+    }
+    return -1;                     /* trailing bytes we do not understand */
+}
+
+/* Locate the trailing window table, if any. A recipe carrying a CHLD table is
+ * NOT a window recipe: refuse it here rather than hand back "no windows" to a
+ * caller that would then walk reference entries as if they were payloads. */
+int vol_ast_recipe_windows(const uint8_t *blob, size_t blen,
+                           const invfs_ast_hdr *hdr,
+                           const invfs_ast_window_entry **wins_out,
+                           uint32_t *n_out)
+{
+    invfs_ast_tail t;
+
+    *wins_out = NULL;
+    *n_out = 0;
+    if (vol_ast_recipe_tail(blob, blen, hdr, &t) != 0)
+        return -1;
+    if (t.n_chld != 0)
+        return -1;
+    *wins_out = t.wins;
+    *n_out = t.n_wins;
+    return 0;
+}
+
+/* WP635: the CHLD table, if any. Same discipline as the twin above. */
+int vol_ast_recipe_children(const uint8_t *blob, size_t blen,
+                            const invfs_ast_hdr *hdr,
+                            const uint8_t **chld_out, uint32_t *n_out)
+{
+    invfs_ast_tail t;
+
+    if (!chld_out || !n_out)
+        return -1;
+    *chld_out = NULL;
+    *n_out = 0;
+    if (vol_ast_recipe_tail(blob, blen, hdr, &t) != 0)
+        return -1;
+    *chld_out = t.chld;
+    *n_out = t.n_chld;
     return 0;
 }
 
@@ -203,6 +297,90 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
     return 0;
 }
 
+/* WP635: free what ONE parsed level names. Split out of
+ * vol_free_recipe_blocks so the child recursion runs the identical loop over a
+ * child's entries -- one implementation, so a reference level cannot diverge
+ * from the flat one (TEXT-batch skip, pba sharing, extent resume).
+ * `depth` bounds the recursion; `*bad_out` is set when a child could not be
+ * loaded or parsed, which must reach the caller rather than be swallowed. */
+static void free_recipe_level(invfs_volume *v,
+                              const uint8_t *chld, uint32_t n_chld,
+                              const invfs_ast_block_entry *ents, size_t n_ents,
+                              uint64_t keep_pba, unsigned depth, int *bad_out)
+{
+    size_t i, k;
+
+    for (i = 0; i < n_ents; i++) {
+        uint64_t pba = ents[i].pba;
+        int dup = 0;
+
+        /* WP635: a reference entry owns no data block. Its child is a
+         * separate recipe blob (a btree value behind 0x04||BLAKE3, retired
+         * with the top one), and the blocks the child names are freed here
+         * or nowhere: no walker can reach them from the top otherwise. */
+        if (ents[i].algo == INVFS_ALGO_CHILD) {
+            uint8_t *cblob = NULL;
+            size_t cblen = 0;
+            invfs_ast_hdr cah;
+            const invfs_ast_block_entry *cents = NULL;
+            size_t cn = 0;
+            const uint8_t *caddr;
+
+            if (depth + 1 > INVFS_AST_CHILD_DEPTH_MAX || !chld ||
+                ents[i].block_id >= n_chld) {
+                *bad_out = 1;
+                continue;
+            }
+            caddr = chld + (size_t)ents[i].block_id *
+                    sizeof(invfs_ast_child_ref);
+            if (vol_recipe_load(v, caddr, &cblob, &cblen) != 0 || !cblob) {
+                fprintf(stderr, "invfs: free: child recipe %u of a %zu-entry "
+                        "recipe does not resolve; blocks stay allocated\n",
+                        (unsigned)ents[i].block_id, n_ents);
+                *bad_out = 1;
+                continue;
+            }
+            if (vol_ast_recipe_parse(cblob, cblen, &cah, &cents, &cn) != 0 ||
+                !cents) {
+                fprintf(stderr, "invfs: free: child recipe %u does not "
+                        "parse; blocks stay allocated\n",
+                        (unsigned)ents[i].block_id);
+                free(cblob);
+                *bad_out = 1;
+                continue;
+            }
+            free_recipe_level(v, NULL, 0, cents, cn, keep_pba, depth + 1,
+                              bad_out);
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
+            continue;
+        }
+        if (!pba || pba == keep_pba)
+            continue;
+        /* WP78: a zone==TEXT entry names a SHARED batch segment owned
+         * by the batch registry -- dropping this member's reference
+         * must not free it; tz_gc reclaims it when no live member
+         * names it any more. */
+        if (ents[i].zone == INVFS_ZONE_TEXT)
+            continue;
+        for (k = 0; k < i; k++) {
+            if (ents[k].pba == pba) {
+                dup = 1;
+                break;
+            }
+        }
+        if (!dup) {
+            uint64_t plen = 0;
+            pba_ref_ensure(v);
+            pba_ref_modify(v, pba, -1);
+            if (pba_ref_count(v, pba) == 0) {
+                if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
+                    vol_free_blocks(v, pba, plen);
+            }
+        }
+    }
+}
+
 /* vol_ast_recipe_parsed_free lives in volume_internal.h (static inline:
  * partial core links such as cpack_map_conc_* resolve it without vol_ast.o). */
 
@@ -216,7 +394,13 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
  * implementation diverged" is the shape this whole lane keeps hitting. A
  * caller that trusts the return believes the space is back, deletes the
  * row, and leaves every block the recipe named allocated, referenced by
- * nothing and reachable by no name. */
+ * nothing and reachable by no name.
+ *
+ * WP635: a recipe may be a TREE. One level of child recipes is recursed here,
+ * because the reference entries name no blocks (pba == 0) and nothing else
+ * walks from the top to the children's data. A child that will not load or
+ * parse is reported as -1 like an unparseable top: the caller then knows the
+ * space is NOT back rather than being told it is. */
 int vol_free_recipe_blocks(invfs_volume *v,
                              const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN],
                              uint64_t keep_pba)
@@ -227,8 +411,9 @@ int vol_free_recipe_blocks(invfs_volume *v,
     invfs_ast_hdr ah;
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
-    size_t i, k;
-    int parsed;
+    const uint8_t *chld = NULL;
+    uint32_t n_chld = 0;
+    int parsed, bad = 0;
 
     if (!v || !recipe_addr)
         return -1;
@@ -238,37 +423,17 @@ int vol_free_recipe_blocks(invfs_volume *v,
         return -1;
     parsed = (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) == 0 &&
               ents != NULL);
-    if (parsed) {
-        for (i = 0; i < n_ents; i++) {
-            uint64_t pba = ents[i].pba;
-            int dup = 0;
-            if (!pba || pba == keep_pba)
-                continue;
-            /* WP78: a zone==TEXT entry names a SHARED batch segment owned
-             * by the batch registry -- dropping this member's reference
-             * must not free it; tz_gc reclaims it when no live member
-             * names it any more. */
-            if (ents[i].zone == INVFS_ZONE_TEXT)
-                continue;
-            for (k = 0; k < i; k++) {
-                if (ents[k].pba == pba) {
-                    dup = 1;
-                    break;
-                }
-            }
-            if (!dup) {
-                uint64_t plen = 0;
-                pba_ref_ensure(v);
-                pba_ref_modify(v, pba, -1);
-                if (pba_ref_count(v, pba) == 0) {
-                    if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
-                        vol_free_blocks(v, pba, plen);
-                }
-            }
-        }
-    }
+    /* A malformed trailing section is a recipe this build cannot account for;
+     * freeing part of it and calling it done is the exact shape the WP201 note
+     * above is about, so it is a failure here too. */
+    if (parsed &&
+        vol_ast_recipe_children(blob, blen, &ah, &chld, &n_chld) != 0)
+        parsed = 0;
+    if (parsed)
+        free_recipe_level(v, chld, n_chld, ents, n_ents, keep_pba, 0, &bad);
+    vol_ast_recipe_parsed_free(&ah, ents);
     free(blob);
-    return parsed ? 0 : -1;
+    return (parsed && !bad) ? 0 : -1;
 }
 
 
