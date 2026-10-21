@@ -266,7 +266,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              nlink_test recipe_fsck_test doubleown_test contentcut_test cpack_guard_test orphan_test rt_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test seal_test \
              fsck_liveness_test scratch_policy_test v2rb_rollback_test keycmp_test \
-             lane_release_test pbaref_test v2_open_test recipe_tree_test \
+             lane_release_test pbaref_test v2_open_test recipe_tree_test chld_producer_test \
              sweep_publish_rollback_test \
              rollback_symlink_test \
              sibling_retire_test tar_cap_test entry_v3_test fold_delta_read_test \
@@ -858,7 +858,7 @@ TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_tes
       $(OUT)/invf-cpack_map_conc_tsan $(OUT)/invf-cpack_map_conc_asan \
       $(OUT)/invf-cpack_map_conc_test \
       $(OUT)/invf-deflate_repro_test $(OUT)/invf-plugin_host_test $(OUT)/invf-plugin_mt_test \
-      $(OUT)/invf-window_test $(OUT)/invf-nlink_test $(OUT)/invf-recipe_tree_test \
+      $(OUT)/invf-window_test $(OUT)/invf-nlink_test $(OUT)/invf-recipe_tree_test $(OUT)/invf-chld_producer_test \
       $(OUT)/invf-recipe_fsck_test $(OUT)/invf-doubleown_test $(OUT)/invf-contentcut_test $(OUT)/invf-fsck_liveness_test \
       $(OUT)/invf-cpack_guard_test $(OUT)/invf-orphan_test \
       $(OUT)/invf-scratch_policy_test $(OUT)/invf-v2rb_rollback_test \
@@ -1239,6 +1239,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(OUT)/invf-dedupe_symlink_test $(UNIT_SCRATCH)
 	$(TESTENV) $(TESTISO) $(OUT)/invf-window_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_tree_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-chld_producer_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-nlink_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-recipe_fsck_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-doubleown_test /tmp

@@ -30,6 +30,13 @@ struct invfs_wsession {
     int      dirty;          /* any write/truncate landed */
     uint64_t *old_pbas;      /* WP-M8 v3: pbas owned by the old recipe */
     uint32_t old_n_ents;     /* WP-M8 v3: old entry count */
+    /* WP660: CHLD producer tree state */
+    uint32_t child_segs;     /* span in segments per child (default INVFS_CHILD_SEGS_DEFAULT) */
+    uint32_t cur_child;      /* child index currently held in ents (0..) */
+    invfs_ast_block_entry *top_ents;
+    uint32_t n_top_ents, cap_top_ents;
+    invfs_ast_child_ref *chld;
+    uint32_t n_chld, cap_chld;
     invfs_wsession *next;    /* v->wsessions link (live sessions) */
 };
 
@@ -60,6 +67,17 @@ int vol_write_active_id(invfs_volume *v, uint64_t inode_id)
     return 0;
 }
 
+
+static uint32_t wsession_child_segs(void)
+{
+    const char *e = getenv("INVFS_CHILD_SEGS");
+    if (e && *e) {
+        unsigned long v = strtoul(e, NULL, 10);
+        if (v >= 1 && v <= INVFS_CHILD_SEGS_MAX)
+            return (uint32_t)v;
+    }
+    return INVFS_CHILD_SEGS_DEFAULT;
+}
 
 uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
                          invfs_wsession **out)
@@ -93,6 +111,8 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
     snprintf(s->name, sizeof s->name, "%s", name);
     s->new_id = v->next_inode_id++;
     s->wheat_carry = 1;
+    s->child_segs = wsession_child_segs();
+    s->cur_child = 0;
     s->gen = v->write_gen;     /* WP85: anchor the session to the live
                                 * generation; a rollback bumps v->write_gen
                                 * and this session goes stale */
@@ -223,6 +243,117 @@ static int wsession_grow(invfs_wsession *s, uint32_t count)
     return 0;
 }
 
+/* WP660: seal the currently open child recipe and update top_ents / chld */
+static int wsession_seal_child(invfs_wsession *s)
+{
+    if (s->n_ents == 0)
+        return 0;
+
+    uint64_t child_end = (uint64_t)(s->cur_child + 1) * s->child_segs * SEGMENT_SIZE;
+    uint64_t child_file_size = (s->logical_size < child_end) ? s->logical_size : child_end;
+    uint8_t *cblob = NULL;
+    size_t cblen = 0;
+    uint8_t caddr[INVFS_RECIPE_ADDR_LEN];
+
+    if (vol_ast_recipe_serialize(child_file_size, s->ents, s->n_ents,
+                                 &cblob, &cblen) != 0)
+        return -1;
+    if (vol_recipe_store(s->v, cblob, cblen, caddr) != 0) {
+        free(cblob);
+        return -1;
+    }
+    free(cblob);
+
+    if (s->cur_child < s->n_chld) {
+        memcpy(s->chld[s->cur_child].addr, caddr, INVFS_RECIPE_ADDR_LEN);
+    } else {
+        if (s->n_top_ents >= s->cap_top_ents) {
+            uint32_t nc = s->cap_top_ents ? s->cap_top_ents * 2 : 16;
+            invfs_ast_block_entry *nte = realloc(s->top_ents, nc * sizeof(*nte));
+            if (!nte) return -1;
+            s->top_ents = nte;
+            s->cap_top_ents = nc;
+        }
+        if (s->n_chld >= s->cap_chld) {
+            uint32_t nc = s->cap_chld ? s->cap_chld * 2 : 16;
+            invfs_ast_child_ref *nch = realloc(s->chld, nc * sizeof(*nch));
+            if (!nch) return -1;
+            s->chld = nch;
+            s->cap_chld = nc;
+        }
+        uint64_t cstart = (uint64_t)s->cur_child * s->child_segs * SEGMENT_SIZE;
+        uint64_t clen;
+        if (s->logical_size <= cstart)
+            clen = 0;
+        else if (s->logical_size - cstart < (uint64_t)s->child_segs * SEGMENT_SIZE)
+            clen = s->logical_size - cstart;
+        else
+            clen = (uint64_t)s->child_segs * SEGMENT_SIZE;
+
+        invfs_ast_block_entry *te = &s->top_ents[s->n_top_ents];
+        memset(te, 0, sizeof(*te));
+        te->file_offset = cstart;
+        te->length = clen;
+        te->algo = INVFS_ALGO_CHILD;
+        te->pba = 0;
+        te->block_id = s->n_chld;
+        te->zone = INVFS_ZONE_RAW;
+        te->block_offset = 0;
+        memcpy(s->chld[s->n_chld].addr, caddr, INVFS_RECIPE_ADDR_LEN);
+        s->n_top_ents++;
+        s->n_chld++;
+    }
+
+    s->n_ents = 0;
+    if (s->touched)
+        memset(s->touched, 0, s->touched_cap);
+    return 0;
+}
+
+/* WP660: switch session's open child, sealing the old one if needed */
+static int wsession_switch_child(invfs_wsession *s, uint32_t target_child)
+{
+    if (target_child == s->cur_child)
+        return 0;
+
+    if (s->n_ents > 0) {
+        if (wsession_seal_child(s) != 0)
+            return -1;
+    }
+
+    s->cur_child = target_child;
+    if (target_child < s->n_chld) {
+        uint8_t *cblob = NULL;
+        size_t cblen = 0;
+        invfs_ast_hdr cah;
+        const invfs_ast_block_entry *cents = NULL;
+        size_t cn = 0;
+
+        if (vol_recipe_load(s->v, s->chld[target_child].addr, &cblob, &cblen) != 0 || !cblob)
+            return -1;
+        if (vol_ast_recipe_parse(cblob, cblen, &cah, &cents, &cn) != 0 || !cents) {
+            free(cblob);
+            return -1;
+        }
+        if (wsession_grow(s, (uint32_t)cn) != 0) {
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
+            return -1;
+        }
+        memcpy(s->ents, cents, cn * sizeof(*s->ents));
+        s->n_ents = (uint32_t)cn;
+        if (s->touched)
+            memset(s->touched, 0, s->touched_cap);
+        vol_ast_recipe_parsed_free(&cah, cents);
+        free(cblob);
+    } else {
+        s->n_ents = 0;
+        if (s->touched)
+            memset(s->touched, 0, s->touched_cap);
+    }
+    return 0;
+}
+
 
 /* ---- WP23: adaptive RAW-zone compression effort ----------------------
  * Per-64K-segment codec choice at WRITE time, keyed on the RAW zone's
@@ -300,6 +431,12 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
                                 const uint8_t *plain, size_t enc_len)
 {
     invfs_volume *v = s->v;
+    uint32_t target_child = (uint32_t)(j / s->child_segs);
+    uint32_t rel_j = (uint32_t)(j % s->child_segs);
+    if (target_child != s->cur_child) {
+        int rc = wsession_switch_child(s, target_child);
+        if (rc != 0) return rc;
+    }
     /* one buffer serves both codecs: ZSTD's bound covers LZ4's for every
      * size this path encodes (<= 64 KB), but take the max explicitly --
      * the bound is a contract, not a benchmark result */
@@ -314,7 +451,7 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
         if (zb > (size_t)cbound) cbound = (int)zb;
     }
 
-    if (wsession_grow(s, j + 1) != 0) return -1;
+    if (wsession_grow(s, rel_j + 1) != 0) return -1;
     cbuf = malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
     if (!cbuf) return -1;
     if (v->profile != INVFS_PROFILE_TURBO) {
@@ -367,8 +504,8 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
      * the old record: never freed here (the commit's retire drops the old
      * record's reference and frees exactly what the new record does not
      * keep). */
-    if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
-        prev_pba = s->ents[j].pba;
+    if (rel_j < s->touched_cap && s->touched[rel_j] && s->ents[rel_j].pba) {
+        prev_pba = s->ents[rel_j].pba;
         have_prev = 1;
     }
     pba = alloc_raw_or_shadow(v, phys_blocks, &zone);
@@ -389,15 +526,15 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
             vol_free_blocks(v, prev_pba, plen);
     }
 
-    s->ents[j].file_offset = (uint64_t)j * SEGMENT_SIZE;
-    s->ents[j].length = (uint64_t)enc_len;
-    s->ents[j].zone = (uint32_t)zone;
-    s->ents[j].algo = (uint32_t)algo_used;
-    s->ents[j].block_id = j;
-    s->ents[j].block_offset = 0;
-    s->ents[j].pba = pba;
-    if (j >= s->n_ents) s->n_ents = j + 1;
-    s->touched[j] = 1;
+    s->ents[rel_j].file_offset = (uint64_t)j * SEGMENT_SIZE;
+    s->ents[rel_j].length = (uint64_t)enc_len;
+    s->ents[rel_j].zone = (uint32_t)zone;
+    s->ents[rel_j].algo = (uint32_t)algo_used;
+    s->ents[rel_j].block_id = rel_j;
+    s->ents[rel_j].block_offset = 0;
+    s->ents[rel_j].pba = pba;
+    if (rel_j >= s->n_ents) s->n_ents = rel_j + 1;
+    s->touched[rel_j] = 1;
     if (j + 1 > s->mat_upto) s->mat_upto = j + 1;
     s->dirty = 1;
     return 0;
@@ -422,44 +559,98 @@ static int wsession_seg_current(invfs_wsession *s, uint32_t j,
                                 uint8_t *plain)
 {
     memset(plain, 0, SEGMENT_SIZE);
-    if (j >= s->n_ents) return 0;
-    if ((j < s->touched_cap && s->touched[j]) ||
-        (s->have_old && j < s->aliased_n)) {
-        uint64_t pba = s->ents[j].pba;
+    uint32_t target_child = (uint32_t)(j / s->child_segs);
+    uint32_t rel_j = (uint32_t)(j % s->child_segs);
+    if (target_child == s->cur_child) {
+        if (rel_j >= s->n_ents) return 0;
+        if ((rel_j < s->touched_cap && s->touched[rel_j]) ||
+            (s->have_old && j < s->aliased_n)) {
+            uint64_t pba = s->ents[rel_j].pba;
+            uint32_t csize = 0;
+            uint8_t *blob = NULL;
+            int rc;
+            if (!pba || pba >= s->v->sb.total_blocks)
+                return -1;
+            if (seg_read_checked(s->v, pba, 0, 1, &csize, &blob) != 0)
+                return -1;
+            if (s->ents[rel_j].algo == INVFS_ALGO_LZ4) {
+                rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
+                                         (int)csize, (int)SEGMENT_SIZE)
+                     == (int)s->ents[rel_j].length ? 0 : -1;
+                if (rc == 0 && s->ents[rel_j].length < SEGMENT_SIZE)
+                    memset(plain + s->ents[rel_j].length, 0,
+                           SEGMENT_SIZE - (size_t)s->ents[rel_j].length);
+            } else if (s->ents[rel_j].algo == INVFS_ALGO_ZSTD) {
+                size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
+                                            blob, csize);
+                rc = (!ZSTD_isError(zg) && zg == s->ents[rel_j].length) ? 0 : -1;
+                if (rc == 0 && s->ents[rel_j].length < SEGMENT_SIZE)
+                    memset(plain + s->ents[rel_j].length, 0,
+                           SEGMENT_SIZE - (size_t)s->ents[rel_j].length);
+            } else {
+                rc = csize == s->ents[rel_j].length ? 0 : -1;
+                if (rc == 0) memcpy(plain, blob, csize);
+                if (rc == 0 && csize < SEGMENT_SIZE)
+                    memset(plain + csize, 0, SEGMENT_SIZE - csize);
+            }
+            free(blob);
+            return rc;
+        }
+        return 0;
+    }
+    if (target_child < s->n_chld) {
+        uint8_t *cblob = NULL;
+        size_t cblen = 0;
+        invfs_ast_hdr cah;
+        const invfs_ast_block_entry *cents = NULL;
+        size_t cn = 0;
+        if (vol_recipe_load(s->v, s->chld[target_child].addr, &cblob, &cblen) != 0 || !cblob)
+            return -1;
+        if (vol_ast_recipe_parse(cblob, cblen, &cah, &cents, &cn) != 0 || !cents) {
+            free(cblob);
+            return -1;
+        }
+        if (rel_j >= cn) {
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
+            return 0;
+        }
+        uint64_t pba = cents[rel_j].pba;
         uint32_t csize = 0;
         uint8_t *blob = NULL;
         int rc;
-        if (!pba || pba >= s->v->sb.total_blocks)
+        if (!pba || pba >= s->v->sb.total_blocks) {
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
             return -1;
-        if (seg_read_checked(s->v, pba, 0, 1, &csize, &blob) != 0)
+        }
+        if (seg_read_checked(s->v, pba, 0, 1, &csize, &blob) != 0) {
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
             return -1;
-        if (s->ents[j].algo == INVFS_ALGO_LZ4) {
-            /* in-session payloads are whole-segment encodes (the tail
-             * fix runs at commit, after the last possible read-back);
-             * an aliased segment is the old record's plain per-segment
-             * chunk (wsession_simple_old guaranteed the shape) */
+        }
+        if (cents[rel_j].algo == INVFS_ALGO_LZ4) {
             rc = LZ4_decompress_safe((const char *)blob, (char *)plain,
                                      (int)csize, (int)SEGMENT_SIZE)
-                 == (int)s->ents[j].length ? 0 : -1;
-            if (rc == 0 && s->ents[j].length < SEGMENT_SIZE)
-                memset(plain + s->ents[j].length, 0,
-                       SEGMENT_SIZE - (size_t)s->ents[j].length);
-        } else if (s->ents[j].algo == INVFS_ALGO_ZSTD) {
-            /* WP23: this session's own pressure-rung segment, or an
-             * aliased adaptive-effort segment of the old record */
-            size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE,
-                                        blob, csize);
-            rc = (!ZSTD_isError(zg) && zg == s->ents[j].length) ? 0 : -1;
-            if (rc == 0 && s->ents[j].length < SEGMENT_SIZE)
-                memset(plain + s->ents[j].length, 0,
-                       SEGMENT_SIZE - (size_t)s->ents[j].length);
+                 == (int)cents[rel_j].length ? 0 : -1;
+            if (rc == 0 && cents[rel_j].length < SEGMENT_SIZE)
+                memset(plain + cents[rel_j].length, 0,
+                       SEGMENT_SIZE - (size_t)cents[rel_j].length);
+        } else if (cents[rel_j].algo == INVFS_ALGO_ZSTD) {
+            size_t zg = ZSTD_decompress((char *)plain, SEGMENT_SIZE, blob, csize);
+            rc = (!ZSTD_isError(zg) && zg == cents[rel_j].length) ? 0 : -1;
+            if (rc == 0 && cents[rel_j].length < SEGMENT_SIZE)
+                memset(plain + cents[rel_j].length, 0,
+                       SEGMENT_SIZE - (size_t)cents[rel_j].length);
         } else {
-            rc = csize == s->ents[j].length ? 0 : -1;
+            rc = csize == cents[rel_j].length ? 0 : -1;
             if (rc == 0) memcpy(plain, blob, csize);
             if (rc == 0 && csize < SEGMENT_SIZE)
                 memset(plain + csize, 0, SEGMENT_SIZE - csize);
         }
         free(blob);
+        vol_ast_recipe_parsed_free(&cah, cents);
+        free(cblob);
         return rc;
     }
     return 0;
@@ -639,9 +830,10 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
 
     first = (uint32_t)(offset / SEGMENT_SIZE);
     last  = (uint32_t)((offset + len - 1) / SEGMENT_SIZE);
-    if ((uint64_t)last + 1 > MAX_SEGMENTS_V2) {
+    uint64_t top_entries_needed = ((uint64_t)last + s->child_segs) / s->child_segs;
+    if (top_entries_needed > MAX_SEGMENTS_V2) {
         fprintf(stderr, "invfs: %s: write to segment %u exceeds the %u-entry "
-                "recipe bound (EFBIG)\n", s->name ? s->name : "?",
+                "recipe bound (EFBIG)\n", s->name[0] ? s->name : "?",
                 (unsigned)(last + 1), (unsigned)MAX_SEGMENTS_V2);
         return -EFBIG;
     }
@@ -716,34 +908,61 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
     if (rc != 0) return rc;
     if (len == s->logical_size) return 0;
     keep = (uint32_t)((len + SEGMENT_SIZE - 1) / SEGMENT_SIZE);
-    if (keep > MAX_SEGMENTS_V2) {
+    uint64_t top_needed = (len + (uint64_t)s->child_segs * SEGMENT_SIZE - 1) /
+                          ((uint64_t)s->child_segs * SEGMENT_SIZE);
+    if (top_needed > MAX_SEGMENTS_V2) {
         fprintf(stderr, "invfs: %s: truncate to %llu needs %u entries, over "
                 "the %u-entry recipe bound (EFBIG)\n",
-                s->name ? s->name : "?", (unsigned long long)len, keep,
+                s->name[0] ? s->name : "?", (unsigned long long)len, (unsigned)top_needed,
                 (unsigned)MAX_SEGMENTS_V2);
         return -EFBIG;
     }
 
-    if (keep < s->n_ents) {
-        /* shrink: drop tail segments. Session-owned pbas are freed;
-         * aliases are only dropped from the entry table -- the old record
-         * keeps owning them (the commit's retire frees the ones the new
-         * record dropped). WP27: the pba rides in the session's entry. */
-        for (j = keep; j < s->n_ents; j++) {
-            if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
-                uint64_t plen = 0;
-                if (seg_extent_checked(s->v, s->ents[j].pba, &plen) == 0)
-                    vol_free_blocks(s->v, s->ents[j].pba, plen);
-                /* WP-M9: the session's pba is gone -- clear the entry so a
-                 * later extend/write of this segment cannot free it a second
-                 * time (the shrink+extend matrix hits exactly this). */
-                s->ents[j].pba = 0;
-                s->touched[j] = 0;
+    if (s->n_chld == 0) {
+        if (keep < s->n_ents) {
+            /* shrink: drop tail segments. Session-owned pbas are freed;
+             * aliases are only dropped from the entry table -- the old record
+             * keeps owning them (the commit's retire frees the ones the new
+             * record dropped). WP27: the pba rides in the session's entry. */
+            for (j = keep; j < s->n_ents; j++) {
+                if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+                    uint64_t plen = 0;
+                    if (seg_extent_checked(s->v, s->ents[j].pba, &plen) == 0)
+                        vol_free_blocks(s->v, s->ents[j].pba, plen);
+                    /* WP-M9: the session's pba is gone -- clear the entry so a
+                     * later extend/write of this segment cannot free it a second
+                     * time (the shrink+extend matrix hits exactly this). */
+                    s->ents[j].pba = 0;
+                    s->touched[j] = 0;
+                }
             }
+            s->n_ents = keep;
+            if (s->mat_upto > keep) s->mat_upto = keep;
+            if (s->aliased_n > keep) s->aliased_n = keep;
         }
-        s->n_ents = keep;
+    } else {
+        uint32_t keep_child = len ? (uint32_t)((len - 1) / ((uint64_t)s->child_segs * SEGMENT_SIZE)) : 0;
+        uint32_t c;
+        for (c = keep_child + 1; c < s->n_chld; c++)
+            vol_free_recipe_blocks(s->v, s->chld[c].addr, 0);
+        if (s->n_chld > keep_child + 1) s->n_chld = keep_child + 1;
+        if (s->n_top_ents > keep_child + 1) s->n_top_ents = keep_child + 1;
+        if (wsession_switch_child(s, keep_child) != 0) return -1;
+        uint32_t rel_keep = len ? (uint32_t)(((len + SEGMENT_SIZE - 1) / SEGMENT_SIZE) -
+                                             (uint64_t)keep_child * s->child_segs) : 0;
+        if (rel_keep < s->n_ents) {
+            for (j = rel_keep; j < s->n_ents; j++) {
+                if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+                    uint64_t plen = 0;
+                    if (seg_extent_checked(s->v, s->ents[j].pba, &plen) == 0)
+                        vol_free_blocks(s->v, s->ents[j].pba, plen);
+                    s->ents[j].pba = 0;
+                    s->touched[j] = 0;
+                }
+            }
+            s->n_ents = rel_keep;
+        }
         if (s->mat_upto > keep) s->mat_upto = keep;
-        if (s->aliased_n > keep) s->aliased_n = keep;
     }
     /* A mid-segment cut zeroes the tail of the surviving segment: bytes
      * past the cut must read as zeros, never resurrected old content.
@@ -771,6 +990,7 @@ int vol_write_truncate(invfs_wsession *ws, uint64_t len)
             if (s->v->free_blocks <= s->v->sb.reserved_blocks +
                                      s->v->sb.hard_min_blocks + need)
                 return -2;
+            s->logical_size = len;
             rc = wsession_zero_fill(s, filled, keep);
             if (rc != 0) return rc;
         }
@@ -834,12 +1054,14 @@ static int vol_write_commit_v3(invfs_wsession *s)
     uint32_t i;
     int rc;
 
-    if (s->logical_size > MAX_FILE_SIZE || s->n_ents > MAX_SEGMENTS_V2) {
+    if (s->logical_size > MAX_FILE_SIZE ||
+        (s->n_chld == 0 ? s->n_ents > MAX_SEGMENTS_V2 : s->n_top_ents > MAX_SEGMENTS_V2)) {
         fprintf(stderr, "invfs: %s: commit refused: %llu bytes in %u entries "
                 "(bounds: %llu bytes, %u entries) -- the recipe cannot hold "
                 "this file as written; compact it or split it (EFBIG)\n",
-                s->name ? s->name : "?", (unsigned long long)s->logical_size,
-                s->n_ents, (unsigned long long)MAX_FILE_SIZE,
+                s->name[0] ? s->name : "?", (unsigned long long)s->logical_size,
+                s->n_chld == 0 ? s->n_ents : s->n_top_ents,
+                (unsigned long long)MAX_FILE_SIZE,
                 (unsigned)MAX_SEGMENTS_V2);
         return -EFBIG;
     }
@@ -847,38 +1069,73 @@ static int vol_write_commit_v3(invfs_wsession *s)
      * re-encode an unaligned tail at its exact length -- the same two
      * fixes the v2 commit applies, so entry.length always equals the
      * decoded payload size the reader expects. */
-    while (s->n_ents > 0 &&
-           (uint64_t)(s->n_ents - 1) * SEGMENT_SIZE >= s->logical_size) {
-        uint32_t j = s->n_ents - 1;
-        if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
-            uint64_t plen = 0;
-            if (seg_extent_checked(v, s->ents[j].pba, &plen) == 0)
-                vol_free_blocks(v, s->ents[j].pba, plen);
+    if (s->n_chld == 0) {
+        while (s->n_ents > 0 &&
+               (uint64_t)(s->n_ents - 1) * SEGMENT_SIZE >= s->logical_size) {
+            uint32_t j = s->n_ents - 1;
+            if (j < s->touched_cap && s->touched[j] && s->ents[j].pba) {
+                uint64_t plen = 0;
+                if (seg_extent_checked(v, s->ents[j].pba, &plen) == 0)
+                    vol_free_blocks(v, s->ents[j].pba, plen);
+            }
+            s->n_ents--;
         }
-        s->n_ents--;
-    }
-    if (s->n_ents > 0) {
-        uint32_t j = s->n_ents - 1;
-        uint64_t base = (uint64_t)j * SEGMENT_SIZE;
-        uint64_t tail = s->logical_size - base;
-        if (tail > SEGMENT_SIZE) tail = SEGMENT_SIZE;
-        if (s->ents[j].length != tail) {
-            uint8_t plain[SEGMENT_SIZE];
-            rc = wsession_seg_current(s, j, plain);
+        if (s->n_ents > 0) {
+            uint32_t j = s->n_ents - 1;
+            uint64_t base = (uint64_t)j * SEGMENT_SIZE;
+            uint64_t tail = s->logical_size - base;
+            if (tail > SEGMENT_SIZE) tail = SEGMENT_SIZE;
+            if (s->ents[j].length != tail) {
+                uint8_t plain[SEGMENT_SIZE];
+                rc = wsession_seg_current(s, j, plain);
+                if (rc != 0) return rc;
+                rc = wsession_write_seg_n(s, j, plain, (size_t)tail);
+                if (rc != 0) return rc;
+            }
+        }
+    } else {
+        uint32_t last_child = s->logical_size ? (uint32_t)((s->logical_size - 1) / ((uint64_t)s->child_segs * SEGMENT_SIZE)) : 0;
+        if (s->cur_child != last_child) {
+            rc = wsession_switch_child(s, last_child);
             if (rc != 0) return rc;
-            rc = wsession_write_seg_n(s, j, plain, (size_t)tail);
-            if (rc != 0) return rc;
+        }
+        if (s->n_ents > 0) {
+            uint32_t rel_j = s->n_ents - 1;
+            uint64_t abs_j = (uint64_t)s->cur_child * s->child_segs + rel_j;
+            uint64_t base = abs_j * SEGMENT_SIZE;
+            uint64_t tail = s->logical_size - base;
+            if (tail > SEGMENT_SIZE) tail = SEGMENT_SIZE;
+            if (s->ents[rel_j].length != tail) {
+                uint8_t plain[SEGMENT_SIZE];
+                rc = wsession_seg_current(s, (uint32_t)abs_j, plain);
+                if (rc != 0) return rc;
+                rc = wsession_write_seg_n(s, (uint32_t)abs_j, plain, (size_t)tail);
+                if (rc != 0) return rc;
+            }
         }
     }
     /* An empty file has no content address: the read path keys off size 0,
      * so storing a header-only blob would just leak a page. */
     if (s->logical_size == 0) {
         memset(addr, 0, sizeof addr);
-    } else {
+    } else if (s->n_chld == 0) {
         if (vol_ast_recipe_serialize(s->logical_size, s->ents, s->n_ents,
                                      &blob, &blen) != 0)
             return -1;   /* TODO(WP-M9): recipe larger than one base page
                           * (multi-page/streamed blob) -- deferred. */
+        if (vol_recipe_store(v, blob, blen, addr) != 0) {
+            free(blob);
+            return -1;
+        }
+        free(blob);
+    } else {
+        if (s->n_ents > 0) {
+            if (wsession_seal_child(s) != 0)
+                return -1;
+        }
+        if (vol_ast_recipe_serialize_tree(s->logical_size, s->top_ents, s->n_top_ents,
+                                          s->chld, s->n_chld, &blob, &blen) != 0)
+            return -1;
         if (vol_recipe_store(v, blob, blen, addr) != 0) {
             free(blob);
             return -1;
@@ -950,6 +1207,13 @@ static int vol_write_commit_v3(invfs_wsession *s)
     if (s->owns_siblings)
         vol_delete_siblings(v, s->name);
 
+    free(s->top_ents);
+    s->top_ents = NULL;
+    s->n_top_ents = s->cap_top_ents = 0;
+    free(s->chld);
+    s->chld = NULL;
+    s->n_chld = s->cap_chld = 0;
+
     wsession_unlink(s);
     s->committed = 1;
     return 0;
@@ -999,11 +1263,17 @@ void vol_write_abort(invfs_wsession *ws)
                     vol_free_blocks(s->v, s->ents[i].pba, plen);
             }
         }
+        if (s->n_chld > 0) {
+            for (i = 0; i < s->n_chld; i++)
+                vol_free_recipe_blocks(s->v, s->chld[i].addr, 0);
+        }
     }
     free(s->ents);
     free(s->touched);
     free(s->old_ext);
     free(s->old_pbas);
+    free(s->top_ents);
+    free(s->chld);
     free(s);
 }
 

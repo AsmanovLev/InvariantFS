@@ -553,7 +553,42 @@ static int rd_th_fail_budget(void)
     if (end == e || n <= 0 || n > 32) return 0;
     return (int)n;
 }
-
+/* WP660: a recipe carrying CHLD references is decoded through the RANGED
+ * path, which resolves each reference to its child blob and walks the child's
+ * entries itself (`vol_read_range`, WP660 commit 1892031). Doing it here would
+ * mean a SECOND copy of the per-entry decode arms -- exactly the duplication
+ * WP653's audit measured five times over. The ranged path is the one place a
+ * reference entry is allowed to be resolved.
+ *
+ * Cost: one extra recipe load for a file that has children. Such a file is by
+ * construction >= one child span (4 GiB by default), so the load is noise
+ * against the read that follows.
+ *
+ * A failure here is a LOUD refusal, never zeros (WP658's rule): if the child
+ * cannot be loaded or parsed, vol_read_range returns non-zero and the caller
+ * fails the read. */
+static int vol_decode_child_full(invfs_volume *v, uint64_t inode_id,
+                                 vol_recname *rn, const invfs_ast_block_entry *e,
+                                 uint8_t *data, unsigned depth)
+{
+    (void)rn;
+    if (depth + 1 > INVFS_AST_CHILD_DEPTH_MAX) {
+        fprintf(stderr, "inode %llu: child nesting past depth %u refused\n",
+                (unsigned long long)inode_id,
+                (unsigned)INVFS_AST_CHILD_DEPTH_MAX);
+        return -1;
+    }
+    if (!e->length) return 0;
+    if (vol_read_range(v, inode_id, e->file_offset, (size_t)e->length,
+                       data + e->file_offset) != (int)e->length) {
+        fprintf(stderr, "inode %llu: child span at %llu (len %llu) failed to "
+                "decode (EIO)\n", (unsigned long long)inode_id,
+                (unsigned long long)e->file_offset,
+                (unsigned long long)e->length);
+        return -1;
+    }
+    return 0;
+}
 static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                                   vol_recname *rn,
                                   const invfs_ast_hdr *ast_h,
@@ -698,7 +733,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                 uint32_t hdr;
                 uint8_t *blob;
                 size_t dst_off = (size_t)e->file_offset;
-
+                if (e->algo == INVFS_ALGO_CHILD) { if (vol_decode_child_full(v, inode_id, rn, e, data, 0) != 0) return -1; continue; }
                 /* Batch member: a slice of a shared batch (PPMd text,
                  * ZSTD/ZSTD_BCJ binary), decoded and cached by pba (heap
                  * only -- see vol_read_text_slice) */
@@ -1459,14 +1494,14 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     len = (size_t)ah.file_size;
     data = (uint8_t *)malloc(len ? len : 1);
     if (!data) { free(blob); return -1; }
-    const invfs_ast_window_entry *wins = NULL;
-    uint32_t n_wins = 0;
-    if (vol_ast_recipe_windows(blob, blen, &ah, &wins, &n_wins) != 0) {
-        fprintf(stderr, "inode %llu: corrupt window table\n",
-                (unsigned long long)inode_id);
+    const invfs_ast_window_entry *wins = NULL; uint32_t n_wins = 0;
+    invfs_ast_tail tl;
+    if (vol_ast_recipe_tail(blob, blen, &ah, &tl) != 0) {
+        fprintf(stderr, "inode %llu: corrupt recipe tail\n", (unsigned long long)inode_id);
         free(data); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
         return -1;
     }
+    wins = tl.wins; n_wins = tl.n_wins;
     /* WP120: the name is resolved by the lanes that need it, not here --
      * resolving it here walked the whole dirent tree on every read. */
     {
@@ -1764,6 +1799,12 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 
     /* Find starting entry. Entries are sorted by file_offset.
      * Use binary search to find the first entry whose seg_hi > offset. */
+    const uint8_t *chld = NULL;
+    uint32_t n_chld = 0;
+    if (vol_ast_recipe_children(blob, blen, &ah, &chld, &n_chld) != 0) {
+        free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+        return -1;
+    }
     size_t start_idx = 0;
     if (n_ents > 8) {
         size_t l = 0, r = n_ents;
@@ -1796,6 +1837,141 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
         hi = req_hi < seg_hi ? req_hi : seg_hi;
         if (lo >= hi)
             continue;
+
+        /* WP660: reference entry to a child recipe */
+        if (e->algo == INVFS_ALGO_CHILD) {
+            uint8_t *cblob = NULL;
+            size_t cblen = 0;
+            invfs_ast_hdr cah;
+            const invfs_ast_block_entry *cents = NULL;
+            size_t cn_ents = 0;
+            const uint8_t *cchld = NULL;
+            uint32_t cn_chld = 0;
+            const uint8_t *caddr;
+            size_t c_start = 0, ci;
+
+            if (!chld || e->block_id >= n_chld) {
+                free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                return -1;
+            }
+            caddr = chld + (size_t)e->block_id * sizeof(invfs_ast_child_ref);
+            if (vol_recipe_load(v, caddr, &cblob, &cblen) != 0 || !cblob) {
+                free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                return -1;
+            }
+            if (vol_ast_recipe_parse(cblob, cblen, &cah, &cents, &cn_ents) != 0 || !cents) {
+                free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                return -1;
+            }
+            if (vol_ast_recipe_children(cblob, cblen, &cah, &cchld, &cn_chld) != 0 || cn_chld != 0) {
+                vol_ast_recipe_parsed_free(&cah, cents);
+                free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                return -1;
+            }
+            if (cn_ents > 8) {
+                size_t cl = 0, cr = cn_ents;
+                while (cl < cr) {
+                    size_t cm = cl + (cr - cl) / 2;
+                    uint64_t cseg_hi = cents[cm].file_offset + cents[cm].length;
+                    if (cseg_hi <= lo) cl = cm + 1;
+                    else cr = cm;
+                }
+                c_start = cl;
+            }
+            for (ci = c_start; ci < cn_ents; ci++) {
+                const invfs_ast_block_entry *ce = &cents[ci];
+                uint64_t cseg_lo = ce->file_offset;
+                uint64_t cseg_hi = ce->file_offset + ce->length;
+                uint64_t clo, chi;
+                uint8_t ctmp[SEGMENT_SIZE];
+                uint8_t *csegbuf = ctmp, *csegheap = NULL;
+                size_t cwant;
+
+                if (cseg_lo >= hi) break;
+                if (cseg_hi <= lo) continue;
+                clo = lo > cseg_lo ? lo : cseg_lo;
+                chi = hi < cseg_hi ? hi : cseg_hi;
+                if (clo >= chi) continue;
+                if (ce->algo == INVFS_ALGO_CHILD) {
+                    vol_ast_recipe_parsed_free(&cah, cents);
+                    free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                    return -1;
+                }
+                if (ce->zone == INVFS_ZONE_TEXT && tz_batch_algo(ce->algo)) {
+                    cwant = (size_t)(chi - clo);
+                    if (vol_read_text_slice(v, inode_id, ce, clo - cseg_lo,
+                                            (uint8_t *)buf + (size_t)(clo - offset),
+                                            cwant) != 0) {
+                        vol_ast_recipe_parsed_free(&cah, cents);
+                        free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                        return -1;
+                    }
+                    got += cwant;
+                    continue;
+                }
+                if (ce->length > sizeof ctmp) {
+                    csegheap = (uint8_t *)malloc((size_t)ce->length);
+                    if (!csegheap) {
+                        vol_ast_recipe_parsed_free(&cah, cents);
+                        free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                        return -1;
+                    }
+                    csegbuf = csegheap;
+                }
+                {
+                    uint64_t cpba = ce->pba;
+                    uint32_t chdr;
+                    uint8_t *csblob = NULL;
+                    if (cpba == 0 || cpba >= v->sb.total_blocks) {
+                        free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                        free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                        return -1;
+                    }
+                    heat_touch_read(v, inode_id, ce->block_id);
+                    if (seg_read_checked(v, cpba, 0, 1, &chdr, &csblob) != 0) {
+                        free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                        free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                        return -1;
+                    }
+                    if (ce->algo == INVFS_ALGO_LZ4) {
+                        int d = LZ4_decompress_safe((const char *)csblob, (char *)csegbuf,
+                                                    (int)chdr, (int)ce->length);
+                        if (d != (int)ce->length) {
+                            free(csblob); free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                            free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                            return -1;
+                        }
+                    } else if (ce->algo == INVFS_ALGO_ZSTD) {
+                        size_t d = ZSTD_decompress(csegbuf, ce->length, csblob, chdr);
+                        if (ZSTD_isError(d) || d != ce->length) {
+                            free(csblob); free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                            free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                            return -1;
+                        }
+                    } else if (ce->algo == INVFS_ALGO_NONE) {
+                        if (chdr != ce->length) {
+                            free(csblob); free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                            free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                            return -1;
+                        }
+                        memcpy(csegbuf, csblob, ce->length);
+                    } else {
+                        free(csblob); free(csegheap); vol_ast_recipe_parsed_free(&cah, cents);
+                        free(cblob); free(all); vol_ast_recipe_parsed_free(&ah, ents); free(blob);
+                        return -1;
+                    }
+                    free(csblob);
+                }
+                cwant = (size_t)(chi - clo);
+                memcpy((uint8_t *)buf + (size_t)(clo - offset),
+                       csegbuf + (size_t)(clo - cseg_lo), cwant);
+                free(csegheap);
+                got += cwant;
+            }
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
+            continue;
+        }
 
         /* shared batch member: slice it (heap + pba-keyed ARC) */
         if (e->zone == INVFS_ZONE_TEXT && tz_batch_algo(e->algo)) {
