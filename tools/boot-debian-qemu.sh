@@ -59,16 +59,92 @@ POWEROFF_TIMEOUT="${INVFS_DEB_POWEROFF_TIMEOUT:-300}"
 POWEROFF_SILENCE_TIMEOUT="${INVFS_DEB_POWEROFF_SILENCE_TIMEOUT:-120}"
 MODE="${INVFS_DEB_MODE:-single}"
 
+# ---- kernel cmdline -------------------------------------------------------
+# Assembled FIRST, ahead of every preflight check, for one reason: nothing below
+# this block is required to know what the cmdline is. The block reads five
+# environment variables and does string assembly -- it does not open the
+# volume, the kernel, the initramfs or the staged root. Sitting above the
+# preflight is what makes `INVFS_DEB_PRINT_CMDLINE=1` usable on a bare
+# checkout (`tools/test-debian-cmdline.sh`, in `make e2e`): the alternative
+# placement demanded a built `bin/`, an initramfs and a debootstrapped root
+# before it would print a string, which made the one cheap instrument in this
+# harness cost a mkfs+import (the import is ~850 s of fsync-bound work).
+# invfs.init is named EXPLICITLY so the assertion below is about systemd
+# starting, not about /sbin/init happening to resolve.
+CMDLINE="console=ttyS0,115200 invfs.init=/lib/systemd/systemd"
+# WP629: mask the units that do no useful work on an emulated CPU but are
+# enough to lose the multi-user.target race on a shared TCG runner.
+# 2026-10-18 CI: the deadline fired with basic.target already reached and
+# systemd-journal-catalog-update.service having reported an error -- the
+# same unit 9b16f7a named as a 2m45 stall. The rest are timers that only
+# arm themselves. None of this is part of what the gate asserts: systemd
+# as PID 1, the root is FUSE, multi-user.target, clean poweroff.
+# systemd.mask= is a KERNEL-CMDLINE mask, deliberately: masking by writing
+# into $STAGE would change the tree that was imported, and the offline
+# check at the end compares $STAGE against the volume byte for byte.
+# INVFS_DEB_BOOT_MASK= (empty) boots unmasked -- the `-` (not `:-`) matters,
+# because that is what makes an explicitly-empty value mean "no mask" instead
+# of falling back to the default list.
+# Diagnostics in this block go to STDERR: in print mode stdout carries the
+# cmdline and nothing else, so the printed line can be compared byte for byte
+# (and fed straight back into a `-append`).
+BOOT_MASK="${INVFS_DEB_BOOT_MASK-systemd-journal-catalog-update.service apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer fstrim.timer systemd-tmpfiles-clean.timer}"
+for _mu in $BOOT_MASK; do CMDLINE="$CMDLINE systemd.mask=$_mu"; done
+if [ -n "$BOOT_MASK" ]; then
+    echo "note: masking boot-noise units via systemd.mask=: $BOOT_MASK" >&2
+fi
+# WP629: visibility INSIDE systemd-shutdown, opt-in.
+# The boot half of this gate has something to ASK -- the guest auto-logs in on
+# ttyS0, so guest_probe() can type `is-system-running` into it. The shutdown
+# half has nothing: by the time the poweroff leg hangs, PID 1 is
+# systemd-shutdown and there is no shell left to interrogate, so the only
+# evidence available is what systemd-shutdown itself prints -- and by default
+# it prints almost nothing. Two facts make this knob non-obvious, both measured
+# while diagnosing the WP626/WP630 wedge:
+#   * `systemd.log_level=debug` ALONE shows nothing, because the kernel console
+#     loglevel filters KERN_DEBUG before it reaches ttyS0. `ignore_loglevel`
+#     has to accompany it, which is what finally made shutdown's neighbours
+#     visible.
+#   * systemd-shutdown's own logging needs `systemd.log_target=kmsg`: without
+#     it, debug output from inside systemd-shutdown does not reach the console
+#     at all, so the instrument was inconclusive rather than negative.
+# Off by default: the debug transcript is large and slows a TCG boot, and
+# nothing here is part of what the gate asserts. On, it is the first thing to
+# turn on for a shutdown red -- before any new hypothesis.
+# (`0`, empty, `no`, `false` and `off` all mean off; anything else is on.)
+case "${INVFS_DEB_SHUTDOWN_DEBUG:-0}" in
+    ""|0|no|false|off) : ;;
+    *)
+        CMDLINE="$CMDLINE systemd.log_level=debug ignore_loglevel systemd.log_target=kmsg"
+        echo "note: systemd shutdown debug ON: systemd.log_level=debug ignore_loglevel systemd.log_target=kmsg" >&2
+        ;;
+esac
+# WP629: `INVFS_DEB_PRINT_CMDLINE=1` prints the assembled cmdline and stops,
+# so the exact boot parameters a gate used can be reproduced -- and so this
+# assembly is checkable without a QEMU guest, a kernel, an initramfs or a
+# volume. Deliberately after every contributor above it, so what is printed is
+# what would be booted.
+case "${INVFS_DEB_PRINT_CMDLINE:-0}" in
+    ""|0|no|false|off) : ;;
+    *)
+        printf '%s\n' "$CMDLINE"
+        exit 0
+        ;;
+esac
+
 # STAGE is required only when this run will IMPORT it. With
 # INVFS_DEB_VOLUME set the volume already holds the root and STAGE is
 # irrelevant -- which the first version of this reuse path did not allow, so it
 # exited 2 demanding a STAGE it was about to ignore.
+# These four refusals go to STDERR: stdout is reserved for the cmdline in
+# print mode, and keeping it empty on a refused run is what lets a wrapper
+# distinguish "here is the cmdline" from "here is why there is none".
 if [ -z "${INVFS_DEB_VOLUME:-}" ]; then
-    [ -n "$STAGE" ] || { echo "INVFS_DEB_STAGE must point at a provisioned Debian root"; exit 2; }
-    [ -d "$STAGE" ] || { echo "no such staged root: $STAGE"; exit 2; }
+    [ -n "$STAGE" ] || { echo "INVFS_DEB_STAGE must point at a provisioned Debian root" >&2; exit 2; }
+    [ -d "$STAGE" ] || { echo "no such staged root: $STAGE" >&2; exit 2; }
 fi
-[ -x "$B/invf-mkfs" ] || { echo "run make first"; exit 2; }
-[ -f "$INITRD" ] || { echo "no initramfs at $INITRD -- run tools/mkinitramfs.sh"; exit 2; }
+[ -x "$B/invf-mkfs" ] || { echo "run make first" >&2; exit 2; }
+[ -f "$INITRD" ] || { echo "no initramfs at $INITRD -- run tools/mkinitramfs.sh" >&2; exit 2; }
 
 mkdir -p "$WORK" "$LOGDIR"
 RAW="$WORK/deb.img"; SHADOW="$WORK/deb-shadow.img"
@@ -154,25 +230,6 @@ readable_kernel() {
     }
 }
 KERNEL="$(readable_kernel "$KERNEL")" || exit 1
-# invfs.init is named EXPLICITLY so the assertion below is about systemd
-# starting, not about /sbin/init happening to resolve.
-CMDLINE="console=ttyS0,115200 invfs.init=/lib/systemd/systemd"
-# WP629: mask the units that do no useful work on an emulated CPU but are
-# enough to lose the multi-user.target race on a shared TCG runner.
-# 2026-10-18 CI: the deadline fired with basic.target already reached and
-# systemd-journal-catalog-update.service having reported an error -- the
-# same unit 9b16f7a named as a 2m45 stall. The rest are timers that only
-# arm themselves. None of this is part of what the gate asserts: systemd
-# as PID 1, the root is FUSE, multi-user.target, clean poweroff.
-# systemd.mask= is a KERNEL-CMDLINE mask, deliberately: masking by writing
-# into $STAGE would change the tree that was imported, and the offline
-# check at the end compares $STAGE against the volume byte for byte.
-# INVFS_DEB_BOOT_MASK= (empty) boots unmasked.
-BOOT_MASK="${INVFS_DEB_BOOT_MASK-systemd-journal-catalog-update.service apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer fstrim.timer systemd-tmpfiles-clean.timer}"
-for _mu in $BOOT_MASK; do CMDLINE="$CMDLINE systemd.mask=$_mu"; done
-if [ -n "$BOOT_MASK" ]; then
-    echo "note: masking boot-noise units via systemd.mask=: $BOOT_MASK"
-fi
 # Accel: KVM when the runner actually has it, TCG otherwise. A host that has
 # /dev/kvm but refuses to open it (a container without the device mapped, or
 # without the supplementary group) otherwise fails with "failed to initialize
@@ -628,7 +685,13 @@ shut down within ${POWEROFF_TIMEOUT}s -- a clean shutdown on a FUSE root IS wort
         echo "--- the guest never powered down; its console has been silent for ${_po_quiet}s." >&2
         echo "--- last 25 lines of the guest console:" >&2
         sed 's/\x1b\[[0-9;]*m//g' "$SERIAL" 2>/dev/null | tail -25 >&2
-        fail "QEMU still running after the poweroff marker -- the guest wedged before poweroff. A kernel-level poweroff works here (SysRq 'o' reaches 'reboot: Power down'), so the wedge is inside systemd-shutdown: see INCIDENTS.md, 'a FUSE root cannot complete systemd's shutdown'"
+        # WP629: name the regression and the one instrument that can see inside
+        # systemd-shutdown. There is no shell to probe here (unlike the boot
+        # leg), so the re-run command IS the diagnosis step.
+        echo "--- re-run with INVFS_DEB_SHUTDOWN_DEBUG=1 to see inside systemd-shutdown" >&2
+        echo "    (it adds: systemd.log_level=debug ignore_loglevel systemd.log_target=kmsg --" >&2
+        echo "     log_level=debug alone is invisible: the kernel console loglevel filters it)" >&2
+        fail "QEMU still running after the poweroff marker -- the guest wedged before poweroff. A kernel-level poweroff works here (SysRq 'o' reaches 'reboot: Power down'), so the wedge is inside systemd-shutdown: systemd-shutdown never issued the powerdown. That wedge was diagnosed and fixed (WP630: a FUSE root must take the shutdown broadcast, not survive it), so this is a REGRESSION of that fix, not a new unknown -- see INCIDENTS.md, 'a FUSE root cannot complete systemd's shutdown'"
     fi
     say "poweroff OK (QEMU exited)"
 else

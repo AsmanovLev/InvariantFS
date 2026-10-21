@@ -1601,6 +1601,13 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-why.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sbin-shims.sh
+# WP629: the Debian boot harness assembles its kernel cmdline (six
+# systemd.mask= units + the opt-in systemd-shutdown debug trio) before any
+# preflight, so INVFS_DEB_PRINT_CMDLINE can print it. This gate asserts the
+# assembly byte for byte without a QEMU guest, a kernel, an initramfs or a
+# volume -- about a second, and it is the only coverage of that string short
+# of paying ~850 s for an import. Hermetic: no root, no /dev/shm, no loop.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-debian-cmdline.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-volume.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-sign.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-readdirplus.sh

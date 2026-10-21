@@ -13,7 +13,7 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
-## OPEN — a FUSE root cannot complete systemd's shutdown: `invf-fuse` is killed with no shutdown path
+## FIXED (WP630) — a FUSE root cannot complete systemd's shutdown: `invf-fuse` is killed with no shutdown path
 
   **Date:** Oct 19, 2026
   **Severity:** High (no clean shutdown/poweroff when the root is FUSE; the debian boot gate is red on this alone)
@@ -3189,11 +3189,27 @@ content cut -- vol_fsck.c names the gap; the bitmap has no CRC -- recorded
 gap; demanding pristine post-soak on an exhausted volume contradicts the
 in-soak proven-exhausted accept).
 
-## CI debian shutdown saga (2026-10-13/14): TCG budgets, then SIGTERM/@, then writeback stall — OPEN, WP626 owns the current layer
+## CI debian shutdown saga (2026-10-13/14): TCG budgets, then SIGTERM/@, then writeback stall — CLOSED (gate green), history kept
 
   **Date:** 2026-10-14
   **Severity:** Medium (CI red, no data loss; guest never powers off in budget)
-  **Status:** OPEN. Three layers peeled so far, each with its own fix:
+  **Status:** **CLOSED**, superseded by the entry at the top of this file
+  ("a FUSE root cannot complete systemd's shutdown", FIXED WP630). The gate
+  this entry was tracking now reaches `reboot: Power down` and QEMU exits, and
+  CI run 39201404127 on `751eab6` is green including
+  `installation-bootstrap-debian`. The three layers below are kept as the
+  record of how it was narrowed, with one honest caveat: Layer 3's *writeback
+  stall* reading was never separately re-tested — what is proven is that the
+  scenario no longer reproduces and that the mechanism recorded at the top of
+  this file (the daemon was SIGSTOPped by systemd's `killall()` fence and
+  never resumed) is what ended it. If the exact Layer 3 signature
+  (`fuse_wait_on_page_writeback` on `systemd-journal`) ever returns, that
+  layer is where to start rather than here.
+  The harness can now show `systemd-shutdown`'s own logging, which is what
+  Layer 3 lacked: `INVFS_DEB_SHUTDOWN_DEBUG=1` adds
+  `systemd.log_level=debug ignore_loglevel systemd.log_target=kmsg` to the
+  guest cmdline (`tools/boot-debian-qemu.sh`, WP629).
+  The three layers peeled at the time, each with its own fix (history):
   - Layer 1 (harness): 120s poweroff wait fired on a healthy-but-TCG-slow
     guest (same-sha flake). WP621: `INVFS_DEB_POWEROFF_TIMEOUT`, default 300;
     always-run serial rescue (prior reds arrived with no console).
@@ -3205,13 +3221,14 @@ in-soak proven-exhausted accept).
     daemon from both kill broadcasts; plain mounts keep SIGTERM-unmounts;
     gate `tools/test-sigterm-exit.sh` in `make e2e`; local KVM void-boot
     poweroff PASS.
-  - Layer 3 (engine/write path — CURRENT): with the `@` fix deployed, the
+  - Layer 3 (engine/write path — was CURRENT, now CLOSED with the entry
+    above): with the `@` fix deployed, the
     kill phase passes but final sync wedges: `systemd-journal:160 blocked
     >122s`, state D, `fuse_wait_on_page_writeback <- fuse_page_mkwrite`
     (mmap'd journal write on the FUSE root, request pending against a live
-    daemon that never answers). WP626 owns it. Prime suspect: WRITEBACK_CACHE
-    burst vs the daemon write/flush path; to be proven by request tracing,
-    not assumed.
+    daemon that never answers). WP626 owned it. Prime suspect:
+    WRITEBACK_CACHE burst vs the daemon write/flush path; to be proven by
+    request tracing, not assumed.
   Deliberately NOT done: guest DefaultTimeoutStopSec cuts (would let a hung
   FUSE unmount die by SIGKILL and still "power off" — the gate would stop
   proving clean shutdown).

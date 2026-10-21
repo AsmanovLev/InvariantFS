@@ -157,6 +157,17 @@ Useful variables:
 | `INVFS_DEB_ACCEL` | auto | KVM when `/dev/kvm` is r/w, else TCG |
 | `INVFS_DEB_PORT` | `2426` | the harness pre-checks it; a leaked QEMU holding it used to be reported as a filesystem failure |
 | `INVFS_DEB_LOGDIR` | `$WORK-logs` | serial log, QEMU stderr, import log |
+| `INVFS_DEB_SHUTDOWN_DEBUG` | unset | adds `systemd.log_level=debug ignore_loglevel systemd.log_target=kmsg` to the guest cmdline. For a poweroff red: the guest has no shell left to interrogate by then, so this is the only view inside `systemd-shutdown`, and `systemd.log_level=debug` **alone** shows nothing because the kernel console loglevel filters `KERN_DEBUG` (WP629) |
+| `INVFS_DEB_BOOT_MASK` | `systemd-journal-catalog-update.service apt-daily.timer apt-daily-upgrade.timer dpkg-db-backup.timer fstrim.timer systemd-tmpfiles-clean.timer` | units passed to the guest as `systemd.mask=` on the **kernel cmdline**, not written into the staged root — the offline check at the end compares the stage against the volume byte for byte, so masking there would fail the gate. Setting it to a list **replaces** the default; setting it to the empty string (`INVFS_DEB_BOOT_MASK=`) boots unmasked, which is what the `-` in `${INVFS_DEB_BOOT_MASK-…}` is for. Nothing the gate asserts (systemd as PID 1, `/` is FUSE, `multi-user.target`, clean poweroff) depends on a mask |
+| `INVFS_DEB_PRINT_CMDLINE` | unset | prints the assembled kernel cmdline to **stdout** and exits without booting anything, so a gate's exact parameters can be reproduced (`-append`-able: diagnostics go to stderr, so stdout is the cmdline and nothing else). Needs no build, kernel, initramfs or volume — the assembly sits above every preflight check |
+
+Those two variables are asserted without a guest by
+`tools/test-debian-cmdline.sh` (`make e2e`, about a second): it compares the
+assembled line byte for byte, checks that an empty `INVFS_DEB_BOOT_MASK`
+really means no mask and that a custom one replaces the default, and checks
+that the debug trio is appended whole and in order after the masks. It also
+fails if the assembly creeps back behind the preflight, because print mode is
+run against an empty `REPO` with no stage, no initramfs and no build.
 
 **The harness does not print `PASS`.** Boot assertions pass; the in-guest SSH
 leg does not, and a minbase Debian has no `procps`, so `ps -p 1` has nothing to
