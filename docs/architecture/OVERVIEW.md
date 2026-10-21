@@ -64,3 +64,22 @@ InvariantFS decouples immediate write ingestion from offline storage optimizatio
 - **Lock-Free Reads**: Readers query the Delta Log and the immutable B+ tree base without acquiring global locks.
 - **Atomic Root Publication**: The RT30 descriptor carries a `root_slot[2]` double slot and a monotone `seq`, with CRC32C validation over the whole 48-byte descriptor. The higher `seq` with a valid checksum is authoritative; a torn write loses to the sibling slot. (The "double slot" is the array inside the descriptor at `0x9D0` of block 0 — not a pair of blocks. See `docs/architecture/META.md` §2.)
 - **The Descriptor Is Not Its Own Backup**: that double slot protects a STALE ROOT, not a LOST DESCRIPTOR — two valid pointers inside one 48-byte structure die with the block holding them. A second, independent copy of RT30 and SPT0 therefore lives in the **ANC0 tail anchor**, one 124-byte descriptor in the last block of the device (`total_blocks - 1`, a computable address that needs no read of block 0). On open, a block-0 RT30/SPT0 that fails magic/version/CRC32C falls back to the anchor, the fallback is named on stderr, and `invf-fsck` reports `DAMAGED` — the tree is walkable, but the image is not sound. The anchor is **refused**, not adopted, when its geometry fingerprint (`total_blocks`, `block_size`, format version, volume UUID) does not match. Parity is not the mechanism: an XOR over block 0's contents dies with block 0, while a copy in a different *place* survives regional loss. Volumes formatted before the anchor existed have none and behave exactly as before; a resize invalidates the anchor rather than moving it. See `src/core/vol_anchor.h` and `src/core/invarifs.h` (`invfs_anc0`).
+
+## 5. How a codec pack is dispatched (in-process / IPC / exec)
+
+The three mechanisms exist and the rule for choosing between them lived only in
+the code until this table. `src/core/vol_cpack.c` is the only dispatcher.
+
+| mechanism | when it is chosen | cite |
+|---|---|---|
+| **in-process** (dlopen) | the operator named the pack explicitly (`-o allow_inprocess_plugins=<names>`, or `$INVFS_ALLOW_INPROCESS_PLUGINS` offline) **and** the pack passes all three trust gates: pilot allowlist, anchored origin (realpath on both sides), per-dispatch ed25519 re-verify | `src/core/vol_plugin_inproc.c` (`invfs_inproc_eligible`, `invfs_inproc_origin_anchored`) |
+| **IPC** | the in-process probe child failed (crash, hang, wrong ABI) — the daemon survives and the call falls back | `src/core/vol_plugin_client.c`; probe in `vol_plugin_inproc.c` (`probe_child`, `wait_ceiling`) |
+| **exec** | no in-process eligibility, or the pack only offers an executable command; the scratch directory is chosen under the capacity rules in AGENTS §2.8b | `src/core/helper_exec.c`, `src/core/tool_scratch.c` |
+
+Decision order: *in-process only for a named pack that passed every gate; on any
+failure fall back to IPC; exec is what remains.* The measured reason in-process
+exists at all is the estimate call: ~142 µs in-process against ~339 µs per
+fork+exec of the CLI helper (WP625), which is the floor of the win.
+
+The trust model behind gate 1-3 is written out in `docs/SECURITY.md` ("In-process
+plugins"); this table answers only *which mechanism runs*.
