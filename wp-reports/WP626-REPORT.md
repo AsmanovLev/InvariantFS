@@ -63,7 +63,7 @@ had nothing to do") and the drain must resume by itself after quiet (a
 deferral that never ends is a leak, not a yield).
 
 Result: PASS
-Remaining TODOs: the guest leg (tools/test-writeback-guest.sh, QEMU/KVM void
+Remaining TODOs: the guest leg (the writeback-guest script, left uncommitted in the worktree, QEMU/KVM void
 boot, USR1 pass + 1 GiB dirty + poweroff) is left UNCOMMITTED in the worktree:
 it needs /dev/kvm + sshpass + a provisioned stage tree and is not in any
 target, so committing it would repeat the "coverage that runs nowhere" mistake.

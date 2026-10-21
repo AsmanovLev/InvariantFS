@@ -120,7 +120,7 @@ above, which is what the WP asserts on.
 - `seg_extent`'s own failure modes; this WP only stops the reclaim acting on
   an extent it could not measure.
 - The `rawdisk`/codecpack classification issue referenced by the e2e runner.
-- The untracked `tools/test-writeback-guest.sh` in this worktree: untracked on
+- The untracked writeback-guest script in this worktree: untracked on
   `main` too, not mine, deliberately left alone and **not** committed.
 
 ## Remaining TODOs
