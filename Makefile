@@ -271,7 +271,7 @@ CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              rollback_symlink_test \
              sibling_retire_test tar_cap_test entry_v3_test fold_delta_read_test \
              tz_reg_collapse_test \
-             spn_walk_tear_test \
+             spn_walk_tear_test spn_broken_extent_test \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
              walk_status_test walk_status_fuse_test sweep_refuse_fuse_test no_v2_surface_test \
@@ -935,6 +935,12 @@ test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-delta_test
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tz_reg_collapse_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_walk_tear_test /tmp
+# WP632: the same reclaim, the other direction -- a segment the walk cannot
+# VERIFY (torn frame header, so seg_extent derives no extent) marks only its
+# head block, and `broken` never reached the reclaim decision. On a volume
+# that already had damage at capture the pass then freed the rest of every
+# such extent under live recipes. Damage contained, not amplified.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-spn_broken_extent_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-groupcommit_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-concurrency_test /tmp
 # WP-inode-get-fold-race: the fold frees the retired delta chain, and a

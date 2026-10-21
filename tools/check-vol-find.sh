@@ -79,6 +79,7 @@ src/cli/sibling_retire_test.c:196:ACTS
 src/cli/sibling_retire_test.c:211:ACTS
 src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
 src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
+src/cli/spn_broken_extent_test.c:148:SKIP   # setup: whether victim.bin resolves IS the fixture check -- the torn extent's blocks are what the capture is measured on
 src/cli/spn_walk_tear_test.c:176:SKIP   # oracle: whether the victim resolves IS the setup check -- the walk is measured against this id
 src/cli/tz_reg_collapse_test.c:158:SKIP   # oracle: whether the owner row resolves IS the fixture check -- the load is measured against this blob
 src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself

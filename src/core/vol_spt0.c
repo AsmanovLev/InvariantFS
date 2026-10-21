@@ -300,7 +300,13 @@ typedef struct {
     uint8_t *map;
     spn_dig *dig;
     size_t ndig, cdig;
-    uint64_t broken;         /* a segment that was already damaged at capture */
+    uint64_t broken;         /* a segment whose EXTENT the walk could not
+                              * verify (a torn frame header, or a block of the
+                              * derived run no longer allocated). Only its head
+                              * block is marked: the rest of the extent is an
+                              * UNKNOWN set, so this counts against
+                              * new_map_complete exactly as an indeterminate
+                              * inode does (see spt0_pin_take) */
     uint64_t marked;
     uint64_t recipes;
     uint64_t indeterminate;  /* an inode whose block set is UNKNOWN: see the
@@ -750,7 +756,18 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
             pba + plen > v->sb.total_blocks) {
             /* the header is already unusable: pin the head block so the
              * free path cannot hand it out, and record the damage so
-             * the restore-time check refuses instead of "restoring" it */
+             * the restore-time check refuses instead of "restoring" it.
+             *
+             * The HEAD is all this walk can know. plen came from the frame
+             * header and the header is exactly what did not verify, so the
+             * extent's reach is UNKNOWN -- and a segment's tail is not a
+             * separate object: the recipe names the extent, and a reader
+             * decodes it whole. Marking the head alone is therefore a
+             * deliberately partial answer, which is why `broken` is counted
+             * here rather than merely logged: the previous pin marked this
+             * extent WHOLE (it was healthy then), this map marks one block,
+             * and old_map \ new_map would free the rest of a live segment.
+             * spt0_pin_take reads `broken` for that reason. */
             if (!bit_get(c->map, pba)) {
                 bit_set(c->map, pba);
                 c->marked++;
@@ -895,6 +912,13 @@ static uint64_t spn_free_counted(invfs_volume *v, uint64_t pba, uint64_t n)
     return was;
 }
 
+/* `new_map_complete` is the caller's answer to "is new_map a complete record
+ * of what live objects own". TWO holes make it false, and they are the same
+ * hole at two scales: an inode whose block set could not be determined
+ * (spn_inode_block_set -> SPN_SET_UNKNOWN) and a segment whose extent could
+ * not be verified (spn_walk_ino: only its head block is marked). Neither
+ * answer is bounded by anything the walk can see, so neither may be used to
+ * conclude that a block is unowned. */
 static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
                             const uint8_t *new_map, int new_map_complete,
                             uint64_t root_pba)
@@ -1071,6 +1095,35 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
         return -1;
     }
     npinned = c.marked;
+    /* THE SAME RULE, for the segment that could not be VERIFIED.
+     *
+     * `indeterminate` is the inode-level hole: a recipe that would not load
+     * or parse names a block set nothing bounds. A broken extent is the
+     * segment-level one, and it is bounded in the worst possible direction: 
+     * the walk knows the first block and not the last, because the frame
+     * header it would have believed is the thing that failed. So the map is
+     * missing blocks a live recipe names, exactly as it is for an
+     * indeterminate inode -- and the reclaim's reading, "no live recipe names
+     * this any more", is false of them in exactly the same way.
+     *
+     * Measured (invf-spn_broken_extent_test, one torn 8-byte frame header on
+     * a 96 KiB incompressible file): the capture after it freed 16 blocks of
+     * that segment's extent and reported them as "no longer referenced by
+     * any live recipe", leaving a live recipe naming free blocks. Pre-existing
+     * damage at capture is not a licence to release anything; a pass that
+     * rewrites nothing must leave the extent where it is, so the damage stays
+     * contained (one unreadable segment, refusable by the restore-time check)
+     * instead of becoming a free the next allocation overwrites. */
+    if (c.broken && !c.indeterminate)
+        fprintf(stderr, "[spt0] save point: %llu of %llu segments have an "
+                "extent this walk could not VERIFY (a torn frame header, or a "
+                "block of the derived run no longer allocated). Only their "
+                "head block is pinned: the rest of each extent is an unknown "
+                "set, and this capture does NOT reclaim -- a map missing a "
+                "live segment's tail is not a basis for releasing the blocks "
+                "it is missing. The previous save point's hold is carried one "
+                "generation longer instead.\n",
+                (unsigned long long)c.broken, (unsigned long long)c.ndig);
     if (c.indeterminate)
         fprintf(stderr, "[spt0] save point: %llu of %llu live inodes in the "
                 "captured generation have a block set this walk could not "
@@ -1088,7 +1141,8 @@ static int spt0_pin_take(invfs_volume *v, uint64_t root_pba,
         old_map = spn_old_map_load(v, old_pba);
         if (old_map) {
             uint64_t freed = spn_reclaim(v, old_map, map,
-                                         c.indeterminate == 0, root_pba);
+                                         c.indeterminate == 0 &&
+                                         c.broken == 0, root_pba);
             /* WP137: publish the discharge. This is the ONLY place debt is
              * ever collected, so it is also the only place the FUSE ladder
              * can learn that the fill it is reading high is (or is no
