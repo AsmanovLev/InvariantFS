@@ -56,6 +56,7 @@
  * RAW-zone files unreadable on a degraded mount, because the failover
  * read needs the mirror index to find the dev1 copy. */
 #include "volume_internal.h"
+#include "vol_storage.h"   /* WP651 slice 1: storage-domain accessors */
 
 
 /* The owner-L2P map. There is no journal to carry it, so a map queued here
@@ -802,7 +803,7 @@ int vol_tier_migrate(invfs_volume *v)
     int rc = 0;
 
     v->tier_promoted = v->tier_demoted = v->tier_blocks = 0;
-    if (v->ndev != 2 || v->degraded || !vol_write_enabled(v))
+    if (v->ndev != 2 || vol_st_degraded(v) || !vol_write_enabled(v))
         return 0;
     if (!v->arena_blocks)
         return 0;   /* dev0 has no tail past the RAW zone: nothing to do */

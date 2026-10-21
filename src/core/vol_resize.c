@@ -3,6 +3,9 @@
 
 #include "volume_internal.h"
 #include "vol_anchor.h"
+/* WP651 slice 1: the resize apply is the one non-owner that rewrites the
+ * device table, so it goes through the storage domain's accessors. */
+#include "vol_storage.h"
 
 
 /* ---- WP18: offline resize roll-forward (descriptor: invarifs.h RSZ0) ---
@@ -44,10 +47,10 @@ int rsz0_sane(invfs_volume *v, const invfs_rsz0 *rz)
     if (v->ndev == 2) {
         /* shadow = dev1 canonical area, above the metadata mirror span;
          * dev0's layout (metadata + RAW + tier arena) never moves */
-        uint64_t want = v->dev0_blocks + 1 + n->metadata_zone_blocks +
+        uint64_t want = vol_st_dev0_blocks(v) + 1 + n->metadata_zone_blocks +
                         n->raw_zone_blocks;
         if (n->shadow_zone_start != want) return 0;
-        if (n->raw_zone_start + n->raw_zone_blocks > v->dev0_blocks)
+        if (n->raw_zone_start + n->raw_zone_blocks > vol_st_dev0_blocks(v))
             return 0;
     } else {
         if (n->shadow_zone_start != n->raw_zone_start + n->raw_zone_blocks)
@@ -334,13 +337,12 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
          * absorbed it) -- same block-0 write, so the table and the
          * superblock never disagree on disk. */
         if (v->ndev == 2) {
-            invfs_devt dt = v->devt;
+            invfs_devt dt = *vol_st_devt(v);
             dt.dev_blocks[1] = nsb->total_blocks - dt.dev_blocks[0];
             dt.crc32c = 0;
             dt.crc32c = devt_crc(&dt);
             memcpy(blk + INVFS_DEVT_OFF, &dt, sizeof dt);
-            v->devt = dt;
-            v->dev1_blocks = dt.dev_blocks[1];
+            vol_st_devt_commit(v, &dt);
         }
         if (io_seek(&v->io, 0) != 0 || io_write(&v->io, blk, sizeof blk) != 0)
             goto out;

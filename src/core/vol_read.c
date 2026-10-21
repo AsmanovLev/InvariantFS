@@ -2,6 +2,9 @@
  * inode/container read paths, ranged reads. Split from volume.c. */
 
 #include "volume_internal.h"
+/* WP651 slice 1: the tier-copy read asks the storage domain whether dev0 is
+ * session-skipped; the field is no longer in the open struct. */
+#include "vol_storage.h"
 #include "../codecs/deflate_repro.h"   /* the window transform inverse */
 
 
@@ -83,7 +86,7 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
      * copy is byte-identical, so the framed CRC proves it; any failure
      * falls back to the canonical dev1 segment (the copy is then stale
      * or dev0 is gone -- either way the canonical read is the truth). */
-    if (v->ndev == 2 && v->dev0_present && !v->dev_skip[0] &&
+    if (v->ndev == 2 && v->dev0_present && !vol_st_dev_skipped(v, 0) &&
         pba >= v->sb.shadow_zone_start) {
         uint64_t dpba = 0, dlen = 0;
         if (wp25_tier_lookup(v, pba, &dpba, &dlen) == 0) {

@@ -3,6 +3,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_storage.h"   /* WP651 slice 1: storage-domain accessors */
 #include "vol_delta.h"   /* WP612 retire API */
 
 
@@ -2415,7 +2416,7 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         uint64_t cl = out->raw_used_bytes + out->shadow_used_bytes +
                       out->text_used_bytes;
         if (v->ndev == 2) {
-            uint64_t span = (v->sb.shadow_zone_start - v->dev0_blocks) *
+            uint64_t span = (v->sb.shadow_zone_start - vol_st_dev0_blocks(v)) *
                             INVFS_BLOCK_SIZE;
             used = span < used ? used - span : 0;
         }

@@ -125,28 +125,28 @@ src/core/vol_cpack.c:4607:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
-src/core/vol_read.c:488:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
-src/core/vol_read.c:503:SKIP
-src/core/vol_read.c:1232:SKIP
-src/core/vol_read.c:1270:ACTS
-src/core/vol_read.c:1483:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1490:SKIP
-src/core/vol_read.c:1683:ACTS
-src/core/vol_read.c:881:SKIP
-src/core/vol_read.c:898:SKIP
-src/core/vol_read.c:958:SKIP
-src/core/vol_read.c:1033:SKIP
-src/core/vol_sweep.c:1890:SKIP
-src/core/vol_sweep.c:279:SKIP
-src/core/vol_sweep.c:584:ACTS
-src/core/vol_sweep.c:603:ACTS
-src/core/vol_sweep.c:623:ACTS
-src/core/vol_sweep.c:656:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_read.c:491:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
+src/core/vol_read.c:506:SKIP
+src/core/vol_read.c:1235:SKIP
+src/core/vol_read.c:1273:ACTS
+src/core/vol_read.c:1486:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1493:SKIP
+src/core/vol_read.c:1686:ACTS
+src/core/vol_read.c:884:SKIP
+src/core/vol_read.c:901:SKIP
+src/core/vol_read.c:961:SKIP
+src/core/vol_read.c:1036:SKIP
+src/core/vol_sweep.c:1891:SKIP
+src/core/vol_sweep.c:280:SKIP
+src/core/vol_sweep.c:585:ACTS
+src/core/vol_sweep.c:604:ACTS
+src/core/vol_sweep.c:624:ACTS
+src/core/vol_sweep.c:657:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:784:SKIP
-src/core/vol_tier.c:302:SKIP
-src/core/volume.c:916:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1360:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1361:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/vol_tier.c:303:SKIP
+src/core/volume.c:960:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1404:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1405:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

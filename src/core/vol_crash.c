@@ -2,6 +2,7 @@
  * gate. Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_storage.h"   /* WP651 slice 1: storage-domain accessors */
 
 
 /* ================= crash consistency =================
@@ -78,7 +79,7 @@
 int vol_mark_dirty(invfs_volume *v)
 {
     if (!vol_write_enabled(v)) {
-        if (v->degraded)
+        if (vol_st_degraded(v))
             fprintf(stderr, "vol: write refused: DEGRADED mount (device 0 "
                     "absent) -- the volume is read-only (EROFS). Reattach "
                     "dev0 for read-write.\n");

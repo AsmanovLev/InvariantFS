@@ -2,6 +2,7 @@
  * Split from volume.c. */
 
 #include "volume_internal.h"
+#include "vol_storage.h"   /* WP651 slice 1: storage-domain accessors */
 #include "vol_delta.h"   /* WP607 retire API */
 
 typedef struct invfs_wsession invfs_wsession;
@@ -1035,7 +1036,7 @@ uint64_t vol_write_bulk(invfs_volume *v, const char *name,
     }
     if (!vol_write_enabled(v)) {
         fprintf(stderr, "invarifs: volume is read-only%s -- write refused "
-                "(EROFS)\n", v->degraded ? " (DEGRADED)" : "");
+                "(EROFS)\n", vol_st_degraded(v) ? " (DEGRADED)" : "");
         return 0;
     }
     /* THE DECISION, and the one place on this path where getting it wrong

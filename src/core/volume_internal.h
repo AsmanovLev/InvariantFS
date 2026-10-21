@@ -40,6 +40,7 @@
 
 #include "invarifs.h"
 #include "volume.h"
+#include "vol_storage.h"
 #include "vol_walk.h"
 #include "blkio.h"
 #include "arc.h"
@@ -567,25 +568,15 @@ typedef struct invfs_volume {
      * dev0_present... io_open[] tracks which blkio_open calls succeeded
      * so vmux_close never closes a half-initialized backend. */
     blkio    io2;
-    char    *path2;          /* dev1 path as opened (diagnostics) */
     int      io_open[2];
     int      ndev;           /* 0 while bootstrapping, then 1 or 2 */
     int      dev0_present;   /* 0: degraded mount, serving from dev1 */
-    int      dev_skip[2];    /* session exclusion after a write/barrier
-                              * failure on that device (next open resyncs) */
-    int      degraded;       /* read-only degraded mount (dev0 absent) */
-    invfs_devt devt;         /* the device table as read/written */
-    int      devt_present;   /* a valid DEVT was read at open */
-    int      resync_pending; /* open found a stale mirror (seq mismatch) */
-    int      resync_winner;  /* device index holding the newest metadata */
-    uint64_t dev0_blocks;    /* dev0 size in blocks (== sb.total_blocks
-                              * when ndev < 2) */
-    uint64_t dev1_blocks;
-    uint64_t meta_end_bytes; /* mirrored metadata span [0, this) */
-    uint64_t mux_pos;        /* virtual cursor behind io_seek/io_read */
-    int      raw_mirror;     /* DEVTF_RAW_MIRROR */
-    int      rawio_logged;   /* one-shot "dev0 raw write failed" log */
-    int      metaread_logged;/* one-shot metadata failover log */
+    /* WP651 slice 1: the rest of the WP25 device/mirror state moved into
+     * the storage domain header, which is also its accessor surface. The
+     * owner is volume.c (the mux, the two open legs, the resync, the DEVT
+     * writer); every other module goes through vol_st_*(). The field block
+     * is unchanged -- same fields, same comments, same lifecycle. */
+    invfs_vol_storage st;
     /* dev0 tier arena: [arena_start, arena_start+arena_blocks) -- the dev0
      * tail past the RAW zone. Holds ONLY redundant acceleration copies
      * (heat promotions): canonical data never lands there, so dev0's loss
@@ -2302,7 +2293,8 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
 /* ---- WP25: two-device volumes ----
  * (the mux prototypes live with the io_* macros above the struct;
  *  vol_ndev/vol_degraded/vol_mirror_stale/vol_tier_count/vol_rawm_count
- *  are public in volume.h) */
+ *  are public in volume.h. WP651 slice 1: the device/mirror STATE and its
+ *  accessor surface live in vol_storage.h -- see the `st` member above.) */
 
 /* CRC convention: over the full descriptor with the crc32c field read as
  * zero (the RDP0 rule). */
@@ -2318,8 +2310,8 @@ int vol_write_devt(invfs_volume *v);
 /* The volume reads with dev0 absent (degraded mount): every metadata
  * structure comes from the dev1 mirror, all canonical data reads serve
  * from dev1 (canonical shadow placement + the RAW mirror), ops needing
- * dev0 fail loudly. State lives in v->degraded (public probes in
- * volume.h). */
+ * dev0 fail loudly. State lives in v->st.degraded (vol_storage.h; public
+ * probes in volume.h). */
 
 /* Load/rebuild the tier + rawm indexes from their owner records (once per
  * open, after the inode scan built the indexes). */
