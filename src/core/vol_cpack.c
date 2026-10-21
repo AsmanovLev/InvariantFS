@@ -14,6 +14,9 @@
 #include "../codecs/deflate_repro.h"
 #include <dirent.h>
 #include <sys/stat.h>
+#ifndef _WIN32
+#include <sys/mman.h>   /* WP641: streaming lane reads the pin through a mapping */
+#endif
 
 
 /* WP61: the pack-child containment (Landlock + namespaces + rlimits +
@@ -3595,6 +3598,135 @@ static int cpack_batch_run(const invfs_codec *pc, const uint8_t *table,
 }
 
 
+/* WP641: streaming lane admission for containers bigger than RAM.
+ *
+ * vol_containerpack_sweep() takes the whole container in memory (`full`):
+ * the pin file, the rebuild-verify memcmp and the map guard all read it.
+ * On a small-RAM box a multi-GB container can therefore never be
+ * decomposed: the in-daemon 1 Hz drain runs the full dispatch first and
+ * its generic floor claims the file (stamped GENERIC), after which the
+ * offline sweep correctly skips it as already swept -- the lane never runs
+ * (measured on a 16 GiB NTFS image with 12 GiB of members on a 7 GiB host).
+ *
+ * Passing NULL for `full` switches the same function to streaming mode:
+ * the pin is written with ranged reads (O(1) RAM), then mmapped so every
+ * downstream consumer -- estimate inputs excepted, they are all
+ * file-based -- sees the identical bytes through the page cache instead
+ * of malloc. The ONLY behavioral difference is the absence of a doomed
+ * whole-file malloc; the pack commands, the guards, the size math and the
+ * commit are unchanged, so a decomposed file is byte-identical whichever
+ * mode ran. (Windows: the lane's pack exec is POSIX-only, so streaming
+ * declines there -- same as a failed whole-file read, retried next sweep.)
+ */
+#define CPACK_STREAM_CHUNK (4u << 20)   /* ranged pin window, O(1) RAM */
+
+/* Stream the container into the pin file with bounded memory. Mirrors
+ * tool_write()'s contract (exact bytes or a loud -1, nothing partial). */
+static int cpack_stream_pin(invfs_volume *v, uint64_t inode,
+                            uint64_t full_len, const char *pin)
+{
+    FILE *o;
+    uint8_t *buf;
+    uint64_t off = 0;
+    buf = (uint8_t *)malloc(CPACK_STREAM_CHUNK);
+    if (!buf) return -1;
+    o = fopen(pin, "wb");
+    if (!o) { free(buf); return -1; }
+    while (off < full_len) {
+        size_t want = (size_t)((full_len - off > CPACK_STREAM_CHUNK)
+                               ? CPACK_STREAM_CHUNK : (full_len - off));
+        int got = vol_read_range(v, inode, off, want, buf);
+        if (got < 0 || (size_t)got != want) break;
+        if (fwrite(buf, 1, want, o) != want) break;
+        off += want;
+    }
+    free(buf);
+    if (off != full_len || fclose(o) != 0) {
+        /* a partial pin is worse than none: the next read would see a
+         * truncated container and the guards could not tell why */
+        unlink(pin);
+        return -1;
+    }
+    return 0;
+}
+
+#ifndef _WIN32
+/* Map the pin file read-only so the shared body below runs UNCHANGED on
+ * big containers: estimate inputs are already file-based, the rebuild
+ * and map-guard memcmps read through the mapping, and the scratch
+ * migration re-writes from it. The pages are file-backed and evictable,
+ * so a 16 GiB container costs address space, not RAM. MAP_PRIVATE: the
+ * sweep never writes through this mapping. */
+static const uint8_t *cpack_mmap_ro(const char *path, size_t len,
+                                     size_t *mlen_out)
+{
+    int fd;
+    struct stat st;
+    void *m;
+    if (!path || !len) return NULL;
+    fd = open(path, O_RDONLY);
+    if (fd < 0) return NULL;
+    if (fstat(fd, &st) != 0 || (uint64_t)st.st_size != len) {
+        close(fd);
+        return NULL;
+    }
+    m = mmap(NULL, (size_t)len, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (m == MAP_FAILED) return NULL;
+    if (mlen_out) *mlen_out = (size_t)len;
+    return (const uint8_t *)m;
+}
+
+static void cpack_munmap_ro(const uint8_t *p, size_t len)
+{
+    if (p && len) munmap((void *)p, len);
+}
+#else
+/* The lane's pack exec is POSIX-only (the tool layer declines on Windows),
+ * so the streaming path declines there too: same as a failed whole-file
+ * read, retried next sweep. */
+static const uint8_t *cpack_mmap_ro(const char *path, size_t len,
+                                     size_t *mlen_out)
+{
+    (void)path; (void)len; (void)mlen_out;
+    return NULL;
+}
+static void cpack_munmap_ro(const uint8_t *p, size_t len)
+{
+    (void)p; (void)len;
+}
+#endif
+
+/* Streaming rebuild-verify: chunked memcmp of a mapped image against a
+ * host file. 0 = identical, nonzero = differ or unreadable (fail closed
+ * exactly like the whole-file memcmp it replaces). */
+static int cpack_cmp_mapped(const uint8_t *base, size_t len,
+                            const char *path)
+{
+    FILE *o;
+    uint8_t *buf;
+    size_t off = 0;
+    int rc = -1;
+    if (!path) return -1;
+    if (len == 0) return 0;
+    if (!base) return -1;
+    o = fopen(path, "rb");
+    if (!o) return -1;
+    buf = (uint8_t *)malloc(CPACK_STREAM_CHUNK);
+    if (!buf) { fclose(o); return -1; }
+    while (off < len) {
+        size_t want = (len - off > CPACK_STREAM_CHUNK) ?
+                      CPACK_STREAM_CHUNK : (len - off);
+        if (fread(buf, 1, want, o) != want) break;
+        if (memcmp(base + off, buf, want) != 0) { rc = 1; break; }
+        off += want;
+    }
+    if (off == len) rc = 0;
+    free(buf);
+    fclose(o);
+    return rc;
+}
+
 /* WP16a sweep attempt: decompose one RAW container through a container
  * codecpack. See the section header for the pipeline; the return
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
@@ -3628,6 +3760,13 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     /* the superseded parent recipe, released once the commit is complete */
     invfs_inode old_in;
     uint8_t old_addr[INVFS_RECIPE_ADDR_LEN];
+    /* WP641 streaming state: when `full` arrived NULL the pin is streamed
+     * with ranged reads and mmapped below (fbuf), instead of memcpied
+     * whole. `out:` unmaps it. Every consumer in between just reads bytes,
+     * so a NULL `full` changes nothing but the peak RAM. */
+    const uint8_t *fbuf = full;
+    size_t fmap_len = 0;
+    int streaming = (full == NULL);
     if (!pc->probe || !pc->probe()) {
         /* "tools absent: wait" is rc 1, which is ALSO what the DEFER_ENOSPC
          * path below returns -- but that one leaves a cls=9 stamp and this one
@@ -3645,16 +3784,6 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         def ? def->decomp_gen : -1, pc->generation);
     if (!def || !def->is_container) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] not-a-container-def\n"); return 0; }
     if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] name too long\n"); return 0; }
-    {
-        /* leftover siblings can only come from a decomposition killed
-         * mid-commit (a finished one is CONTAINER-stamped and never
-         * reaches here): purge and proceed rather than refusing the file
-         * forever (the EXER rule) */
-        char tn[288];
-        snprintf(tn, sizeof tn, "%s!mbrt", name);
-        if (vol_find(v, tn) != 0)
-            vol_delete_siblings(v, name);
-    }
     /* Phase 1 of the scratch decision: the PIN is the one file whose size
      * is known before the pack has been asked anything, so the scratch is
      * sized for it here. The member total only becomes known after
@@ -3667,7 +3796,58 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     snprintf(pout, sizeof pout, "%s/out", dir);
     snprintf(pmap, sizeof pmap, "%s/map", dir);
     snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
-    if (tool_write(pin, full, full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tool_write pin failed\n"); goto out; }
+    if (fbuf) {
+        if (tool_write(pin, fbuf, full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tool_write pin failed\n"); goto out; }
+    } else {
+        /* WP641 streaming admission (NULL full): pin with ranged reads,
+         * then mmap it so every consumer below works unchanged. */
+        if (cpack_stream_pin(v, inode_id, full_len, pin) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] stream pin failed\n");
+            goto out;
+        }
+        fbuf = cpack_mmap_ro(pin, full_len, &fmap_len);
+        if (!fbuf || fmap_len != full_len) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] pin map failed\n");
+            cpack_munmap_ro(fbuf, fmap_len);
+            goto out;
+        }
+        streaming = 1;
+        /* The one line that makes the mode checkable from outside: a gate
+         * that wants to prove which admission ran (whole-file bytes in
+         * hand vs ranged pin + mmap) cannot see it in the pack's output,
+         * because both paths run the same pack commands. tools/test-ntfs-
+         * big.sh asserts this line on the forced-streaming leg and its
+         * absence on the whole-file leg. */
+        if (getenv("INVFS_DEBUG_PACKS"))
+            fprintf(stderr, "[cpack] streaming admission: %llu bytes "
+                            "(ranged pin + mmap)\n",
+                    (unsigned long long)full_len);
+    }
+
+    /* Leftover siblings can only come from a decomposition killed
+     * mid-commit (a finished one is CONTAINER-stamped and never reaches
+     * here): purge and proceed rather than refusing the file forever (the
+     * EXER rule).
+     *
+     * WP641: this purge runs AFTER the pin, not before, and the order is
+     * load-bearing for the streaming admission. A migration re-decomposes a
+     * container that is ALREADY decomposed: its members, its !mbrt and its
+     * !mbrmap are the live copy of the data the pin has to read. Purging
+     * first deleted the map out from under the streamed read -- measured on
+     * a gen-2 decomposition with the pack generation bumped to 7:
+     * vol_find("diska.qcow2!mbrmap") answered 9 immediately before the
+     * call and 0 inside it, the pin read fell back to the pack's rebuild
+     * exec, and the container was left with no siblings at all. The
+     * whole-file path never saw this because its bytes were already taken
+     * (vol_read_file) by the caller; now both paths take their copy before
+     * anything is deleted, and a streamed container is purged only once the
+     * bytes are on disk in scratch -- where a purge cannot reach them. */
+    {
+        char tn[288];
+        snprintf(tn, sizeof tn, "%s!mbrt", name);
+        if (vol_find(v, tn) != 0)
+            vol_delete_siblings(v, name);
+    }
 
     /* 1. enumerate: the member table. Each failure mode gets its own line.
      * These three used to be one "[cpack] table parse failed nmem=%zu" and
@@ -3707,7 +3887,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         scratch_file carried[2];
 
         carried[0].name = "in";
-        carried[0].data = full;
+        carried[0].data = fbuf;
         carried[0].len = full_len;
         carried[1].name = "table";
         carried[1].data = table;
@@ -3808,6 +3988,44 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, pin, NULL,
                              NULL, NULL, precipe) != 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] strip failed\n"); goto out; }
+    /* 3b. WP641 recipe admission (INVFS_CPACK_RECIPE_MAX, MiB; UNSET = no
+     * limit, so no decomposition that works today changes).
+     *
+     * The recipe is slurped whole (`recipe` below) and then written as one
+     * blob, so this lane's RAM is O(recipe) even when the container streams.
+     * Usually that is nothing -- a few KiB of headers -- but a pack that
+     * keeps its container's NON-member bytes byte-exact stores the
+     * COMPLEMENT OF THE MEMBERS in the recipe: measured on this leg's 16 GiB
+     * / 200 x 60 MiB NTFS corpus the recipe is 4,596,965,280 B (pin 16 GiB
+     * minus 12 GiB of members). Streaming the pin is what made such a
+     * container reachable at all, and the very next step is a 4.6 GiB
+     * malloc: on a 7 GiB box with ~2 GiB available the sweep was OOM-killed
+     * there (2026-10-21T11:05, right after this point). An OOM kill is not a
+     * refusal an operator can read, and it takes the whole sweep with it, so
+     * refuse by NAME first and let the generic floor keep the bytes.
+     *
+     * Deliberately no default constant: any default turns decompositions
+     * that work on a big-RAM box today into generic-floor ones, and the
+     * honest default is "as much RAM as this box has". Deriving that here
+     * needs MemAvailable, which src/core/tool_scratch.c:184 already reads;
+     * exporting it is the follow-up, and until then the knob is explicit. */
+    {
+        uint64_t rmax = 0;
+        const char *renv = getenv("INVFS_CPACK_RECIPE_MAX");
+        struct stat rst;
+        if (renv && *renv) rmax = strtoull(renv, NULL, 10) << 20;
+        if (rmax && stat(precipe, &rst) == 0 && rst.st_size > 0 &&
+            (uint64_t)rst.st_size > rmax) {
+            fprintf(stderr,
+                    "cpack: %s: %s: the recipe is %llu bytes and the engine "
+                    "holds it in RAM whole; the limit is %llu bytes "
+                    "(INVFS_CPACK_RECIPE_MAX, MiB). Declining: the file keeps "
+                    "its own bytes and the generic floor may re-encode it."
+                    "\n", pc->name, name,
+                    (unsigned long long)rst.st_size, (unsigned long long)rmax);
+            goto out;
+        }
+    }
     if (slurp_file(precipe, &recipe, &recipe_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] recipe slurp failed\n"); goto out; }
 
     /* 4. extract every member into the scratch dir as "<idx>"; the pack
@@ -3972,15 +4190,26 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_REBUILD, NULL, NULL,
                                  pmdir, precipe, pout) != 0)
             goto out;
-        if (slurp_file(pout, &outb, &out_len) != 0 ||
-            out_len != full_len ||
-            (full_len && memcmp(outb, full, full_len) != 0)) {
-            fprintf(stderr, "sweep: %s: %s: rebuild guard refused, "
+        if (!streaming) {
+            if (slurp_file(pout, &outb, &out_len) != 0 ||
+                out_len != full_len ||
+                (full_len && memcmp(outb, fbuf, full_len) != 0)) {
+                fprintf(stderr, "sweep: %s: %s: rebuild guard refused, "
                             "decomposition abandoned\n", pc->name, name);
-            goto out;
+                goto out;
+            }
+            free(outb);
+            outb = NULL;
+        } else {
+            /* WP641 streaming verify: chunked memcmp of the rebuilt file
+             * against the mapped pin (no whole-file malloc on either
+             * side). Identical bar, streaming reads. */
+            if (cpack_cmp_mapped(fbuf, full_len, pout) != 0) {
+                fprintf(stderr, "sweep: %s: %s: rebuild guard refused, "
+                        "decomposition abandoned\n", pc->name, name);
+                goto out;
+            }
         }
-        free(outb);
-        outb = NULL;
         /* WP119: the size guard, AFTER the 1:1 proof and for the same
          * reason the map path prices after its shape check -- a pack that
          * cannot rebuild its own container is broken, and that is the more
@@ -4081,7 +4310,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        if (cpack_map_guard(v, name, newino, full, full_len,
+        if (cpack_map_guard(v, name, newino, fbuf, full_len,
                             ments, nments, mem_sorted, nmem) != 0) {
             fprintf(stderr, "sweep: %s: %s: map guard refused, "
                             "decomposition abandoned\n", pc->name, name);
@@ -4178,6 +4407,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     }
     rc = 100 + (int)pc->algo;   /* the WP13 pack rc convention */
 out:
+    if (streaming) cpack_munmap_ro(fbuf, fmap_len);
     /* scratch cleanup (member temps are named by the parsed idx set) */
     tool_rm(dir, "in");
     tool_rm(dir, "table");
@@ -4203,6 +4433,25 @@ out:
     return rc;
 }
 
+/* WP641 streaming entry: decompose containers bigger than RAM without a
+ * whole-file malloc. The size comes from the row; the pin streams with
+ * ranged reads, is mmapped, and vol_containerpack_sweep runs UNCHANGED on
+ * the mapped bytes (NULL `full` selects the streaming pin path inside).
+ * Same guards, same commit, same refusal semantics as the whole-file
+ * path -- the difference is O(1) RAM instead of O(file). Returns what
+ * vol_containerpack_sweep returns. */
+int vol_containerpack_sweep_stream(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const invfs_codec *pc)
+{
+    invfs_inode in;
+    if (!v || !name || !name[0] || !pc)
+        return 0;
+    if (vol_inode_get(v, inode_id, &in) != 1 || in.size == 0)
+        return 0;
+    return vol_containerpack_sweep(v, inode_id, name, pc, NULL,
+                                   (size_t)in.size);
+}
+
 
 /* ---- decomposition migration (WP-Q2R3) -----------------------------------
  *
@@ -4225,8 +4474,6 @@ out:
 int vol_cpack_migrate(invfs_volume *v, uint64_t inode_id, const char *name,
                       const invfs_codec *pc)
 {
-    uint8_t *full = NULL;
-    size_t full_len = 0;
     int rc;
 
     if (!pc || !name || !name[0] || strchr(name, '!')) return 0;
@@ -4288,17 +4535,11 @@ int vol_cpack_migrate(invfs_volume *v, uint64_t inode_id, const char *name,
             return 0;
         }
     }
-    if (vol_read_file(v, inode_id, &full, &full_len) != 0 || !full) {
-        fprintf(stderr, "sweep: %s: %s: migration read-back failed, "
-                        "decomposition left as is\n", pc->name, name);
-        return -1;
-    }
-    if (getenv("INVFS_DEBUG_PACKS"))
-        fprintf(stderr, "[cpack] migrate %s: %zu bytes re-decomposed "
-                        "(gen %u -> %u)\n", name, full_len,
-                cpack_map_decomp_gen(v, name), pc->generation);
-    rc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
-    free(full);
+    /* WP641: stream the re-decomposition instead of reading the whole
+     * container (same wall as the first decomposition: a big file cannot
+     * malloc its recipe input). The streaming entry re-reads sizes from
+     * the row, so no whole-file buffer is needed here either. */
+    rc = vol_containerpack_sweep_stream(v, inode_id, name, pc);
     if (rc >= 100) {
         /* re-stamped by the commit; the sweep counts it as swept */
         return 1;

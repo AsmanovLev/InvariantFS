@@ -2273,10 +2273,19 @@ int cpack_parse_table(const uint8_t *text, size_t len,
  * convention mirrors vol_pack_sweep (100+algo on commit, 1 = tools absent
  * -- wait RAW and unstamped, 0 = declined: fall through to text/generic;
  * GENERIC_MEMLIMIT is stamped on a policy refusal, everything else leaves
- * the stamp to the generic path below). */
+ * the stamp to the generic path below).
+ * WP641: `full == NULL` selects the streaming path (the pin is streamed
+ * with ranged reads and mmapped inside; identical guards and commit, O(1)
+ * RAM instead of a whole-file malloc). Callers that already hold the bytes
+ * pass them; callers that do not pass NULL plus the row size. */
 int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                                    const char *name, const invfs_codec *pc,
                                    const uint8_t *full, size_t full_len);
+/* WP641 streaming entry: decompose containers bigger than RAM. Sized from
+ * the row; pins by streaming, runs vol_containerpack_sweep on the mapped
+ * pin. Same return contract. */
+int vol_containerpack_sweep_stream(invfs_volume *v, uint64_t inode_id,
+                                   const char *name, const invfs_codec *pc);
 uint32_t cpack_map_decomp_gen(invfs_volume *v, const char *name);
 int vol_cpack_migrate(invfs_volume *v, uint64_t inode_id, const char *name,
                       const invfs_codec *pc);

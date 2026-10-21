@@ -1340,10 +1340,14 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                         continue;
                     if (pc->sniff(head, (size_t)head_len, name) <= 0)
                         continue;
-                    if (vol_read_inode(v, inode_id, 0, &full, &full_len) == 0 && full) {
-                        prc = vol_containerpack_sweep(v, inode_id, name, pc, full, full_len);
-                        free(full);
-                        full = NULL;
+                    {
+                        /* WP641: stream big containers instead of reading
+                         * them whole (a 16 GiB file on a 7 GiB box can never
+                         * malloc its recipe input; the old whole-file read
+                         * failed closed here and the generic floor silently
+                         * took every big container instead). in.size is the
+                         * length; contents stream from the volume. */
+                        prc = vol_containerpack_sweep_stream(v, inode_id, name, pc);
                         if (prc >= 100) return prc;
                         uint8_t chk_cls = 0;
                         if (vol_get_class(v, inode_id, &chk_cls, NULL, NULL) == 0 &&

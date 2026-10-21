@@ -107,22 +107,21 @@ src/cli/window_test.c:176:SKIP
 src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
-src/cli/window_test.c:176:SKIP
-src/core/vol_cpack.c:396:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:2970:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3314:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3313:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3411:SKIP   # map-gen probe: miss means no map (gen 0)
-src/core/vol_cpack.c:3410:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:3655:SKIP   # leftover-sibling check: absent means nothing to purge
-src/core/vol_cpack.c:4151:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:4233:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:4249:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:4248:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:4253:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:4274:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:4334:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:4366:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:399:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
+src/core/vol_cpack.c:2973:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3316:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3317:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3413:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3414:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:3848:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
+src/core/vol_cpack.c:4380:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:4480:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:4495:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:4496:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:4500:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:4521:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:4575:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:4607:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
@@ -137,7 +136,7 @@ src/core/vol_read.c:881:SKIP
 src/core/vol_read.c:898:SKIP
 src/core/vol_read.c:958:SKIP
 src/core/vol_read.c:1033:SKIP
-src/core/vol_sweep.c:1886:SKIP
+src/core/vol_sweep.c:1890:SKIP
 src/core/vol_sweep.c:279:SKIP
 src/core/vol_sweep.c:584:ACTS
 src/core/vol_sweep.c:603:ACTS
