@@ -1,0 +1,68 @@
+# iso9660 codecpack (WP636): ISO9660 / Joliet / UDF optical images ->
+# one member per RECORDED FILE DATA EXTENT.
+#
+# Bit-exactness is by construction, the same shape qcow2/rawdisk/p7z/fatfs
+# follow: `strip` writes an I9R1 recipe holding the image size, the member
+# table, and every byte OUTSIDE the member extents verbatim, in file order;
+# `rebuild` truncates and splices. Filesystem metadata (system area, volume
+# descriptors, path tables, directory records, UDF file entries, boot
+# catalogs, holes, any gap or junk) is NEVER regenerated, so there is
+# nothing to re-encode and nothing to get subtly wrong. The descriptor sets
+# are parsed ONLY to locate member extents, and the FS's own sweep guard
+# memcmps a full recipe+member rebuild against the original before it
+# commits anything (src/core/vol_cpack.c), so a wrong extent table is a
+# REFUSAL, never corruption. See iso9660.c's header for the format.
+#
+# Holes (ISO extent type 2/3, UDF AD types 1/2) are deliberately NOT
+# members: their on-disk bytes need not be zeros, so they stay in the
+# recipe. A zero-length file has no extent at all and is recipe-only.
+#
+# The helper is a self-contained C11 binary (libc only), built in place by
+# tools/test-iso9660.sh:
+#   cc -std=c11 -O2 -Wall -Wextra -o bin/iso9660 iso9660.c
+# (argv0 is the pack-dir-relative "bin/iso9660": the FS probe resolves argv0
+# against the pack dir and does NOT substitute {pack} there).
+#
+# Sniff: both rules land on the volume recognition sequence at sector 16
+# (byte 16*2048+1 = 32769) -- "CD001" for an ISO9660 descriptor, "BEA01"
+# for a UDF beginning-extended-area descriptor. A UDF bridge disc carries
+# both; the helper's strict parse decides, and a sniff hit whose parse
+# fails is a DECLINE (exit 3), so a stray "CD001" never claims a file.
+name = iso9660
+type = container
+# algo 26: first free production id (builtins own 0..15, packs 4/13/16-23,
+# INVFS_ALGO_WINDOW_SRC 24, INVFS_ALGO_NBLI 25, test packs 40/41). Do not
+# reuse 24/25: WP627 measured what an id collision costs (rawdisk vs NBLI,
+# e2e-full red).
+algo = 26
+codec_id = 26
+pack_version = 1
+version = 1
+min_read = 1
+generation = 1
+family = container
+category = primary
+provides = container
+replaces =
+conflicts =
+priority = 100
+caps = container|external
+dec_mem = 0
+sniff.offset = 32769
+sniff.magic = 4344303031
+sniff.magic = 4245413031
+sniff.ext = iso,udf
+enumerate = bin/iso9660 enumerate {in} {out}
+extract = bin/iso9660 extract {in} {idx} {out}
+strip = bin/iso9660 strip {in} {out}
+rebuild = bin/iso9660 rebuild {recipe} {dir} {out}
+# WP16b: the map command makes the pack SEEKABLE (CAP_SEEK): reads splice
+# locally from the recipe + member siblings and never exec the pack. Every
+# member is one contiguous extent, so the map is a 1:1 partition.
+map = bin/iso9660 map {in} {out}
+# Opt into the FS-owned decomposition generation (inert for the v1 MRMP map
+# this pack renders today, correct the day it emits v2).
+decomp_gen = 1
+# decode working set = sum(member usize) + 64 MiB (descriptor sets + walk
+# state; the members themselves are streamed one at a time)
+estimate = bin/iso9660 estimate {in}

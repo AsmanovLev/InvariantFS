@@ -80,6 +80,12 @@ splt_test    mirror  -           -
 #     the .so glue so forks are deletable, then delete" means in practice.
 ext4fs       fork    -           -
 fatfs        fork    -           -
+# WP636: engine-originated pack, no registry counterpart yet (layer B/C
+# report 'not in the registry (nothing to compare)'); fork records that
+# when it lands there the vendored source is the SUPERSET side, as for the
+# other engine-first packs. No generation macro: the manifest's
+# 'generation = 1' is the only declaration.
+iso9660      fork    -           -
 ntfs         fork    -           -
 p7z          fork    -           -
 rawdisk      fork    -           -
