@@ -20,7 +20,7 @@
 #   wrapped/16-bit/noise -> GENERIC_GUARD{10}, JPEG -> CODEC{JXL=4};
 #   everything bit-exact; re-sweep idle.
 # Leg 2 (nbli): fresh image, same corpus -> RGB/gray/real-pixels ->
-#   CONTAINER{NBLI=16,gen=1} ("[sweep] f: nbli (pack)" lines), RGBA ->
+#   CONTAINER{NBLI=25,gen=1} ("[sweep] f: nbli (pack)" lines), RGBA ->
 #   GENERIC_GUARD{25} RAW (alpha dropped: the pixel guard refuses), the
 #   rest GUARD{25}, JPEG STILL CODEC{4}; everything bit-exact; re-sweep
 #   idle (GUARD stamps settle, no refire).
