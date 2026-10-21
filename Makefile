@@ -261,7 +261,7 @@ endef
 # CLI tools (main in src/cli/<name>.c)
 CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
-             sweep_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
+             sweep_test sweep_orig_len_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
              nlink_test recipe_fsck_test doubleown_test contentcut_test cpack_guard_test orphan_test rt_slot_test anchor_test \
              fsck_rootslot_test batch_owner_test plugin_host_test plugin_mt_test rs_stability_test seal_test \
@@ -845,7 +845,7 @@ test-bins: $(TEST_BINS) $(OUT)/invf-why $(OUT)/invf-helper_exec_test $(OUT)/meta
 TEST_SHARD_DEPS = helpers $(TEST_BINS) $(OUT)/invf-arctest $(OUT)/invf-blkio_test $(OUT)/invf-codec_test \
         $(OUT)/invf-readdir_error_test \
       $(OUT)/invf-helper_exec_test $(OUT)/invf-metabuf_test $(OUT)/invf-btree_test \
-      $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_test \
+      $(OUT)/invf-delta_test $(OUT)/invf-groupcommit_test $(OUT)/invf-concurrency_test $(OUT)/invf-sweep_test $(OUT)/invf-sweep_orig_len_test \
       $(OUT)/invf-sweep_collect_test $(OUT)/invf-verify \
       $(OUT)/invf-fold_delta_read_test \
       $(OUT)/invf-btree_repair_test \
@@ -967,6 +967,7 @@ test-shard-1: $(TEST_SHARD_DEPS) test-shard-check
 # above already has it as a prerequisite.
 	$(TESTENV) $(TESTISO) $(OUT)/invf-reclaim_reader_epoch_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_test /tmp
+	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_orig_len_test /tmp
 	$(TESTENV) $(TESTISO) $(OUT)/invf-sweep_collect_test /tmp
 # WP135: the walk-receipt controls. invf-verify and invf-sweep are
 # invoked as SUBPROCESSES by walk_status_test (they are separate mains,

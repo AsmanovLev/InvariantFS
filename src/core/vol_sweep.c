@@ -1135,6 +1135,30 @@ static void *sweep_thread_worker(void *arg_) {
             continue;
         }
 
+        /* WP658: the destination is the STACK buffer above, and `orig_len`
+         * comes from the recipe entry -- so a recipe that claims more than
+         * SEGMENT_SIZE would run LZ4_decompress_safe / ZSTD_decompress /
+         * memcpy past `orig[SEGMENT_SIZE]`. The frame check above does NOT
+         * cover this: it validates the compressed size against `orig_len`,
+         * not `orig_len` against the buffer.
+         *
+         * No in-tree writer can emit such an entry -- vol_write.c:193 requires
+         * `length <= SEGMENT_SIZE` on the read-back, and every segment write
+         * passes exactly SEGMENT_SIZE (the commit's tail fix may shrink it) --
+         * so this is defence in depth against a damaged or foreign recipe, not
+         * a reachable bug. It is still the cheap invariant: the read path bounds
+         * `e->length` at every one of its arms (vol_read.c:1815), and the sweep
+         * was the one copy that did not. Refuse rather than clamp: re-encoding
+         * a truncated segment would overwrite good bytes.
+         *
+         * `>` not `>=`: a full-size segment is legal and must still decode. */
+        if (orig_len > SEGMENT_SIZE) {
+            free(a->tasks[k].blob_old);
+            a->tasks[k].blob_old = NULL;
+            a->tasks[k].valid = 0;
+            continue;
+        }
+
         if (a->tasks[k].old_algo == INVFS_ALGO_LZ4) {
             int got = LZ4_decompress_safe((const char *)a->tasks[k].blob_old, (char *)orig,
                                           (int)a->tasks[k].csize_old, (int)orig_len);
