@@ -1616,6 +1616,7 @@ e2e: all $(OUT)/meta_probe
 # of paying ~850 s for an import. Hermetic: no root, no /dev/shm, no loop.
 	$(TESTENV) bash tools/run-e2e.sh tools/test-debian-cmdline.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-volume.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-block0-layout.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-sign.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-readdirplus.sh
 # WP114: the packaging gate. INVFS_PKG_DEB=0 keeps it off the full

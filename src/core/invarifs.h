@@ -706,6 +706,46 @@ typedef struct {
 } invfs_spn0;                   /* 0xA20 + 56 -> ends 0xA58 */
 #pragma pack(pop)
 
+/* ---- WP650: the Block 0 layout grid --------------------------------
+ *
+ * Block 0 is a hand-packed region, not a struct: every slot above is placed
+ * by an offset constant, and until this grid the only compile-time guards in
+ * the whole header were the two recipe-entry stride asserts further down.
+ * That means growing a field here was a SILENT overlap into the next slot --
+ * and the slots are load-bearing in the order they sit, because RT30 is the
+ * base-tree root, SPN0 is the only v3 savepoint, and an overlap shows up as
+ * a savepoint that will not verify, i.e. a volume that cannot be rolled back.
+ *
+ * Each assertion states the invariant in its message so a failure reads as a
+ * sentence rather than as "static assertion failed". A slot may MOVE -- that
+ * is a format decision with its own WP -- but it must not move silently, and
+ * no two slots may overlap. The runtime half (the bytes on a real volume)
+ * is tools/test-block0-layout.c; an assertion grid cannot see a WRITE that
+ * lands on a neighbour, only a layout that stopped fitting. */
+_Static_assert(INVFS_RT_OFF == 0x9D0,
+               "RT30 must stay at 0x9D0 (block 0 reserved area)");
+_Static_assert(sizeof(invfs_rt) == 48,
+               "RT30 is 48 bytes: 0x9D0..0xA00, and SPN0 starts past 0xA00");
+_Static_assert(INVFS_PCK0_OFF + sizeof(invfs_pck0) <= INVFS_RT_OFF,
+               "PCK0 must end at or before RT30 (0x9D0): the codec table is sized "
+               "in 24-byte refs and a 64th codec would walk into the root area");
+_Static_assert(INVFS_SPT0_OFF == 0xA20 - sizeof(invfs_spt0),
+               "SPT0 must end exactly where SPN0 begins (0xA20): the two "
+               "descriptors share the block with no slack between them");
+_Static_assert(sizeof(invfs_spt0) == 32,
+               "SPT0 is 32 bytes: 0xA00..0xA20");
+_Static_assert(INVFS_SPT0_OFF >= INVFS_RT_OFF + sizeof(invfs_rt),
+               "SPT0 must not overlap RT30");
+_Static_assert(INVFS_SPN0_OFF >= INVFS_SPT0_OFF + sizeof(invfs_spt0),
+               "SPN0 must not overlap SPT0: the pin would overwrite the "
+               "savepoint descriptor the restore reads");
+_Static_assert(INVFS_SPN0_OFF == 0xA20,
+               "SPN0 must stay at 0xA20 (immediately past SPT0)");
+_Static_assert(sizeof(invfs_spn0) == 56,
+               "SPN0 is 56 bytes: 0xA20..0xA58");
+_Static_assert(INVFS_SPN0_OFF + sizeof(invfs_spn0) <= 4096,
+               "the savepoint and its pin must both fit inside block 0");
+
 /* ---- ANC0: the tail anchor (LAST block of the device) ------------------
  * This is the ONLY descriptor in the format that does not live in block 0,
  * and that is the entire point of it. RT30 (0x9D0) and SPT0 (0xA00) each
