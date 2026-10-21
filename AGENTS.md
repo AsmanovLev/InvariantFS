@@ -472,6 +472,30 @@ file handle is open. Both facts used to be invisible, because until the thread
 was created in the daemon and not in the `fuse_daemonize` parent, none of this
 ran. Reported, not changed; see the WP.
 
+> **The drain YIELDS to a live foreground write path (WP626).** The drain
+> re-encodes the whole pending set inside ONE hold of `g_io_lock`, and every
+> `FUSE_WRITE`, `.flush` and `.fsync` needs that lock before it can be
+> served — so the drain's hold was paid by the write path, and that is the
+> shape of a shutdown wedge: a commit waits seconds, the kernel's page
+> writeback never completes, and the process parks in D. Measured on a
+> 12-file / 72 MiB pending set: the drain held the lock 1000–1459 ms
+> (`[sweep] on-demand: processed N pending (held g_io_lock … ms, deferred …
+> tick(s))`, `src/cli/fuse_fs.c:2742`) and a foreground write+fsync issued
+> during a write storm peaked at 724–1156 ms; with the gate, 0 ms.
+> The write path now stamps an arrival clock at ENTRY (before it takes the
+> lock — a request queued on the lock is still a request the drain would be
+> making wait), and the tick skips the drain while an arrival landed within
+> the last second (`src/cli/fuse_fs.c:2719`), announcing the yield once per
+> streak (`on-demand drain: yielding to a live write path`). The same
+> `vol_sweep_pending()` call, the same reclaim, the same codecs — only WHEN
+> it may start. Nothing is lost by waiting: the pending list is RAM-only
+> bookkeeping, and USR1, the `user.invfs.sweep` xattr and the
+> `raw_watermark` ladder are separate triggers the gate does not touch.
+> `INVFS_SWEEP_DRAIN_DEFER=0` turns it off (`src/cli/fuse_fs.c:2614`) and
+> that is the A/B control leg of `tools/test-writeback-stall.sh`, which also
+> asserts LIVENESS — the drain resumes on its own once the write path goes
+> quiet, because a deferral that never ends would be a leak, not a yield.
+
 ### 2.6 Recovery and rollback
 
 After a crash, the volume opens DIRTY and `vol_open` replays the **Delta Log**

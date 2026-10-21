@@ -1693,6 +1693,19 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuse-sweep-thread.sh green
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fuzz.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-writepath.sh
+# tools/test-writeback-stall.sh (WP626): the 1 Hz on-demand drain must YIELD to
+# a live foreground write path instead of holding g_io_lock across the whole
+# pending set. Every FUSE_WRITE/.flush/.fsync needs that lock, so the drain's
+# unbounded hold is the shutdown writeback wedge (INCIDENTS.md, "CI debian
+# shutdown saga", layer 3). ISOLATED: foreground mounts under /dev/shm, no
+# sudo, no loop, no /tmp paths. Asserts the shipped default (env unset), the
+# deferral actually firing (its own log line), a foreground commit under
+# WP626_LAT_LIMIT_MS while the storm runs, and LIVENESS -- the drain resumes
+# on its own once the write path goes quiet, because a deferral that never
+# ends would be a leak rather than a yield. Its second leg runs the pre-WP626
+# shape (INVFS_SWEEP_DRAIN_DEFER=0) as an A/B control and reports it, so the
+# numbers have something to be read against on the machine at hand.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-writeback-stall.sh
 # tools/test-sigterm-exit.sh (WP623): SIGTERM disposition. A plain mount
 # must exit within seconds on SIGTERM (idle and mid-sweep) with the volume
 # CLEAN; a survive_term boot-root mount must ignore SIGTERM (unchanged)

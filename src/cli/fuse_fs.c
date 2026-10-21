@@ -34,6 +34,72 @@
 
 static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* ---- foreground write-path arrival clock (WP626) ----------------------
+ *
+ * WHY THIS EXISTS. g_io_lock is the only path an answer takes: every
+ * FUSE_WRITE, .flush and .fsync needs it before it can be served. The 1 Hz
+ * tick's on-demand drain (fuse_sweep_thread) re-encodes the WHOLE pending
+ * set inside ONE hold of that lock -- vol_sweep_pending() loops over every
+ * pending inode and returns only when the list is empty -- so the drain's
+ * hold is unbounded in the pending set's size, and the write path waits it
+ * out. Measured on this tree (40 x 8 MiB freshly written, pending, volume
+ * unmounted, one foreground write+fsync timed around each tick):
+ *     HOG fuse_sweep_thread holds g_io_lock 3489 ms
+ *     snapshot_entry WAITED 3489 ms (holder fuse_sweep_thread)
+ * and a foreground write+fsync that normally costs ~10 ms paid 3493 ms.
+ * Scale that to a boot root at shutdown -- thousands of pending inodes, and
+ * the kernel pushing a whole dirty journal at once -- and the writeback of
+ * a page does not complete for minutes: `systemd-journal` parks in D in
+ * fuse_wait_on_page_writeback, which is exactly the serial this WP owns
+ * (INCIDENTS.md, "CI debian shutdown saga", layer 3).
+ *
+ * So the drain is made to YIELD to the foreground instead of racing it: it
+ * does not start on a tick where the write path is still arriving, and
+ * runs on the first tick after the arrivals stop. Nothing about the work
+ * changes -- the same vol_sweep_pending() call, the same reclaim, the same
+ * codecs; only WHEN it may start. Deferring it is safe by the engine's own
+ * contract: the pending list is RAM-only "nothing is lost if it never
+ * runs" bookkeeping (src/core/vol_sweep.c:169-170), and the passes that
+ * actually must not be starved -- USR1, the xattr, the raw_watermark
+ * ladder -- are separate triggers this gate does not touch.
+ *
+ * This is a measurement, not a heuristic guess: `arrivals` are stamped at
+ * ENTRY, so a queued cloud of writeback requests keeps the stamp fresh
+ * while threads sit on the lock, which is precisely the shutdown burst.
+ * The window is one tick; a volume whose write path is silent for a whole
+ * tick is a volume with no foreground to yield to. */
+#include <stdatomic.h>
+static _Atomic long long g_fg_write_ns;   /* last write-path arrival, mono ns */
+#define FG_QUIET_NS 1000000000LL          /* one tick: the drain's own period */
+static long long mono_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000000000LL + (long long)ts.tv_nsec;
+}
+static void fg_write_arrived(void)
+{
+    atomic_store(&g_fg_write_ns, mono_ns());
+}
+/* true while the write path is being entered often enough that a drain hold
+ * would be paid by a foreground request. */
+static int fg_write_live(void)
+{
+    long long t = atomic_load(&g_fg_write_ns);
+    return t != 0 && mono_ns() - t < FG_QUIET_NS;
+}
+/* The gate is a DECISION, so it has to be checkable from outside: on by
+ * default, and INVFS_SWEEP_DRAIN_DEFER=0 turns it off. The off switch is not
+ * a convenience -- it is the B leg of tools/test-writeback-stall.sh, and the
+ * only way to show that the gate (and not the machine) is what removed the
+ * stall. Same shape as INVFS_RECLAIM_ORPHANS. */
+static int drain_defer_enabled(void)
+{
+    const char *v = getenv("INVFS_SWEEP_DRAIN_DEFER");
+    return !(v && v[0] == '0' && v[1] == '\0');
+}
+
 /* open-handle counter: background sweep only when idle */
 static volatile int g_open_handles = 0;
 static volatile int g_handles_warned = 0;
@@ -2182,6 +2248,10 @@ static int invf_write(const char *path, const char *buf, size_t size, off_t offs
     wctx *c = (wctx *)(uintptr_t)fi->fh;
     size_t done = 0;
     (void)is_temp_path;
+    /* WP626: stamped BEFORE the lock -- see g_fg_write_ns. A writeback
+     * request that is queued on g_io_lock is still a request the drain would
+     * be making wait, so its ARRIVAL is what the tick must see. */
+    fg_write_arrived();
     /* EROFS, not ENOSPC. Every other entry point that refuses a mutation
      * on a read-only volume returns -EROFS -- mkdir, create, unlink, rmdir,
      * symlink, link, mknod, setxattr, removexattr, truncate, rename -- and
@@ -2538,6 +2608,11 @@ static void *fuse_sweep_thread(void *arg)
     const char *iv = getenv("INVFS_SWEEP_INTERVAL");
     int interval = iv ? atoi(iv) : 0;
     int tick = 0;
+    /* WP626: how many consecutive ticks the drain yielded to a live write
+     * path (reset when a drain runs). Printed, because a deferral that is
+     * silent is indistinguishable from a drain that had nothing to do. */
+    int drain_defer = drain_defer_enabled();
+    int drain_deferred = 0;
     /* WP26: RAW fill (blocks) at the end of the last watermark-kicked
      * pass; the next kick waits for the fill to rise above it. 0 = no kick
      * yet (or the fill dropped below the mark: re-armed). */
@@ -2640,7 +2715,22 @@ static void *fuse_sweep_thread(void *arg)
             pthread_mutex_unlock(&g_io_lock);
             break;
         }
-        if (vol_pending_count(g_vol) > 0) {
+        long long hold_t0 = mono_ns();
+        if (drain_defer && fg_write_live()) {
+            /* WP626: the foreground is still arriving, so the drain does not
+             * start. It is the WHOLE pending set inside ONE hold of
+             * g_io_lock (see g_fg_write_ns), and every FUSE_WRITE, .flush
+             * and .fsync queues behind that hold -- which is the shutdown
+             * wedge this gate exists to remove. Nothing is lost: the pending
+             * list is RAM-only bookkeeping (src/core/vol_sweep.c:169-170),
+             * and USR1 / the xattr / the watermark ladder are triggers this
+             * gate does not touch. */
+            if (drain_deferred == 0)
+                fprintf(stderr,
+                        "[sweep] on-demand drain: yielding to a live write "
+                        "path (pending=%zu)\n", vol_pending_count(g_vol));
+            drain_deferred++;
+        } else if (vol_pending_count(g_vol) > 0) {
             int n = vol_sweep_pending(g_vol);
             if (n > 0) {
                 vol_tz_flush(g_vol);   /* seal the partial text batch */
@@ -2648,7 +2738,11 @@ static void *fuse_sweep_thread(void *arg)
                 /* no table invalidation: sweeping rewrites block layout
                  * only -- name/inode_id/file_size are invariant, and the
                  * generic ZSTD path clones the record verbatim */
-                fprintf(stderr, "[sweep] on-demand: processed %d pending\n", n);
+                fprintf(stderr,
+                        "[sweep] on-demand: processed %d pending (held "
+                        "g_io_lock %lld ms, deferred %d tick(s))\n",
+                        n, (mono_ns() - hold_t0) / 1000000LL, drain_deferred);
+                drain_deferred = 0;
             }
         }
         pthread_mutex_unlock(&g_io_lock);
@@ -2760,6 +2854,10 @@ static int commit_wctx(wctx *c)
 {
     int rc = 0;
     if (!c) return 0;
+    /* WP626: .flush / .fsync / .release all funnel through here, so this is
+     * where the shutdown sync's commit traffic is announced. Same clock as
+     * invf_write: unpaid work the drain must not queue behind. */
+    fg_write_arrived();
     CD_SET("fuse-write");
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }

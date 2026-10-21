@@ -3226,9 +3226,27 @@ in-soak proven-exhausted accept).
     kill phase passes but final sync wedges: `systemd-journal:160 blocked
     >122s`, state D, `fuse_wait_on_page_writeback <- fuse_page_mkwrite`
     (mmap'd journal write on the FUSE root, request pending against a live
-    daemon that never answers). WP626 owned it. Prime suspect:
-    WRITEBACK_CACHE burst vs the daemon write/flush path; to be proven by
-    request tracing, not assumed.
+    daemon that never answers). WP626 owned it. Prime suspect: WRITEBACK_CACHE
+    burst vs the daemon write/flush path; to be proven by request tracing,
+    not assumed.
+    - WP626 (2026-10-21), measured, not assumed any more: every FUSE_WRITE,
+      .flush and .fsync takes `g_io_lock` before it can be served, and the
+      1 Hz tick's on-demand drain re-encodes the WHOLE pending set inside
+      ONE hold of that lock (`vol_sweep_pending()` loops until the list is
+      empty). On a 12-file / 72 MiB pending set the drain's own log line
+      reports the hold (1000-1459 ms), and a foreground write+fsync issued
+      during a write storm peaked at 724-1156 ms against the same storm
+      with the drain deferring (peak 0 ms). That is the shape of the D-state
+      wait: the request is pending against a daemon that is alive and
+      holding the one lock the answer needs. Fix landed: the drain now
+      yields to a live write path (arrival clock stamped at ENTRY of the
+      write path, gate in the tick; `INVFS_SWEEP_DRAIN_DEFER=0` restores the
+      old shape for A/B), with
+      `tools/test-writeback-stall.sh` in `make e2e` asserting the deferral,
+      the foreground latency, and that the drain resumes on its own. NOT yet
+      proven at guest scale: the serial-side fix is a local FUSE evidence,
+      and the debian serial has not been re-run since — this layer stays
+      OPEN until it is.
   Deliberately NOT done: guest DefaultTimeoutStopSec cuts (would let a hung
   FUSE unmount die by SIGKILL and still "power off" — the gate would stop
   proving clean shutdown).
