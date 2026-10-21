@@ -134,7 +134,6 @@ kprobe:fuse_request_end
     else if ($op == 12) { $name = "op_RENAME"; }
     else if ($op == 35) { $name = "op_CREATE"; }
     else if ($op == 44) { $name = "op_READDIRPLUS"; }
-    else if ($op == 3) { $name = "op_GETATTR"; }
     else if ($op == 14) { $name = "op_OPEN"; }
     else if ($op == 15) { $name = "op_READ"; }
     else if ($op == 16) { $name = "op_WRITE"; }

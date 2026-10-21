@@ -10,7 +10,12 @@ where time goes; the write-up with numbers is
 BTF is present (`/sys/kernel/btf/vmlinux`), but the stock image had
 neither bpftool nor bpftrace. Install once:
 
-    sudo apt-get install -y bpftool bpftrace libbpf-dev clang llvm
+    sudo apt-get install -y bpftool bpftrace libbpf-dev clang llvm \
+        bc python3 python3-numpy python3-pil
+
+`bc` and the python3 workload deps (numpy, PIL) are what
+`run-leg.sh`/`workloads.sh` need; the probe toolchain alone is the
+first line.
 
 `bpftool` generates the CO-RE header from host BTF, `clang` compiles
 the BPF object, `libbpf-dev` provides userspace load/attach, and
@@ -43,19 +48,41 @@ debugfs/tracefs must be mounted (once per boot):
     S=/tmp/invfs-wp622-leg1
     mkdir -p $S
     eval $(bash tools/ebpf/setup-mounts.sh $S)
+    export MNT_EXT4 MNT_TMPFS MNT_INVFS   # run-leg.sh is a child process
     bash tools/ebpf/run-leg.sh leg1 $S        # ext4, tmpfs, invfs in turn
     grep -h leg1-wall $S/leg1-*.work.log
     bash tools/ebpf/setup-mounts.sh --down $S; rm -rf $S
+
+The gate (build + attach + one live leg on all three mounts):
+
+    INVFS_E2E_AGENT=wp622-ebpf-probe bash tools/run-e2e.sh tools/ebpf/test-probe.sh
+
+It runs LOCKED on the e2e runner (it needs CAP_BPF and loop mounts), so a
+concurrent subagent cannot collide with it. `WP622_GATE_LEG=leg2`,
+`WP622_GATE_TAGS="tmpfs"` narrow it down.
 
 Overhead check (the instrument must not move the numbers it reports):
 
     bash tools/ebpf/run-leg.sh overhead $S ext4
 
-Leg 4 needs the pressure knob (saved/restored by hand, not the runner):
+Leg 4 needs the pressure knob (saved/restored by hand, not the runner).
+Passive observation during the workload measures NOTHING on a box with
+free memory -- there is no reclaim to watch (zero shrinker invocations
+in every window; that is what the first attempt found). The numbers in
+`docs/benchmarks/VFS-PROBE.md` come from the standard reclaim lever,
+drop_caches=2 (dentries+inodes only, no timed workload in flight),
+run under the probe at each setting:
 
+    sudo bpftrace tools/ebpf/leg4-pressure.bt &   # attach, then:
+    echo 2 | sudo tee /proc/sys/vm/drop_caches    # at pressure 100
     echo 0 | sudo tee /proc/sys/vm/vfs_cache_pressure
-    bash tools/ebpf/run-leg.sh leg4 $S
-    echo 100 | sudo tee /proc/sys/vm/vfs_cache_pressure
+    echo 2 | sudo tee /proc/sys/vm/drop_caches    # at pressure 0
+    echo 100 | sudo tee /proc/sys/vm/vfs_cache_pressure   # restore
+    sudo kill -INT %1
+
+`bash tools/ebpf/run-leg.sh leg4 $S` still records the warm-tree
+workload plus the knob before/after, which is the corroborating
+slabinfo side of the same leg.
 
 ## Overhead and honesty notes
 
@@ -67,7 +94,8 @@ Leg 4 needs the pressure knob (saved/restored by hand, not the runner):
   `*.quiet.txt` to confirm the box was otherwise idle.
 - `wl_drop` uses per-file `posix_fadvise(DONTNEED)` (scoped to the
   corpus); only leg 4 keeps the cache warm on purpose. No global
-  `drop_caches` during a timed run.
+  `drop_caches` during a timed run -- the one deliberate global
+  drop is leg 4's reclaim lever, taken with no workload timing it.
 - Loop-image files live on tmpfs scratch, but block-layer
   attribution still works: bios complete on the loop device (major 7)
   regardless of backing store, so leg 3 filters per-device rows.

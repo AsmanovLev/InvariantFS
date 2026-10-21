@@ -37,6 +37,14 @@ the runner is `tools/ebpf/run-leg.sh`, workloads
 - Overhead leg: leg-1 workload 3x with probe off (102.5-107.5 ms)
   vs 3x with probe on (103.4-104.5 ms). The instrument does not move
   the numbers it reports.
+- Reproduce / re-gate: `INVFS_E2E_AGENT=wp622-ebpf-probe bash
+  tools/run-e2e.sh tools/ebpf/test-probe.sh` runs the whole contract
+  (toolchain, `make -C tools/ebpf check`, `bpftrace --dry-run` attach
+  on all four legs, the three mounts, one live leg on each, the CO-RE
+  binary, teardown) as a LOCKED e2e suite. leg1, leg2 and leg3 pass
+  through it on this box; leg4 has no live gate because its numbers
+  need the operator-set pressure/`drop_caches` knob, so only its
+  attach is asserted.
 
 ## Instrument findings (read these before the numbers)
 

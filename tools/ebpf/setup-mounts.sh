@@ -24,8 +24,15 @@ if [ "$1" = "--down" ]; then
         fi
     done
     if [ -f "$S/loopdev" ]; then
-        sudo losetup -d "$(cat "$S/loopdev")" 2>/dev/null || true
+        sudo "$(command -v losetup || echo /sbin/losetup)" -d "$(cat "$S/loopdev")" 2>/dev/null || true
     fi
+    # Every loop device whose backing file is inside this scratch, not just
+    # the one recorded in $S/loopdev: a setup that failed between attach and
+    # the "echo $LOOP" would otherwise leak a device per attempt until the
+    # box runs out of them (measured: ten leaked devices in one afternoon).
+    sudo "$(command -v losetup || echo /sbin/losetup)" -a 2>/dev/null \
+        | awk -v s="$S/" 'index($0, s) {sub(/:.*/, ""); print}' \
+        | while read -r dev; do sudo "$(command -v losetup || echo /sbin/losetup)" -d "$dev" 2>/dev/null || true; done
     echo "down $S"
     exit 0
 fi
@@ -33,13 +40,18 @@ fi
 S=$1
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 B=$REPO/bin
+# Debian puts mkfs.ext4 / losetup under /sbin, which is not on a
+# non-root user's PATH; resolving here is why the gate can run as the
+# invoking user instead of demanding a root login shell.
+MKFS=$(command -v mkfs.ext4 || echo /sbin/mkfs.ext4)
+LOSETUP=$(command -v losetup || echo /sbin/losetup)
+[ -x "$MKFS" ] || { echo "FAIL: mkfs.ext4 not found (e2fsprogs)"; exit 2; }
 mkdir -p "$S/mnt-ext4" "$S/mnt-tmpfs" "$S/mnt-invfs"
 
 # ext4 on a loop file (backs leg3 block-layer attribution on the loop dev)
 dd if=/dev/zero of="$S/ext4.img" bs=1M count=48 status=none
-mkfs.ext4 -q -F "$S/ext4.img"
-/sbin/losetup -f 2>/dev/null || sudo losetup -f >/dev/null
-LOOP=$(sudo losetup --show -f "$S/ext4.img")
+"$MKFS" -q -F "$S/ext4.img"
+LOOP=$(sudo "$LOSETUP" --show -f "$S/ext4.img")
 echo "$LOOP" > "$S/loopdev"
 sudo mount -o loop,noatime "$LOOP" "$S/mnt-ext4"
 sudo chown "$(id -u):$(id -g)" "$S/mnt-ext4"
