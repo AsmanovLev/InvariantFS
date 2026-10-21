@@ -127,15 +127,15 @@ src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
 src/core/vol_read.c:491:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
 src/core/vol_read.c:506:SKIP
-src/core/vol_read.c:1235:SKIP
-src/core/vol_read.c:1273:ACTS
-src/core/vol_read.c:1486:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1493:SKIP
-src/core/vol_read.c:1686:ACTS
-src/core/vol_read.c:884:SKIP
-src/core/vol_read.c:901:SKIP
-src/core/vol_read.c:961:SKIP
-src/core/vol_read.c:1036:SKIP
+src/core/vol_read.c:1296:SKIP
+src/core/vol_read.c:1334:ACTS
+src/core/vol_read.c:1547:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1554:SKIP
+src/core/vol_read.c:1747:ACTS
+src/core/vol_read.c:945:SKIP
+src/core/vol_read.c:962:SKIP
+src/core/vol_read.c:1022:SKIP
+src/core/vol_read.c:1097:SKIP
 src/core/vol_sweep.c:1891:SKIP
 src/core/vol_sweep.c:280:SKIP
 src/core/vol_sweep.c:585:ACTS

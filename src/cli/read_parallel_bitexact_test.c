@@ -452,6 +452,113 @@ static int run_sweep_frame_disagreement_leg(const char *img,
     return fails;
 }
 
+/* The forced-create-failure leg (WP657).
+ *
+ * The fan-out in vol_decode_ast_entries() splits the entries across N
+ * pthreads and joins them. pthread_create FAILS in the field -- EAGAIN under
+ * thread/memory pressure is the realistic case and this box has OOMed -- and
+ * on failure it does not write *thread. The code this leg was written
+ * against discarded the return code and only zeroed th[t] in the SKIP
+ * branch, so a failed create left a slot holding whatever the stack held and
+ * the join loop called pthread_join on it: UB, and in the worst case a
+ * SIGSEGV in the daemon serving the mount.
+ *
+ * INVFS_READ_THREAD_FAIL=N forges that EAGAIN for the next N create attempts
+ * of one fan-out (vol_read.c; the same lever the sweep's fix was reproduced
+ * with). Two things must then hold, and neither is checkable without it:
+ *
+ *   1. the lever was actually exercised -- otherwise this leg passes because
+ *      it tested nothing, which is how the defect survived unnoticed;
+ *   2. the read still returns the exact bytes, because a slice whose thread
+ *      could not start must be run inline, not dropped.
+ *
+ * vol_read_thread_fail_forged() is declared here rather than in a header:
+ * it is a test hook with one caller, and the headers are outside this WP's
+ * scope.
+ */
+extern unsigned long vol_read_thread_fail_forged(void);
+
+static int run_thread_fail_leg(const char *img, const uint8_t *orig,
+                               size_t fsize, int threads)
+{
+    invfs_volume *v;
+    int err = 0, rc;
+    unsigned long forged_before, forged_after;
+    uint64_t id;
+    uint8_t *got = NULL;
+    size_t glen = 0;
+    char cmd[600], tb[16];
+
+    unsetenv("INVFS_FORCE_DEV");
+    snprintf(tb, sizeof tb, "%d", threads);
+    setenv("INVFS_READ_THREADS", tb, 1);
+    snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 2 >/dev/null 2>&1", img);
+    if (system(cmd) != 0) {
+        printf("  FAIL  thread-fail leg: mkfs failed\n");
+        return 1;
+    }
+    v = vol_open(img, &err);
+    if (!v) {
+        printf("  FAIL  thread-fail leg: vol_open (%d)\n", err);
+        return 1;
+    }
+    id = vol_write_bulk(v, "thfail.bin", (uint8_t *)orig, fsize, NULL);
+    if (!id) {
+        printf("  FAIL  thread-fail leg: write\n");
+        vol_close(v);
+        return 1;
+    }
+    vol_flush(v);
+
+    forged_before = vol_read_thread_fail_forged();
+    setenv("INVFS_READ_THREAD_FAIL", tb, 1);   /* every create fails */
+    rc = vol_read_inode(v, id, 0, &got, &glen);
+    unsetenv("INVFS_READ_THREAD_FAIL");
+    forged_after = vol_read_thread_fail_forged();
+
+    printf("  ..    thread-fail leg: %d workers, %lu create attempt(s) forged "
+           "to EAGAIN, read rc=%d\n", threads, forged_after - forged_before, rc);
+
+    if (forged_after == forged_before) {
+        printf("  FAIL  thread-fail leg: INVFS_READ_THREAD_FAIL forged nothing, "
+               "so the failure path was never entered and this leg proved "
+               "nothing\n");
+        free(got);
+        vol_close(v);
+        return 1;
+    }
+    if (rc != 0) {
+        printf("  FAIL  thread-fail leg: read errored (%d) with the pool "
+               "unable to start; a slice whose thread did not start must be "
+               "run inline, not dropped\n", rc);
+        free(got);
+        vol_close(v);
+        return 1;
+    }
+    if (glen != fsize) {
+        printf("  FAIL  thread-fail leg: read returned %zu of %zu bytes\n",
+               glen, fsize);
+        free(got);
+        vol_close(v);
+        return 1;
+    }
+    if (memcmp(got, orig, fsize) != 0) {
+        long d = first_diff(got, orig, fsize);
+        printf("  FAIL  thread-fail leg: NOT bit-exact; first diff at offset "
+               "%ld (got 0x%02x want 0x%02x)\n",
+               d, got[d] & 0xff, orig[d] & 0xff);
+        free(got);
+        vol_close(v);
+        return 1;
+    }
+
+    printf("  OK    thread-fail leg: %zu bytes bit-exact with every "
+           "pthread_create failing\n", fsize);
+    free(got);
+    vol_close(v);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
@@ -503,6 +610,9 @@ int main(int argc, char **argv)
      * recipe -- 32 entries of it is as much as this leg needs. */
     fails += run_sweep_frame_disagreement_leg(img, orig,
                                              32u * SEGMENT_SIZE);
+    /* WP657: same file size as the sweep leg -- 32 segments is comfortably
+     * past the 16 the fan-out needs, and the leg does one read. */
+    fails += run_thread_fail_leg(img, orig, 32u * SEGMENT_SIZE, threads);
 
     unlink(img);
     free(orig);

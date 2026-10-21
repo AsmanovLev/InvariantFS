@@ -520,6 +520,40 @@ static int pngr_lane_pixels(invfs_volume *v, const char *recname,
  * table (NULL/0 for every recipe written before the change). Passing the
  * table in rather than re-parsing it per entry keeps the hot loop's cost at
  * one extra branch per entry. */
+/* ---- WP657: forced thread-creation failure (test lever) ----------------
+ *
+ * pthread_create fails in the field -- EAGAIN under thread/memory pressure
+ * is the realistic case, and this box has OOMed -- and what the read
+ * fan-out does with that failure is the thing under test. A real EAGAIN
+ * cannot be scheduled on demand, so `INVFS_READ_THREAD_FAIL=N` forges it:
+ * the next N create attempts of ONE fan-out return failure without calling
+ * pthread_create at all, which is exactly what the syscall does on EAGAIN
+ * (it does not write *thread). Same family as INVFS_SYNC_FAIL_AT /
+ * INVFS_FLUSH_FAIL_AT (volume.c) and INVFS_FAIL_CHILD (vol_png.c): a
+ * fault-injection knob, inert unless set, read once per fan-out.
+ *
+ * vol_read_thread_fail_forged() reports how many were forged since process
+ * start, so the gate can assert the leg exercised the failure path instead
+ * of passing because the lever was silently ignored. */
+static unsigned long rd_th_forged;
+
+unsigned long vol_read_thread_fail_forged(void)
+{
+    return rd_th_forged;
+}
+
+/* Forged-failure budget for one fan-out (0 = the lever is off). */
+static int rd_th_fail_budget(void)
+{
+    const char *e = getenv("INVFS_READ_THREAD_FAIL");
+    char *end = NULL;
+    long n;
+    if (!e || !*e) return 0;
+    n = strtol(e, &end, 10);
+    if (end == e || n <= 0 || n > 32) return 0;
+    return (int)n;
+}
+
 static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                                   vol_recname *rn,
                                   const invfs_ast_hdr *ast_h,
@@ -607,6 +641,7 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                 decode_worker_arg args[32];
                 size_t per_th = (nblocks + n_threads - 1) / n_threads;
 
+                int fail_budget = rd_th_fail_budget();
                 for (int t = 0; t < n_threads; t++) {
                     args[t].v = v;
                     args[t].inode_id = inode_id;
@@ -616,17 +651,43 @@ static int vol_decode_ast_entries(invfs_volume *v, uint64_t inode_id,
                     args[t].end = (t + 1) * per_th;
                     if (args[t].end > nblocks) args[t].end = nblocks;
                     args[t].err = 0;
-                    if (args[t].start < args[t].end)
-                        pthread_create(&th[t], NULL, decode_thread_worker, &args[t]);
-                    else
-                        th[t] = 0;
+                    /* th[t] MUST be initialised before pthread_create is
+                     * called: on failure (EAGAIN under thread/memory
+                     * pressure -- this box has OOMed) pthread_create does
+                     * not write *th, so the join loop below would read
+                     * stack garbage and pthread_join on it. That is UB and
+                     * it faults: reproduced with the create forced to fail
+                     * (INVFS_READ_THREAD_FAIL), where 32 workers died on
+                     * SIGSEGV and 6 workers returned success over the file
+                     * with one slice undecoded. Same shape as the fix in
+                     * vol_sweep.c, where the join consumed 0xdeadbeef. */
+                    th[t] = 0;
+                    if (args[t].start < args[t].end) {
+                        int created;
+                        if (fail_budget > 0) {
+                            /* WP657 lever: forge the EAGAIN */
+                            fail_budget--;
+                            rd_th_forged++;
+                            created = EAGAIN;
+                        } else
+                            created = pthread_create(&th[t], NULL,
+                                                     decode_thread_worker,
+                                                     &args[t]);
+                        if (created != 0) {
+                            /* No thread for this slice, so the work still
+                             * has to happen -- run it on this one.
+                             * Dropping it left a hole in the file and
+                             * still returned success. */
+                            decode_thread_worker(&args[t]);
+                        }
+                    }
                 }
                 int any_err = 0;
                 for (int t = 0; t < n_threads; t++) {
-                    if (th[t]) {
-                        pthread_join(th[t], NULL);
-                        if (args[t].err != 0) any_err = -1;
-                    }
+                    if (th[t]) pthread_join(th[t], NULL);
+                    /* Outside the th[t] guard: a slice that ran inline set
+                     * args[t].err without a thread to join. */
+                    if (args[t].err != 0) any_err = -1;
                 }
                 if (any_err == 0) return 0;
             }
