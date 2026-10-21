@@ -366,7 +366,7 @@ $(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
 # object (lib<name>.so, -DIVPACK_SHARED_LIB) that invf-plugin-host dlmopen()s.
 # Both come from the same .c, and the plugin glue is compiled into the CLI
 # build too (unused there), so the two can never drift apart.
-CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z
+CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z iso9660 wim
 PACKDIR      = tools/codecpacks/$(1).codecpack
 PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB

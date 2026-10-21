@@ -35,10 +35,11 @@ type = container
 # reuse 24/25: WP627 measured what an id collision costs (rawdisk vs NBLI,
 # e2e-full red).
 algo = 26
+format_id = iso9660
 codec_id = 26
 pack_version = 1
-version = 1
-min_read = 1
+version = 1.0.0
+min_read = 0.3.0
 generation = 1
 family = container
 category = primary

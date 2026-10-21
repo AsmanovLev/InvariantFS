@@ -185,6 +185,7 @@ Consequences, and they are binding:
 - **New docs go in `docs/`** (architecture, ADRs, guides, benchmarks), not
   next to the source and not in `impl_docs/` except the generated
   symbol indexes and the live trackers (`AUDIT.md`, `INCIDENTS.md`).
+- **Codec/container-packs shall be in "registry" folder (see repo root).**
 - Windows and NFS support are parked: document them as parked, do not
   maintain recipes for them.
 - `tools/check-repo-hygiene.sh` fails the build when a doc under `docs/`
