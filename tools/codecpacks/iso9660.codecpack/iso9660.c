@@ -929,8 +929,16 @@ static int64_t udf_abs(const udf_t *u, uint32_t lb)
 static int udf_vrs_ok(FILE *f)
 {
     uint8_t b[8];
-    if (read_at(f, 16 * UDF_BLK, b, sizeof b) != 0) return 0;
-    return memcmp(b + 1, "BEA0", 4) == 0 || memcmp(b + 1, "NSR0", 4) == 0;
+    /* ECMA-167 2/8.1: The Volume Recognition Space starts at sector 16 and
+     * continues until TEA01 or an unrecognised descriptor. On bridge discs,
+     * sector 16 carries an ISO9660 descriptor ("CD001"); scan sectors 16..31
+     * to locate the UDF Extended Area ("BEA01" / "NSR02" / "NSR03"). */
+    for (int s = 16; s < 32; s++) {
+        if (read_at(f, (uint64_t)s * UDF_BLK, b, sizeof b) != 0) return 0;
+        if (memcmp(b + 1, "BEA0", 4) == 0 || memcmp(b + 1, "NSR0", 4) == 0) return 1;
+        if (memcmp(b + 1, "TEA0", 4) == 0) break;
+    }
+    return 0;
 }
 
 /* AVDP -> main volume descriptor sequence -> PD + LVD. Fills u; on success
@@ -1223,8 +1231,9 @@ static int udf_parse(FILE *f, plan_t *p)
     if (read_at(f, fsd_off, fe.buf, UDF_BLK) != 0) return 3;
     if (!udf_tag_ok(fe.buf, UDF_BLK, 256)) return 3;      /* File Set Desc */
     tagloc = le32(fe.buf + 12);
+    /* ECMA-167 4/7.2: tagLocation can be partition-relative or volume-absolute */
     if ((uint64_t)tagloc != fsd_off / UDF_BLK &&
-        (uint64_t)tagloc != (uint64_t)u.part_start + fsd_off / UDF_BLK)
+        (uint64_t)tagloc != (fsd_off / UDF_BLK) - (uint64_t)u.part_start)
         return 3;
     udf_lad(fe.buf + 400, &root);                         /* rootDirectoryICB */
     if (root.part != u.part_index) return 3;
