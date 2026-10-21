@@ -2,6 +2,38 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.6.4] - 2026-10-21
+
+### Added
+- Multi-level recipe trees via CHLD descriptors (WP635/WP660): lifts the flat
+  file size limit (128 GiB stream cap) to 64 PiB by organizing segments into
+  4 GiB child recipes referenced by top-level descriptors. Small files remain
+  byte-identical to flat recipes.
+- Optical media containerpack `iso9660.codecpack` (WP636): supports ISO9660,
+  Joliet, and UDF Bridge media with seekable MRMP partition maps and full member
+  extraction.
+- Windows Imaging Format containerpack `wim.codecpack` (WP637): extracts
+  unmodified resource streams and enables cross-WIM resource deduplication.
+- Containerpack streaming admission (WP641): containers larger than host RAM
+  stream via ranged pin and private mmap without full-file heap allocations.
+- Storage domain encapsulation (WP651 slice 1): introduces `src/core/vol_storage.h`
+  and moves DEVT/multidev fields behind accessor APIs.
+- Block 0 static assertion grid & layout test (WP650): guarantees compile-time
+  offsets for RT30, SPT0, SPN0, and PCK0 descriptors.
+
+### Fixed
+- FUSE on-demand writeback stall (WP626): 1Hz drain yields to active foreground
+  write bursts, eliminating D-state stalls during systemd journal flushes and shutdown.
+- Read path thread pool safety on EAGAIN (WP657): checks `pthread_create` return
+  and pre-initializes thread handles to prevent joining stack garbage or silent
+  zero-filled read errors.
+- Sweep stack buffer length bound (WP658): explicitly bounds segment entry length
+  against stack destination buffer before decoding.
+- Savepoint broken extent containment (WP632): torn frame headers prevent premature
+  reclamation of live blocks.
+- E2E administrative tool discovery (WP655): resolves mkfs.* and losetup from
+  system sbin paths under unprivileged runner environments.
+
 ## [v0.6.3] - 2026-10-12
 
 ### Added

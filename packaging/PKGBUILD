@@ -22,7 +22,7 @@
 # `make release-sums` prints the line (and the release.yml repin job
 # writes it back automatically after publish):
 pkgname=invfs
-pkgver=0.6.3
+pkgver=0.6.4
 pkgrel=1
 pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
 arch=('x86_64' 'aarch64')

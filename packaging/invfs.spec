@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.6.3
+Version:        0.6.4
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -90,6 +90,10 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 /usr/lib/dracut/modules.d/90invfs/
 
 %changelog
+* Wed Oct 21 2026 InvariantFS Developers <invfs@localhost> - 0.6.4-1
+- CHLD recipe trees (WP635/WP660); containerpack streaming (WP641); ISO9660 & WIM packs (WP636/WP637)
+- FUSE writeback deferral (WP626); spt0 broken extent containment (WP632); block 0 static assert grid (WP650)
+- Storage domain header (WP651); read/sweep safety fixes (WP657/WP658)
 * Mon Oct 12 2026 InvariantFS Developers <invfs@localhost> - 0.6.3-1
 - sweep-lane retire-on-fence (WP612); v3 content-cut recovery (WP613)
 * Mon Oct 12 2026 InvariantFS Developers <invfs@localhost> - 0.6.2-1

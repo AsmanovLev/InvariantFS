@@ -23,7 +23,7 @@ pkgname=invfs
 # test (INVFS_TEMPLATE_VERSION); real xbps-src builds use the default.
 # The release.yml repin job re-pins version + checksum below after
 # publish; hands stay off unless it fails.
-version=${INVFS_TEMPLATE_VERSION:-0.6.3}
+version=${INVFS_TEMPLATE_VERSION:-0.6.4}
 revision=1
 _artifact="invfs-v${version}-x86_64"
 # No build_style: the artifact is prebuilt, so there is nothing to

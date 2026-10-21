@@ -1,3 +1,10 @@
+invfs (0.6.4-1) unstable; urgency=medium
+
+  * CHLD recipe trees (WP635/WP660); containerpack streaming (WP641);
+    ISO9660 and WIM containerpacks (WP636/WP637); FUSE writeback deferral (WP626);
+    spt0 broken extent containment (WP632); block 0 static assert grid (WP650);
+    storage domain header (WP651); read/sweep safety fixes (WP657/WP658).
+
 invfs (0.6.3-1) unstable; urgency=medium
 
   * sweep-lane retire-on-fence (WP612); v3 content-cut recovery (WP613).
