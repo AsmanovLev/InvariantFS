@@ -35,12 +35,12 @@
 # "wim" probes OK via <pack>/bin/ but the exec layer resolves $INVFS_TOOLS ->
 # /usr/lib/invfs/tools -> PATH instead, so the pack would never fire).
 # See wim.c for the full format doc and the refuse list.
-# algo 26: builtins own 0..15, WINDOW_SRC 24, NBLI 25, packs 4/13/16-23,
+# algo 28: builtins own 0..15, WINDOW_SRC 24, NBLI 25, packs 4/13/16-23,
 # tests 40/41 (src/core/invarifs.h) -- 26 is the next free id.
 name = wim
 type = container
-algo = 26
-codec_id = 26
+algo = 28
+codec_id = 28
 pack_version = 1
 version = 1
 min_read = 1

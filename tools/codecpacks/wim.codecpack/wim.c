@@ -1,5 +1,5 @@
 /*
- * wim.c — WIM containerpack helper (InvariantFS WP637, algo 26).
+ * wim.c — WIM containerpack helper (InvariantFS WP637, algo 28).
  *
  * Decomposes a Windows Imaging Format file (the `sources/install.wim` of
  * every Windows install ISO, and wimlib's `.esd` solid form) into one

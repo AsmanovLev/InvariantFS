@@ -1,6 +1,6 @@
 #!/bin/bash
 # test-wim.sh — WP637 wim containerpack (tools/codecpacks/wim.codecpack,
-# algo 26) end-to-end.
+# algo 28) end-to-end.
 #
 # WHAT THE LANE IS. `sources/install.wim` is the bulk of every Windows
 # install ISO and is entropy-coded (LZX/XPRESS per resource, LZMS in a solid
@@ -22,7 +22,7 @@
 #      file, WRITE_IN_PROGRESS, a split-WIM part (part n of N>1), an unknown
 #      version, a table stride that is not 50/62 (nor those + 8 trailing
 #      bytes), a table past EOF, and a table naming no bytes.
-#   3. the SYNTHETIC FS legs: mkfs -> cp -> sweep -> CONTAINER{26,1} stamp ->
+#   3. the SYNTHETIC FS legs: mkfs -> cp -> sweep -> CONTAINER{28,1} stamp ->
 #      members as "!mbrNNNN-<sname>" siblings + !mbrt + !mbrmap -> verify
 #      --deep -> invf-cat bit-exact (container AND direct member reads) ->
 #      pack-ABSENT reads (INVFS_CODECPACKS=/nonexistent) still bit-exact
@@ -643,15 +643,15 @@ echo "== class stamps =="
 for f in a.wim b.wim; do
     C=$("$WORK/classof" "$IMG" "$f")
     echo "  $f: $C"
-    [ "$C" = "cls=3 algo=26 gen=1" ] \
-        || { echo "FAIL: $f: want CONTAINER{26,1}"; exit 1; }
+    [ "$C" = "cls=3 algo=28 gen=1" ] \
+        || { echo "FAIL: $f: want CONTAINER{28,1}"; exit 1; }
 done
 # the member siblings are the lane's, not the container's: a member rebuilt
 # from a compressed resource must not carry the CONTAINER stamp.
 MBR=$(awk -F'\t' 'NR==1 {printf "a.wim!mbr%04d-%s", $1, $2}' "$WORK/out/a.wim.tbl")
 C=$("$WORK/classof" "$IMG" "$MBR")
 echo "  $MBR: $C"
-case "$C" in algo=26) echo "FAIL: a member carries the container's algo"; exit 1;; esac
+case "$C" in algo=28) echo "FAIL: a member carries the container's algo"; exit 1;; esac
 
 echo "== verify --deep (reads every container through the map) =="
 $B/invf-verify "$IMG" --deep | tee "$WORK/verify1.log"
@@ -859,8 +859,8 @@ if grep -q "incomp\.wim!" "$WORK/out/lsguard"; then
     echo "FAIL: a refused WIM gained siblings"; cat "$WORK/out/lsguard"; exit 1
 fi
 C=$("$WORK/classof" "$INPROC" incomp.wim)
-echo "  incomp.wim: $C (refused, so no CONTAINER{26} stamp)"
-case "$C" in *algo=26*) echo "FAIL: refused WIM carries the pack stamp"; exit 1;; esac
+echo "  incomp.wim: $C (refused, so no CONTAINER{28} stamp)"
+case "$C" in *algo=28*) echo "FAIL: refused WIM carries the pack stamp"; exit 1;; esac
 $B/invf-cat "$INPROC" incomp.wim "$WORK/out/incomp.cat" >/dev/null
 cmp -s "$WORK/orig/incomp.wim" "$WORK/out/incomp.cat" \
     || { echo "FAIL: refused WIM is not bit-exact generically"; exit 1; }
