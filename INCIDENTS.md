@@ -3380,6 +3380,29 @@ in-soak proven-exhausted accept).
   `ldconfig -N -X --root /mnt/gentoo`-style check for
   dynamic-loader-critical files.
 
+  **ld.so.cache mode class (FOUND Oct 22, RESOLVED in session, needs upstream
+  doc).** `/etc/ld.so.cache` was `-rw-------` (600), recreated by an `ldconfig`
+  postinst trigger during a merge (mtime18:33, merge log `Regenerating
+  /etc/ld.so.cache...`18:34, brotli configure died18:35). Mechanism: portage
+  runs ebuild phases with `umask 0077` → `ldconfig` creates the cache600 →
+  every later SANDBOX-ALWAYS-portage-user exec that needs a **gcc-runtime
+  library** dies with `error while loading shared libraries` — gcc-runtime
+  (`libstdc++.so.6`, `libgcc_s.so.1`) lives ONLY in
+  `/usr/lib/gcc/x86_64-pc-linux-gnu/16/`, which is NOT a default ld.so search
+  dir and is reachable ONLY through the cache (`ldconfig -p` points there);
+  glibc's own libs in `/lib64` resolve without the cache, which is why bash,
+  gcc and python kept working and only C++-binary EXECUTION (cmake →
+  brotli) broke. Same family as the missing `libgcc_s` above: files present
+  and world-readable (`644/755`), yet invisible to non-root without the
+  cache. Evidence pair: root `cmake --version` OK / `su portage -c cmake`
+  FAILED before `chmod 644 /etc/ld.so.cache`, OK after. It recurred on the
+  next `ldconfig` regen until chmod'ed — an install doc rule (post-merge
+  `chmod 644 /etc/ld.so.cache`, or a portage `ldconfig` wrapper) is the
+  cheap fix; a mode fix at daemon-side create or a `umask 022` for the
+  phase env is the real one. Related artifact from the same class: a
+  `cp -a` from the toolchain landed `/usr/lib64/libgcc_s.so.1` as `600`
+  (needed an explicit `chmod 644`).
+
   **E2E blind spot.** Every gate runs ≤4 GB images on tmpfs: no bitmap-span
   amplification (128 KB bitmap), no strict-fence latency (no real mirror, no
   HDD), no rootfs pending churn, no >100 MB single-file writeback burst. A
