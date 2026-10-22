@@ -1970,30 +1970,15 @@ int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
 }
 
 
-/* drain the pending list (daemon background): process each pending inode
-   and unmark it. Called when the daemon holds the volume exclusively
-   (no open handles). Returns number of processed inodes. */
-int vol_sweep_pending(invfs_volume *v)
+/* End-of-run work for a pending drain: promotion, tier migration, the
+   partial text-batch seal, and the fold/reclaim scheduling
+   (WP19/WP25 rule 9/WP-M18; previously inlined in vol_sweep_pending).
+   Split out so a CHUNKED drain (vol_sweep_pending_cap, below) can run
+   the per-file sweep one lock-hold at a time and still finish a drain
+   run with exactly the same tail the undrained shape had. */
+void vol_sweep_pending_finish(invfs_volume *v)
 {
-    size_t n = v->n_pending;
-    int done = 0;
-    vol_heat_sweep_begin(v);   /* WP19: one decay pass per sweep run */
-    while (n > 0) {
-        uint64_t id = v->pending[0];
-        /* find the current name for this inode (may have been deleted) */
-        char nm[256];
-        int found = vol_sweep_name_of(v, id, nm, sizeof nm);
-        vol_unmark_pending(v, id);
-        /* WP135: == 1, not "non-zero". vol_sweep_name_of propagates the -1
-         * that a stopped v3 walk now produces, and a truthiness test would
-         * have fed that -1 straight into vol_sweep_one with an EMPTY name --
-         * a rewrite keyed on a name the volume could not supply. */
-        if (found == 1) {
-            int rc = vol_sweep_one(v, id, nm);
-            if (rc > 0) done++;
-        }
-        n = v->n_pending;   /* re-read (list may shrink) */
-    }
+    if (!v) return;
     /* WP19: extract any batch member the reads since the last run made
      * hot, then seal the partial text batch the drain accumulated */
     vol_heat_promote(v);
@@ -2009,6 +1994,69 @@ int vol_sweep_pending(invfs_volume *v)
         (void)vol_fold_request(v);
         (void)vol_reclaim_schedule(v);
     }
+}
+
+/* Sweep at most `cap` PENDING-LIST ENTRIES (0 = all of them) and return
+   how many inodes were actually swept (rc>0 from vol_sweep_one; deleted
+   or unresolvable entries are popped but not counted, as before).
+
+   This is the chunk primitive of the read-liveness drain fix (Gentoo
+   bare-metal incident, Oct 22 2026): the old vol_sweep_pending swept the
+   WHOLE pending set inside ONE caller lock hold, and the daemon's 1 Hz
+   tick held g_io_lock across that call -- 1-4 pending inodes measured
+   13-49 s of hold on a 110 GB two-device rootfs, during which every
+   FUSE_WRITE/.flush/.fsync AND every metadata/read that crosses
+   g_io_lock (the sshd child reading its host keys, getty's login) queued
+   behind it. `cap` bounds ENTRIES, not time: one entry's cost is one
+   vol_sweep_one (a file rewrite that cannot be split), so the caller's
+   hold is bounded by one file's sweep plus the pop overhead -- the same
+   per-file release the full sweep worker already does
+   (src/cli/fuse_fs.c, invf_sweep_worker's unlock/usleep/lock per file).
+
+   Run-level bookkeeping (vol_heat_sweep_begin, vol_sweep_pending_finish)
+   belongs to the CALLER around the chunk loop, not here: a decay pass
+   per drain RUN, a tail when the list empties. vol_sweep_pending below
+   is exactly that caller, undrained, for tests and offline paths. */
+int vol_sweep_pending_cap(invfs_volume *v, size_t cap)
+{
+    size_t n = v->n_pending;
+    size_t seen = 0;
+    int done = 0;
+    while (n > 0 && (cap == 0 || seen < cap)) {
+        uint64_t id = v->pending[0];
+        /* find the current name for this inode (may have been deleted) */
+        char nm[256];
+        int found = vol_sweep_name_of(v, id, nm, sizeof nm);
+        vol_unmark_pending(v, id);
+        seen++;
+        /* WP135: == 1, not "non-zero". vol_sweep_name_of propagates the -1
+         * that a stopped v3 walk now produces, and a truthiness test would
+         * have fed that -1 straight into vol_sweep_one with an EMPTY name --
+         * a rewrite keyed on a name the volume could not supply. */
+        if (found == 1) {
+            int rc = vol_sweep_one(v, id, nm);
+            if (rc > 0) done++;
+        }
+        n = v->n_pending;   /* re-read (list may shrink) */
+    }
+    return done;
+}
+
+/* drain the pending list (daemon background): process each pending inode
+   and unmark it. Called when the daemon holds the volume exclusively
+   (no open handles). Returns number of processed inodes.
+
+   Undrained shape: the WHOLE list under ONE caller lock hold. The FUSE
+   daemon's tick no longer calls this -- it chunks via
+   vol_sweep_pending_cap and releases g_io_lock between files (read
+   liveness, see above); this entry stays for tests, sweep_bang and any
+   caller that owns the lock for the full run by design. */
+int vol_sweep_pending(invfs_volume *v)
+{
+    int done;
+    vol_heat_sweep_begin(v);   /* WP19: one decay pass per sweep run */
+    done = vol_sweep_pending_cap(v, 0);
+    vol_sweep_pending_finish(v);
     return done;
 }
 

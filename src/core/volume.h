@@ -212,6 +212,15 @@ void vol_mark_pending(invfs_volume *v, uint64_t inode_id);
 void vol_unmark_pending(invfs_volume *v, uint64_t inode_id);
 size_t vol_pending_count(invfs_volume *v);
 int  vol_sweep_pending(invfs_volume *v);
+/* Chunked drain primitive (read-liveness fix): sweep at most `cap`
+   pending-list entries (0 = all) under the caller's one lock hold and
+   return how many inodes were actually swept. The caller owns the
+   run-level bookkeeping: vol_heat_sweep_begin() before the chunk loop,
+   vol_sweep_pending_finish() once the list empties. The FUSE tick uses
+   this to bound its g_io_lock hold to one file's sweep per hold; see
+   the full vol_sweep_pending_cap() commentary in src/core/vol_sweep.c. */
+int  vol_sweep_pending_cap(invfs_volume *v, size_t cap);
+void vol_sweep_pending_finish(invfs_volume *v);
 typedef void (*invfs_sweep_file_progress_fn)(void *user, const char *name,
                                             uint64_t done, uint64_t total);
 int  vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name);

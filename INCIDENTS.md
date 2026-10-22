@@ -3258,10 +3258,11 @@ in-soak proven-exhausted accept).
   unresponsive — sshd stops sending its banner, getty's `login` freezes after
   Enter, only ICMP survives; hard reset required. Before mitigation the host
   needed 379 s boot-to-SSH.)
-  **Status:** OPEN — host-side mitigation only (env knobs + tmpfs, see
-  *Mitigation*); the three root causes below each need their own WP. Host:
-  bare metal, Gentoo OpenRC stage3, root = `invfs[sda2]` FUSE, two-device
-  volume (110.7 GB SSD raw+meta / 1.8 TB HDD shadow), uuid
+  **Status:** drain-hold root cause FIXED in tree (chunked drain, see
+  *Fix*); the two other root causes below (bitmap-span amplification,
+  power-cut losses on un-fenced state) each still need their own WP.
+  Host: bare metal, Gentoo OpenRC stage3, root = `invfs[sda2]` FUSE,
+  two-device volume (110.7 GB SSD raw+meta / 1.8 TB HDD shadow), uuid
   `af5bd96a0000400086237b3267458b6b`, kernel 6.18.57, workload = a real
   rootfs (logs, small files, package builds).
 
@@ -3331,6 +3332,34 @@ in-soak proven-exhausted accept).
   with `mount point does not exist`. Callers that assume mkdir durability
   (every install script) need dirents fenced at create or a documented
   "mkdir is durable at close of a child/ fsync" rule.
+
+  **Fix (chunked drain; in tree, branch `fix/drain-read-liveness`).**
+  Cause 1 above — the tick drained the WHOLE pending set inside ONE hold
+  of `g_io_lock`, so the hold was unbounded in the pending set's size and
+  READS paid it too — is fixed by slicing the hold the way the full sweep
+  worker always did. `vol_sweep_pending()` is split into
+  `vol_sweep_pending_cap(v, cap)` (sweep at most `cap` pending entries
+  per caller hold, `src/core/vol_sweep.c`) +
+  `vol_sweep_pending_finish(v)` (the promote/tier/tz_flush/fold tail);
+  the undrained `vol_sweep_pending()` remains a thin wrapper for tests
+  and offline paths. The tick (`src/cli/fuse_sweep_thread`) now loops
+  `vol_sweep_pending_cap(g_vol, 1)` — at most ONE pending entry per
+  `g_io_lock` hold — and releases the lock (`unlock; usleep(500);
+  lock`) between entries, re-checking WP626's write-arrival gate and
+  shutdown each time. Worst-case hold is therefore ONE file's sweep, not
+  the whole set; a foreground write arriving mid-drain aborts the rest
+  to the next tick (`PARTIAL` in the log line). The log line keeps the
+  two substrings `tools/test-writeback-stall.sh` greps
+  (`on-demand: processed`, `held g_io_lock`) and now reports the worst
+  chunk hold plus a `PARTIAL` marker: `on-demand: processed %d pending
+  in %d chunk(s) (held g_io_lock %lld ms worst chunk, deferred %d
+  tick(s))`. Identical work, identical reclaim — only the hold shape and
+  with it the worst-case read stall (one file's sweep, not the pending
+  set). `sweep_test` (49 checks) and `sweep_bang_test` (22 checks) pass.
+  NOT yet validated: the read-latency number on the 110 GB host itself
+  (the E2E blind spot below still stands) — a host re-measurement of
+  boot-to-SSH and the fsync latency after deploying this daemon is the
+  closing measurement.
 
   **Mitigation deployed on the host (NOT a fix).** initramfs env before the
   daemon launch: `INVFS_SWEEP_INTERVAL=1` (arms the handle-open deferral),
