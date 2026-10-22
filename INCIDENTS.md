@@ -3250,3 +3250,139 @@ in-soak proven-exhausted accept).
   Deliberately NOT done: guest DefaultTimeoutStopSec cuts (would let a hung
   FUSE unmount die by SIGKILL and still "power off" — the gate would stop
   proving clean shutdown).
+
+## OPEN (Gentoo bare metal, v0.6.4 release binaries) — the 1 Hz pending drain holds `g_io_lock` 13–49 s per pass (a 128 MB write wedges the rootfs >15 min), and per-flush bitmap-span rewrites amplify writes ~15–25× on a 110 GB volume
+
+  **Date:** Oct 22, 2026
+  **Severity:** High (a single `dd conv=fsync` of 128 MB makes the whole rootfs
+  unresponsive — sshd stops sending its banner, getty's `login` freezes after
+  Enter, only ICMP survives; hard reset required. Before mitigation the host
+  needed 379 s boot-to-SSH.)
+  **Status:** OPEN — host-side mitigation only (env knobs + tmpfs, see
+  *Mitigation*); the three root causes below each need their own WP. Host:
+  bare metal, Gentoo OpenRC stage3, root = `invfs[sda2]` FUSE, two-device
+  volume (110.7 GB SSD raw+meta / 1.8 TB HDD shadow), uuid
+  `af5bd96a0000400086237b3267458b6b`, kernel 6.18.57, workload = a real
+  rootfs (logs, small files, package builds).
+
+  **Symptom.** (a) Boot to SSH-ready 379 s (kernel start → `btime` delta; NIC
+  link at 143.5 s by dmesg). (b) Foreground `dd … conv=fsync` pays a
+  near-fixed 25–31 s regardless of size: 16 MiB/25.52 s (657 kB/s), 8 MiB/30.99 s
+  (271 kB/s). (c) 128 MiB + final fsync: fsync NEVER returned (>15 min until a
+  hard reset); afterwards every process crossing the FUSE root stalled —
+  a new sshd connection accepts TCP but the child sends no banner (it reads
+  its host keys/`/etc` off the root), the console `login` eats Enter. (d) After
+  recovery: 8 MiB fsync = 6.63 s (1.3 MB/s), boot = 128 s, zero lock-hold
+  lines (mitigation below).
+
+  **Mechanism (measured; the daemon's own log at `/tmp/fuse.log` names it).**
+  ```
+  [sweep] on-demand: processed 1 pending (held g_io_lock 24133 ms, deferred 4 tick(s))
+  [sweep] on-demand: processed 3 pending (held g_io_lock 49047 ms, deferred 6 tick(s))
+  [sweep] on-demand: processed 4 pending (held g_io_lock 25555 ms, deferred 3 tick(s))
+  ```
+  The 1 Hz tick drains the whole pending set inside ONE hold of `g_io_lock`
+  (`src/cli/fuse_fs.c:2713-2748`, call at `:2734`; the file header at `:36-45`
+  states the property outright: "the drain's hold is unbounded in the pending
+  set's size"), and every `FUSE_WRITE`/`.flush`/`.fsync` queues on that lock —
+  metadata/reads cross it too, which is how a login freezes. 1–4 pending
+  inodes = 13–49 s holds here (~6–25 s per file): `commit_wctx` runs
+  `vol_flush` twice (`fuse_fs.c:2896`, `:2911`), the drain runs it once more
+  (`:2737`), and each `vol_flush` = dirty bitmap span + `vmux_barrier` +
+  `wp25_owner_sync` + `vol_commit_mirror` = several REAL barriers on BOTH
+  devices (`src/core/volume.c:1848-1916`) under the default strict commit
+  policy (`src/core/blkio.c` `pf_should_flush`: all-zero thresholds → strict;
+  env override in `blkio_apply_env_policy`). At 128 MB the pending set is
+  ~2048 segments → the hold becomes minutes-long and reads as a hang. WP626's
+  yield (`fuse_fs.c:2719`) only stops a drain that has NOT started while
+  arrivals are <1 s old; it does not bound a running hold, and the
+  handle-open deferral runs only `if (interval > 0)` (`:2684-2711`) — with
+  the default `interval==0` it is dead code.
+
+  **Write amplification (measured, compounding the above).** One boot, ~57 MB
+  of LOGICAL test writes (all zeros → compressed payload ≈ 0): device-side
+  sda2 **+835.9 MiB written** (211,659 merged mostly-4 KiB requests, 2,616
+  completed bios) and sdb1 **+845.5 MiB** (mirror). Cause: `vol_bitmap_flush`
+  persists the dirty bitmap as ONE span `[lo,hi)` rounded out to whole blocks
+  (`src/core/vol_btree.c:2713-2738`; span state at
+  `src/core/volume_internal.h:320`), on EVERY `vol_flush` (`volume.c:1879`)
+  and every `publish()` (`vol_btree.c:2768`). A rootfs boot touches both low
+  (metadata zone) and high (RAW) blocks, so the span approaches the whole
+  bitmap: **bitmap size = volume/32768**, i.e. ≈3.5 MB at 110 GB vs 128 KB on
+  a 4 GB CI image. The cost therefore scales with VOLUME SIZE, not data size
+  — invisible to every in-tree measurement (all on ≤4 GB images), which is
+  why it was never seen. Fix shapes: flush only the touched 4 KiB bitmap
+  blocks (a dirty-block bitmap over the bitmap), or split the span at gaps, or
+  coalesce to one span write per drain instead of per `vol_flush`.
+
+  **Power-cut losses on the same host (hard reset, same session).** Strict
+  durability for fsync'd data was PROVEN: `smoke.bin` (64 MB) and
+  `bench.bin` (128 MB) survived the reset md5-exact — including the file whose
+  fsync had been the one stuck. What LOST data was never-fenced state:
+  (a) `/var/log/rc.log` existed across earlier boots of the session and was
+  ENTIRELY absent after the reset — rc-logger holds the handle open for the
+  file's whole life, and the only commit points are `.flush`/`.fsync`/
+  `.release` (`commit_wctx`, `fuse_fs.c:2853`); kernel writeback ACKs the
+  pages into the daemon's session, the session never commits, the dirent row
+  never commits either. Persistent appenders on an INVFS root need a periodic
+  open-session commit (time/bytes watermark), not only release.
+  (b) an empty `mkdir -p /var/db/repos/gentoo` (no caller fsync, nothing
+  else written to it) vanished across the reset; the next boot's script died
+  with `mount point does not exist`. Callers that assume mkdir durability
+  (every install script) need dirents fenced at create or a documented
+  "mkdir is durable at close of a child/ fsync" rule.
+
+  **Mitigation deployed on the host (NOT a fix).** initramfs env before the
+  daemon launch: `INVFS_SWEEP_INTERVAL=1` (arms the handle-open deferral),
+  `INVFS_COMMIT_BYTES=64M`, `INVFS_COMMIT_MS=1000`,
+  `INVFS_COMMIT_IDLE_MS=500` (batched fences); plus `tmpfs /var/log` in fstab
+  (removes the wtmp/lastlog pending churn that triggered a 13 s drain after
+  every sshd login). Before → after on the same host: boot-to-SSH **379 s →
+  128 s**, 8 MiB fsync **30.99 s → 6.63 s**, `held g_io_lock` lines
+  **dozens (13–49 s) → 0**. Residual 6.6 s is real commit+mirror work, not
+  lock-wait. Durability window widened by the commit watermarks (docs'
+  open crash-consistency item) — accepted consciously on this host.
+
+  **What it is NOT** (each tested; recorded so it is not re-derived):
+  - *Device saturation.* During the stalls both devices were nearly idle
+    (`/proc/diskstats`: a `sync` that returned in 0 s moved +512 B on each).
+  - *A deadlock.* The hold is bounded by the work, just unbounded in pending
+    SIZE; it always completed given minutes.
+  - *An HDD-mirror hang.* sdb flushes averaged 47 ms (371 flushes /
+    17,505 ticks) all session.
+  - *Data loss from the reset itself.* md5-exact survival of both fsync'd
+    test files, above.
+  - *`sync(2)` as a durability tool here.* `sync` returned instantly while
+    32 MB stayed dirty in the daemon's queue — only `fsync`/close fences.
+
+  **Import-fidelity side note (RESOLVED in session; still a finding).** The
+  bare-metal import left ~875 objects missing (rsync catch-up of `etc/`,
+  `root/`, `dev/*`, top-level symlinks after `invf-import` + FUSE mount), and
+  later `/usr/lib64/libgcc_s.so.1` was found ABSENT. Failure chain, measured:
+  `/bin/bash` itself does NOT link libgcc_s (`ldd /bin/bash` shows no such
+  dep; `env -i bash` runs clean), yet every portage metadata spawn died with
+  `/bin/bash: error while loading shared libraries: libgcc_s.so.1` → rc=127 →
+  `aux_get(): … failed with unexpected returncode 127` → EVERY ebuild
+  reported `masked by: corruption` (emerge rc=1) — so the loader dep enters
+  through the spawn ENVIRONMENT (an `LD_PRELOAD` of a sandbox lib is the
+  candidate; the exact lib was not pinned down — `find /usr/lib*/portage
+  -name libsandbox.so` found nothing on this stage3, portage lives under
+  `/usr/lib/python3.14/site-packages/portage`), not through bash's own
+  NEEDED. The toolchain still had the real file
+  (`/usr/lib/gcc/x86_64-pc-linux-gnu/16/libgcc_s.so.1`, 186,456 B) — only
+  the `/usr/lib64` runtime copy was gone, i.e. a missing-object of exactly
+  the ~875 class. Fix that cleared emerge past the failure point: `cp -a`
+  from the toolchain dir + `chmod 644` (note: `cp -a` landed the file as
+  `600` through the FUSE root — mode preservation on create is a second,
+  unfiled fidelity item) + `ldconfig`. Whether the missing-object class
+  belongs to the import or to a power cut on unfsynced state is not yet
+  established; `docs/GENTOO-INSTALL.md` should gain a post-import
+  `ldconfig -N -X --root /mnt/gentoo`-style check for
+  dynamic-loader-critical files.
+
+  **E2E blind spot.** Every gate runs ≤4 GB images on tmpfs: no bitmap-span
+  amplification (128 KB bitmap), no strict-fence latency (no real mirror, no
+  HDD), no rootfs pending churn, no >100 MB single-file writeback burst. A
+  regression test needs at least a sparse-dirty bitmap on a ≥64 GB loop image
+  (span vs touched-block bytes) and a drain-hold time assertion on a pending
+  set of ≥100 inodes.
