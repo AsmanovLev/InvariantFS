@@ -140,11 +140,17 @@ directories
 .IB name .codecpack
 containing a
 .B manifest
-(key = value) plus helper programs. If
+(key = value) plus helper programs. The canonical store is the
+volume's own
+.I /.invariantfs/codecpacks ,
+loaded at mount and making the volume self-hosting; install packs there
+with
+.BR invf-pack (8).
+Host-side, if
 .B INVFS_CODECPACKS
 is set and non-empty, its colon-separated dirs ARE the registry and
 .BR /usr/lib/invfs/codecpacks
-is not searched; otherwise the system dir
+is not searched; otherwise the fallback system dir
 .BR /usr/lib/invfs/codecpacks
 is used (and
 .B INVFS_CODECPACKS_SYS=0
@@ -197,8 +203,14 @@ in the source tree (packaged as the documentation of the invfs source
 package).
 .SH FILES
 .TP
+.B /.invariantfs/codecpacks
+Canonical host/volume codecpack store (self-hosting; written by
+.BR invf-pack (8)).
+.TP
 .B /usr/lib/invfs/codecpacks
-System codecpack directory.
+Fallback system codecpack directory, scanned by the probe only when
+.B INVFS_CODECPACKS
+is unset; seeded into the initramfs by the packaging.
 .TP
 .B /usr/lib/invfs/tools
 Shared external codec tool directory.

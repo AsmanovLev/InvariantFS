@@ -612,6 +612,38 @@ up in this order:
 On Windows, paths are hardcoded — see `docs/SECURITY.md`. Known risk;
 deferred fix.
 
+### 2.8a Where codecpacks live (do not confuse with the tools above)
+
+§2.8 is about the external **helper executables**. The **packs**
+themselves have their own store, and it is **on the volume, not in
+`/usr/lib`**:
+
+- **The canonical store is the volume's own `/.invariantfs/codecpacks/`**
+  (`<name>.codecpack/` dirs). `vol_open` loads them into the registry at
+  mount, read-only and best-effort (`vol_load_volume_packs`,
+  `src/core/volume.c:922`, called at the end of `vol_open_inner`). This
+  is what makes a volume self-hosting: the packs travel with the data.
+- **Install packs there with the manager** `invf-pack` (`src/cli/pack.c`):
+  it installs to the host pack root `/.invariantfs/codecpacks` by
+  default (`HOST_ROOT`, `pack.c:63`; man `invf-pack(8)`), or to
+  `<mnt>/.invariantfs/codecpacks` with `--on-volume <mnt>`, and
+  `--root` / `INVFS_PACK_ROOT` override the root. It also verifies
+  sha256 and reports missing external tools at install time.
+- **`/usr/lib/invfs/codecpacks` is only a host-dir FALLBACK**, scanned by
+  the codec probe *when `INVFS_CODECPACKS` is unset* (`probe_external`,
+  `src/codecs/codec.c:741-766`; `pack_scan_all`, `codec.c:1746-1761`).
+  Packaging seeds it into the initramfs (`packaging/dracut/90invfs/module-setup.sh`,
+  `packaging/debian/invfs.initramfs-hook`) so a rootfs can find packs
+  before its own volume store is readable. It is **not** the install
+  target for a self-hosting volume — putting packs only there is the
+  mistake this section exists to prevent.
+- The in-process plugin origin gate anchors on `/.invariantfs/codecpacks`
+  first (`src/core/vol_plugin_inproc.c:178`; `docs/SECURITY.md`).
+
+Set `INVFS_CODECPACKS` (colon dirs) to *replace* the host fallback for a
+probe; it never suppresses the volume's own `/.invariantfs/codecpacks`,
+which loads independently at mount.
+
 ### 2.8b Where the tool scratch goes
 
 External helpers run on real files, so every transcode and every
