@@ -456,42 +456,50 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > windowless.
 
 `INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above, and it does
-**not** switch the pending drain on. The drain -- pending delta-group
-commits plus `vol_tz_flush` -- runs on every 1 Hz tick, AND the same
-tick also runs a full per-file sweep (`vol_sweep_pending` calls
-`vol_sweep_one` per pending inode: lanes + generic floor + stamps).
-Transform and re-encoding therefore DO happen in-daemon as files land
-(measured: a 16 GiB FUSE-written file was already GENERIC-stamped
-before its first offline sweep, which then correctly skipped it as
-already swept). What the tick genuinely never does is dedupe passes
-and savepoint captures (`src/cli/fuse_fs.c:2510`, the drain at
-`:2556-2566`; `vol_sweep.c:1944`, the pending drain). The variable gates how
-often the thread re-evaluates the *handle-open deferral* around it
-(`:2522-2554`): at `N` it checks every Nth tick, and with the default (unset,
-so `N == 0`) it never checks at all, which means the drain runs even while a
-file handle is open. Both facts used to be invisible, because until the thread
-was created in the daemon and not in the `fuse_daemonize` parent, none of this
-ran. Reported, not changed; see the WP.
+**not** switch the pending drain on. The drain — pending delta-group
+commits plus `vol_tz_flush` — runs on every 1 Hz tick, AND the same
+tick also runs a full per-file sweep (the chunked drain calls
+`vol_sweep_pending_cap` → `vol_sweep_one` per pending inode: lanes +
+generic floor + stamps). Transform and re-encoding therefore DO happen
+in-daemon as files land (measured: a 16 GiB FUSE-written file was
+already GENERIC-stamped before its first offline sweep, which then
+correctly skipped it as already swept). What the tick genuinely never
+does is dedupe passes and savepoint captures. The variable gates how
+often the thread re-evaluates the *handle-open deferral* around it: at
+`N` it checks every Nth tick, and with the default (unset, so `N == 0`)
+it never checks at all, which means the drain runs even while a file
+handle is open. Both facts used to be invisible, because until the
+thread was created in the daemon and not in the `fuse_daemonize`
+parent, none of this ran.
 
-> **The drain YIELDS to a live foreground write path (WP626).** The drain
-> re-encodes the whole pending set inside ONE hold of `g_io_lock`, and every
-> `FUSE_WRITE`, `.flush` and `.fsync` needs that lock before it can be
-> served — so the drain's hold was paid by the write path, and that is the
-> shape of a shutdown wedge: a commit waits seconds, the kernel's page
-> writeback never completes, and the process parks in D. Measured on a
-> 12-file / 72 MiB pending set: the drain held the lock 1000–1459 ms
-> (`[sweep] on-demand: processed N pending (held g_io_lock … ms, deferred …
-> tick(s))`, `src/cli/fuse_fs.c:2742`) and a foreground write+fsync issued
-> during a write storm peaked at 724–1156 ms; with the gate, 0 ms.
-> The write path now stamps an arrival clock at ENTRY (before it takes the
-> lock — a request queued on the lock is still a request the drain would be
-> making wait), and the tick skips the drain while an arrival landed within
-> the last second (`src/cli/fuse_fs.c:2719`), announcing the yield once per
-> streak (`on-demand drain: yielding to a live write path`). The same
-> `vol_sweep_pending()` call, the same reclaim, the same codecs — only WHEN
-> it may start. Nothing is lost by waiting: the pending list is RAM-only
+> **The drain YIELDS to a live foreground write path (WP626), and is
+> CHUNKED so reads are served between files (Oct 22 2026 bare-metal
+> incident).** Two independent properties, both about the drain's hold
+> of `g_io_lock`, which every `FUSE_WRITE`, `.flush`, `.fsync` AND every
+> metadata/read must take before it can be served:
+> - **WHEN it starts (WP626):** the drain does not start on a tick where
+>   the write path arrived within the last second (`g_fg_write_ns`
+>   stamped at write ENTRY — a request queued on the lock is still a
+>   request the drain would be making wait); it runs on the first tick
+>   after arrivals stop, announcing the yield once per streak
+>   (`on-demand drain: yielding to a live write path`).
+> - **HOW LONG the hold lasts (chunking):** the tick drains at most ONE
+>   pending entry per hold (`vol_sweep_pending_cap(g_vol, 1)`) and
+>   releases the lock (`unlock; usleep(500); lock`) between entries,
+>   re-checking the write gate and shutdown each round. Worst-case hold
+>   is one file's sweep, not the whole pending set — which is what used
+>   to freeze READS (an sshd child reading its host keys, getty's login)
+>   for the length of a 13–49 s drain on a 110 GB two-device rootfs. A
+>   write arriving mid-drain aborts the remainder to the next tick
+>   (`PARTIAL` in the log line).
+>
+> Identical work, reclaim and codecs in both cases — only the hold shape
+> changed. Nothing is lost by waiting: the pending list is RAM-only
 > bookkeeping, and USR1, the `user.invfs.sweep` xattr and the
-> `raw_watermark` ladder are separate triggers the gate does not touch.
+> `raw_watermark` ladder are separate triggers the gates do not touch.
+> `INVFS_SWEEP_DRAIN_DEFER=0` turns the start-gate off (the A/B control
+> leg of `tools/test-writeback-stall.sh`, which also asserts LIVENESS —
+> the drain resumes on its own once the write path goes quiet).
 > `INVFS_SWEEP_DRAIN_DEFER=0` turns it off (`src/cli/fuse_fs.c:2614`) and
 > that is the A/B control leg of `tools/test-writeback-stall.sh`, which also
 > asserts LIVENESS — the drain resumes on its own once the write path goes
