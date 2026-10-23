@@ -29,6 +29,14 @@ This is todo/roadmap list. Once task is done, erase it:
 
 ## Part 1 — How to develop
 
+### 1.0 Role Check: Primary Agent vs. Subagent
+
+Before proceeding with any task, determine your operational role:
+- **Primary Agent (working alone, no parallelism):**
+  If you are the sole agent running the session and the change is a minor bugfix, documentation tweak, or local feature, **formal Work Packages (WP) and worktrees are NOT required**. You may edit directly on `main`, run validation tests, and push commits.
+- **Subagents / Parallel Workers:**
+  When multiple subagents are dispatched in parallel, or when undertaking major breaking architectural rewrites, **full WP discipline (§1.2 - §1.5) with dedicated branches and validation gates is mandatory** to prevent collisions and uncoordinated regressions.
+
 ### 1.1 Discovery: where work starts
 
 Sources of work, in rough order of priority:
@@ -474,22 +482,12 @@ setfattr -n user.invfs.sweep -v 1 /mount/point  # same, via xattr
 > while the watermark pass and the offline explicit-refusal path proceed
 > windowless.
 
-`INVFS_SWEEP_INTERVAL=<seconds>` is **not** the worker above, and it does
-**not** switch the pending drain on. The drain — pending delta-group
-commits plus `vol_tz_flush` — runs on every 1 Hz tick, AND the same
-tick also runs a full per-file sweep (the chunked drain calls
-`vol_sweep_pending_cap` → `vol_sweep_one` per pending inode: lanes +
-generic floor + stamps). Transform and re-encoding therefore DO happen
-in-daemon as files land (measured: a 16 GiB FUSE-written file was
-already GENERIC-stamped before its first offline sweep, which then
-correctly skipped it as already swept). What the tick genuinely never
-does is dedupe passes and savepoint captures. The variable gates how
-often the thread re-evaluates the *handle-open deferral* around it: at
-`N` it checks every Nth tick, and with the default (unset, so `N == 0`)
-it never checks at all, which means the drain runs even while a file
-handle is open. Both facts used to be invisible, because until the
-thread was created in the daemon and not in the `fuse_daemonize`
-parent, none of this ran.
+`INVFS_SWEEP_INTERVAL=<seconds>` controls periodic background sweeping:
+- **`-1` (or unset, default):** never swept automatically in background. Sweeping only occurs via explicit commands (`invf-sweep`, `kill -USR1 $(pidof invf-fuse)`, or the `user.invfs.sweep` xattr).
+- **`0`:** always sweep on every 1 Hz tick.
+- **`>0`:** sweep periodically every N seconds when idle (no open file handles).
+
+The on-demand pending drain (delta commits and stamps) operates independently from this periodic full pass.
 
 > **The drain YIELDS to a live foreground write path (WP626), and is
 > CHUNKED so reads are served between files (Oct 22 2026 bare-metal
@@ -618,207 +616,56 @@ shadow pool (`mb_alloc_meta_zone` → shadow) in the FUSE log.
 > weight, and a lower fraction reserves less of it — which is the honest
 > reason the older advice said "16-24".
 
-### 2.8 Tooling environment
+### 2.8 Developer Notes
 
-External helper executables (for audio/image transcoding) are looked
-up in this order:
-
+#### Tooling Environment & External Helpers
+External helper executables (for audio/image transcoding) are looked up in this order:
 1. `$INVFS_TOOLS/<name>` if set
 2. `/usr/lib/invfs/tools/<name>`
-3. (POSIX) `PATH` — disabled by default for root; set
-   `INVFS_REQUIRE_HELPER_PATH=0` to re-enable
+3. (POSIX) `PATH` — disabled by default for root; set `INVFS_REQUIRE_HELPER_PATH=0` to re-enable
+*(On Windows, paths are hardcoded — see `docs/SECURITY.md`).*
 
-On Windows, paths are hardcoded — see `docs/SECURITY.md`. Known risk;
-deferred fix.
+#### Codecpack Storage & Precedence
+The **packs** themselves have their own store on the volume, **not in `/usr/lib`**:
+- **The canonical store is the volume's own `/.invariantfs/codecpacks/`** (`<name>.codecpack/` dirs). `vol_open` loads them into the registry at mount, read-only and best-effort (`vol_load_volume_packs`, `src/core/volume.c:922`). This is what makes a volume self-hosting: the packs travel with the data.
+- **Install packs there with the manager** `invf-pack` (`src/cli/pack.c`): installs to host pack root `/.invariantfs/codecpacks` by default, or `<mnt>/.invariantfs/codecpacks` with `--on-volume <mnt>` (`--root` / `INVFS_PACK_ROOT` overrides).
+- **`/usr/lib/invfs/codecpacks` is only a host-dir FALLBACK**, scanned by the codec probe *when `INVFS_CODECPACKS` is unset* (`src/codecs/codec.c:741`). Packaging seeds it into initramfs so rootfs finds packs before the volume store is readable.
+- In-process plugin origin gate anchors on `/.invariantfs/codecpacks` first (`src/core/vol_plugin_inproc.c:178`). Set `INVFS_CODECPACKS` (colon dirs) to replace host fallback; volume store always loads independently.
 
-### 2.8a Where codecpacks live (do not confuse with the tools above)
+#### Tool Scratch Staging
+External helpers stage intermediates in a scratch directory:
+- `$INVFS_TOOL_SCRATCH` (forced, if set)
+- `/dev/shm` (1st default: `min(statvfs, allocation ceiling)`)
+- `/tmp` (2nd default: same)
+- `/var/tmp` (3rd default: `statvfs`)
+- `allocation ceiling`: `min(cgroup memory.high|max - memory.current, /proc/meminfo MemAvailable) * INVFS_SCRATCH_TMPFS_MAX_FRAC` (default 50%). If member totals exceed root capacity, scratch dynamically migrates to another root (`src/core/tool_scratch.c`).
 
-§2.8 is about the external **helper executables**. The **packs**
-themselves have their own store, and it is **on the volume, not in
-`/usr/lib`**:
+#### The Bit-Exactness Contract
+Every byte of every file written to the volume can be recovered bit-for-bit, regardless of codec applied:
+- **JPEG → JXL lossless**: built-in JXL lane (`vol_sweep.c`). Transcode guarded by decode-back `memcmp`. Optional: tools absent leaves file RAW.
+- **PNG → JXL lossless**: built-in PNGR lane (`vol_sweep.c:1100`). Whole-path rebuild + `memcmp` guard. Opt-in: `-o photo_codec=nbli` routes via NBLI pack.
+- **TAR / GZIP**: stored byte-original but *decomposed*. Headers in IVFT/IVGZ recipes, payloads in `name!partN` sibling inodes, rebuilt byte-for-byte on read (`vol_cpack.c`).
+- **MP4 / Video**: stored verbatim.
+- **Metadata**: mtime truncated to seconds; plain xattrs opaque blobs; **POSIX ACLs are evaluated daemon-side on every entry point** (`perm_check_cred` / `perm_check_traversal_cred`) since the mount does not negotiate `default_permissions`.
 
-- **The canonical store is the volume's own `/.invariantfs/codecpacks/`**
-  (`<name>.codecpack/` dirs). `vol_open` loads them into the registry at
-  mount, read-only and best-effort (`vol_load_volume_packs`,
-  `src/core/volume.c:922`, called at the end of `vol_open_inner`). This
-  is what makes a volume self-hosting: the packs travel with the data.
-- **Install packs there with the manager** `invf-pack` (`src/cli/pack.c`):
-  it installs to the host pack root `/.invariantfs/codecpacks` by
-  default (`HOST_ROOT`, `pack.c:63`; man `invf-pack(8)`), or to
-  `<mnt>/.invariantfs/codecpacks` with `--on-volume <mnt>`, and
-  `--root` / `INVFS_PACK_ROOT` override the root. It also verifies
-  sha256 and reports missing external tools at install time.
-- **`/usr/lib/invfs/codecpacks` is only a host-dir FALLBACK**, scanned by
-  the codec probe *when `INVFS_CODECPACKS` is unset* (`probe_external`,
-  `src/codecs/codec.c:741-766`; `pack_scan_all`, `codec.c:1746-1761`).
-  Packaging seeds it into the initramfs (`packaging/dracut/90invfs/module-setup.sh`,
-  `packaging/debian/invfs.initramfs-hook`) so a rootfs can find packs
-  before its own volume store is readable. It is **not** the install
-  target for a self-hosting volume — putting packs only there is the
-  mistake this section exists to prevent.
-- The in-process plugin origin gate anchors on `/.invariantfs/codecpacks`
-  first (`src/core/vol_plugin_inproc.c:178`; `docs/SECURITY.md`).
+#### Common Pitfalls
+- **Volume full after small writes?** Background sweep is not running; dead segments and delta entries accumulate. Run `kill -USR1 $(pidof invf-fuse)` or `invf-sweep`.
+- **Read path slow?** Default ARC cache is 256 MB; tune `arc_limit=<MB>` on mount.
+- **`invf-cat` byte count mismatch?** Corrupted recipe. Run `invf-fsck` to identify unreadable recipes.
+- **mkfs refuses image?** Metadata zone too small for volume size. Use `INVFS_META_FRAC=16` or smaller.
+- **FUSE returning EROFS?** Hit hard_min floor (ENOSPC policy flipped read-only). Run `invf-sweep` offline, then inspect `getfattr -n user.invfs.stats <mnt>`.
 
-Set `INVFS_CODECPACKS` (colon dirs) to *replace* the host fallback for a
-probe; it never suppresses the volume's own `/.invariantfs/codecpacks`,
-which loads independently at mount.
+#### When NOT to Use InvariantFS
+- High-throughput write workloads (updates allocate fresh segments instead of in-place patching).
+- Workloads dominated purely by empty metadata files.
+- As a generic drop-in ext4 replacement on production servers.
+*Best for:* archival storage, container/VM base images, rootfs with read-mostly workloads, build roots.
 
-### 2.8b Where the tool scratch goes
-
-External helpers run on real files, so every transcode and every
-containerpack decomposition stages its intermediates in a scratch
-directory. The containerpack forward pass pins the **whole container**
-there and then extracts **every member** into the same place, so its peak
-is roughly **twice the container** — for a 3.5 GB rootfs container, ~7 GB.
-Where that lands is a decision, not a constant
-(`src/core/tool_scratch.c`):
-
-| root | order | offered |
-|---|---|---|
-| `$INVFS_TOOL_SCRATCH` | forced, nothing else searched | free space, still sized |
-| `/dev/shm` | 1st | `min(statvfs, allocation ceiling)` |
-| `/tmp` | 2nd | same |
-| `/var/tmp` | 3rd | `statvfs` (a real filesystem on most hosts) |
-
-The **allocation ceiling** is what makes the tmpfs entries safe: a tmpfs
-page is charged to the *writing cgroup*, so a tmpfs inside a cgroup with a
-finite `memory.max` fails `ENOSPC` while `df` still reports gigabytes free.
-It is `min(cgroup memory.high|max − memory.current, /proc/meminfo
-MemAvailable) × INVFS_SCRATCH_TMPFS_MAX_FRAC` (default 50) — so a scratch
-that *fits* still cannot be the thing that OOMs the box.
-
-tmpfs stays first because for a small job it is genuinely the fast path,
-and the intermediates are written once and read once. What changed is that
-a root is only eligible if it can hold **this job's byte count**, and when
-the count only becomes known mid-job (the member total arrives after
-`enumerate`) the scratch **migrates** to a root that can. If nothing can,
-the lane refuses and prints the demand, the margin, every root's number
-and the remedy — instead of dying later as an opaque `ENOSPC` from the
-middle of an extract, leaving the file silently undecomposed.
-
-| variable | default | effect |
-|---|---|---|
-| `INVFS_TOOL_SCRATCH` | unset | force one root; still capacity-checked |
-| `INVFS_SCRATCH_ROOTS` | `/dev/shm:/tmp:/var/tmp` | `:`-separated list, searched in order |
-| `INVFS_SCRATCH_MARGIN_MB` | `128` | headroom kept on top of the demand |
-| `INVFS_SCRATCH_TMPFS_MAX_FRAC` | `50` | percent of the allocation ceiling a tmpfs may be offered; `0` forces a real filesystem |
-| `INVFS_SCRATCH_VERBOSE` | unset | log the decision even when the first-choice root won |
-
-The decision is asserted by `bin/invf-scratch_policy_test` (`make test`).
-
-### 2.9 The bit-exactness contract
-
-**What it means:** every byte of every file written to the volume can
-be recovered bit-for-bit, regardless of what codec was applied.
-
-**What it does NOT mean:**
-
-- It does not mean "lossless compression of everything" — but it also does
-  not mean "already-compressed files are stored verbatim". What actually
-  happens per kind, on v3:
-  - **JPEG → JXL lossless**, via the BUILT-IN JXL lane
-    (`src/core/vol_sweep.c`, the JPEG branch of `sweep_dispatch`;
-    `tools/test-jxl.sh` is the contract). It is a *transcode*, guarded
-    by a decode-back `memcmp`, so the bytes come back identical through
-    a different codec. Optional like the other lanes: tools absent
-    leaves the file RAW and unstamped (retried, never the generic
-    floor). A loaded `jxl.codecpack` replaces the builtin for files it
-    sniffs (and any loaded pack sniffing the same magic wins over the
-    builtin) -- the main test leg proves pack precedence. Upgrade
-    retries fall back to the builtin attempt when no pack is loaded,
-    so a raised limit re-arms packless files too.
-  - **PNG → JXL lossless**, via the built-in PNGR lane
-    (`src/core/vol_sweep.c:1100-1136`). The whole-path rebuild+memcmp guard
-    refuses anything it cannot prove, and a refused PNG is simply left RAW
-    (measured: `PNGR ...: refused (IDAT is zlib-wrapped, not a raw deflate
-    stream); original kept RAW`). Opt-in alternative: `-o photo_codec=nbli`
-    (`src/cli/fuse_fs.c:3921`; `INVFS_PHOTO_CODEC=nbli` offline) routes new
-    PNG transcodes through the NBLI fat pack instead (default `jxl`);
-    per-file choice is recorded in the recipe, reads need no knob
-    (`docs/benchmarks/NBLI-BENCH.md`, WP620 appendix).
-  - **MP4 → stored verbatim.** There is no video lane; the lossless H.264
-    model was built, measured, and shelved (`impl_docs/AUDIT.md` WP15).
-  - **TAR / GZIP → stored byte-original but *decomposed*.** The lane keeps
-    the header bytes verbatim in an IVFT/IVGZ recipe blob, splits the
-    payloads into `name!partN` sibling inodes (each compressed by its best
-    algorithm), and records the original length as `file_size`; the read
-    path rebuilds the container byte-for-byte
-    (`src/core/vol_cpack.c:1399-1402`, `:1430-1454`, `:1482-1483`; the
-    GZIP sibling is `vol_create_gz_file`, `src/core/vol_cpack.c:1580`). So
-    "verbatim" is imprecise: the bytes are exact, but nothing is left as
-    one opaque segment. Note this lane's guard is a *size* guard
-    ("transcode only when smaller", `src/core/vol_cpack.c:1464-1470`), not
-    a runtime `memcmp` — same category as FLAC in
-    `impl_docs/AUDIT.md` H10.
-  - **ZIP → there is no builtin lane at all.** On v3 a ZIP falls to the
-    generic floor or to a containerpack.
-- It does not mean "metadata is preserved exactly". mtime is
-  truncated to seconds (ctime64 second resolution); plain xattrs are stored
-  as opaque blobs; uid/gid are preserved. **POSIX ACLs are the exception
-  to "opaque"** — they are stored verbatim as the standard
-  `system.posix_acl_access` / `system.posix_acl_default` blob *and
-  evaluated daemon-side on every entry point* (`perm_check_cred` /
-  `perm_check_traversal_cred`; the evaluation contract is written out at
-  `src/cli/fuse_fs.c:621-626`, the two functions are at
-  `src/cli/fuse_fs.c:717` and `:787`), because the
-  mount deliberately does not negotiate `default_permissions` and so is
-  the sole object-level permission authority. ACLs are not decorative.
-- It does not mean "files are stored in their original form". They're
-  stored in segments with explicit per-segment codecs; the FUSE read
-  path reassembles them. Reading the same file twice from the same
-  mount may go through different code paths (ARC cache) — both give
-  identical bytes.
-
-### 2.10 Common pitfalls
-
-- **"Why is my volume full after a few small writes?"** — the sweep is
-  not running, so dead segments and delta entries accumulate. Trigger
-  `kill -USR1` or run `invf-sweep` offline.
-- **"Why is my read path slow?"** — the ARC cache default is 256 MB;
-  tune `arc_limit=<MB>` on mount. Cold reads always go through the
-  full decode.
-- **"Why does `invf-cat` give me a different byte count than
-  `wc -c` on the source?"** — it shouldn't. If it does, the file's
-  recipe is corrupt. Run `invf-fsck` first: it names the inode and
-  says which live recipes will not load. A recipe blob is stored
-  under the BLAKE3 hash of its own contents, so `-f` cannot rebuild
-  one that is gone — it reports the file as unreadable and leaves it
-  alone. Restore the content from a backup or the original image.
-- **"Why does mkfs refuse to format my image?"** — probably the
-  metadata zone is too small for the volume size. Use
-  `INVFS_META_FRAC=16` or smaller.
-- **"Why is FUSE returning EROFS?"** — the volume hit the hard_min
-  floor (ENOSPC policy flipped it to read-only). Run `invf-sweep`
-  offline to reclaim, then `invf-fuse` again. Check
-  `getfattr -n user.invfs.stats /mount/point` for the reason.
-
-### 2.11 When NOT to use InvariantFS
-
-- High-throughput write workloads (updates allocate fresh segments instead of
-  patching in place, plus delta/fold overhead and offline consolidation).
-- Filesystems where metadata space dominates (e.g., 1M empty files).
-- Anything where a kernel panic mid-syscall must not lose data (the
-  crash recovery is good but not POSIX-perfect).
-- As a drop-in ext4 replacement on production servers. It's not.
-
-When to **do** use it:
-
-- Archival storage where you want bit-exact preservation.
-- Container/VM image bases that are mostly read.
-- Build roots where the same files are reconstructed many times.
-- Anywhere you want dedup + content addressing + on-the-fly codec
-  selection without giving up bit-exactness.
-
-### 2.12 Getting help
-
-- `INCIDENTS.md` — production issues and their fixes.
-- `impl_docs/AUDIT.md` — security / correctness audit findings.
-- `docs/GENTOO-INSTALL.md` — full install guide (VM + bare metal).
-- `tools/test-*.sh` — executable examples of every operation.
-- `git log -p -- <path>` — design rationale for past changes. The WP docs
-  were deleted once shipped: the commit that landed a change is its rationale.
-- For new contributors: pick a `WP*` from the discovery list above,
-  open a draft, ask for review.
+#### Getting Help
+- `INCIDENTS.md` — production incidents and root cause analyses.
+- `impl_docs/AUDIT.md` — security and correctness audit findings.
+- `docs/GENTOO-INSTALL.md` — full installation guide (VM + bare metal).
+- `tools/test-*.sh` — executable validation suites.
 
 ---
 

@@ -2617,7 +2617,9 @@ static void *fuse_sweep_thread(void *arg)
     (void)arg;
     signal(SIGUSR1, on_sweep_signal);
     const char *iv = getenv("INVFS_SWEEP_INTERVAL");
-    int interval = iv ? atoi(iv) : 0;
+    /* Default -1: never swept automatically. 0 = always sweep on every tick.
+     * >0 = sweep periodically every N seconds. */
+    int interval = iv ? atoi(iv) : -1;
     int tick = 0;
     /* WP626: how many consecutive ticks the drain yielded to a live write
      * path (reset when a drain runs). Printed, because a deferral that is
@@ -2692,8 +2694,15 @@ static void *fuse_sweep_thread(void *arg)
                 continue;
             }
         }
-        if (interval > 0 && ++tick >= interval) {
+        int run_periodic_sweep = 0;
+        if (interval == 0) {
+            run_periodic_sweep = 1;
+        } else if (interval > 0 && ++tick >= interval) {
             tick = 0;
+            run_periodic_sweep = 1;
+        }
+
+        if (run_periodic_sweep) {
             /* Defer while a handle is open, because a pass rewrites block
              * layout under it. Note the test is "> 0", not "!= 0": this
              * guard's subject is OCCUPANCY, and a count below zero is not
@@ -2718,6 +2727,12 @@ static void *fuse_sweep_thread(void *arg)
                     g_handles_warned = 1;
                 }
                 g_open_handles = 0;
+            }
+            if (!g_shutdown && g_open_handles == 0 && !g_sweep_busy) {
+                g_sweep_busy = 1;
+                invf_sweep_worker(0);
+                g_sweep_busy = 0;
+                continue;
             }
             if (g_shutdown || g_open_handles > 0) continue;
         }
