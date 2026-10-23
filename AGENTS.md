@@ -8,6 +8,25 @@
 
 ---
 
+## TODO / Roadmap
+
+This is todo/roadmap list. Once task is done, erase it:
+- [ ] **Direct file access to shadow zone (for pro-users / zero-transcode inspection)**:
+  Expose raw shadow/recipe data or alternate view (e.g. `/.invariantfs/shadow` or dedicated interface) so power users can read raw underlying blocks directly without triggering re-encoding or on-the-fly decompression pipelines.
+- [ ] **Fix SSH blackout / latency during heavy writes (emerge libjxl)**:
+  Investigate `g_io_lock` vs `/dev/fuse` queue hold during merge-to-/, implement reader-priority / lock splitting or write backpressure so SSH remains responsive during package installation.
+- [ ] **Emerge `media-libs/libjxl` -> install `cjxl`/`djxl` on Gentoo root**:
+  Restore tmpfs portage tree, finish binary merge, verify tools.
+- [ ] **Install 20 codecpacks via `invf-pack`**:
+  Push packs to box, verify and register into `/.invariantfs/codecpacks`.
+- [ ] **Release new codecpacks in registry + clean codecpacks out of the main repository tree**.
+- [ ] **WP615**: `jxlest` dual CLI + `.so` (`wp/615-jxl-so-plugin`).
+- [ ] **WP616**: content batching (classifier table + composer + read-slicing). RAW/opaque first; photo-transcode-first per `docs/benchmarks/JXL-BATCH.md`.
+- [ ] **WP615-followup**: demote FLAC/JXL/PNGR builtins to fat packs (read-forever grandfathering for old recipes).
+- [ ] **Pack system (WP614)**: anchored `.invariantfs/` semantics, content-addressed pack cache + `@recommended`/`@all` sets, `install --volume` from cache, worker hardening, memory controller, network default-deny except `invf-pack` fetch.
+
+---
+
 ## Part 1 — How to develop
 
 ### 1.1 Discovery: where work starts

@@ -3130,6 +3130,7 @@ static int invf_statfs(const char *path, struct statvfs *st)
 {
     const invfs_superblock *sb;
     uint64_t free_blocks;
+    uint64_t raw_free = 0, raw_total = 0, shadow_free = 0, shadow_total = 0;
     (void)path;
     /* WP-M20: base reads are lock-free (immutable base, delta published atomically) */
     if (!g_vol) return -EIO;
@@ -3138,9 +3139,21 @@ static int invf_statfs(const char *path, struct statvfs *st)
     memset(st, 0, sizeof(*st));
     st->f_bsize = INVFS_BLOCK_SIZE;
     st->f_frsize = INVFS_BLOCK_SIZE;
-    st->f_blocks = sb->total_blocks;
-    st->f_bfree = free_blocks;
-    st->f_bavail = free_blocks;
+
+    /* Report usable data capacity rather than raw unpartitioned space that
+     * includes pre-allocated metadata reservations (which on multi-device
+     * volumes scales to ~110GB and causes df to report misleading 113G used). */
+    if (vol_zone_free(g_vol, &raw_free, &raw_total, &shadow_free, &shadow_total) == 0 &&
+        (raw_total + shadow_total) > 0) {
+        st->f_blocks = raw_total + shadow_total;
+        st->f_bfree = raw_free + shadow_free;
+        st->f_bavail = raw_free + shadow_free;
+    } else {
+        st->f_blocks = sb->total_blocks;
+        st->f_bfree = free_blocks;
+        st->f_bavail = free_blocks;
+    }
+
     st->f_files = 0;      /* name-indexed fs: inode count unbounded */
     st->f_ffree = 0;
     st->f_namemax = INVFS_MAX_NAME;
