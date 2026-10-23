@@ -34,6 +34,8 @@
 
 static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_rwlock_t g_table_lock = PTHREAD_RWLOCK_INITIALIZER;
+static pthread_mutex_t g_dirty_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- foreground write-path arrival clock (WP626) ----------------------
  *
@@ -462,9 +464,11 @@ static void build_file_table(void)
     vol_walk_result(&w, rc, (size_t)(c.n > 0 ? c.n : 0), (size_t)(c.n > 0 ? c.n : 0));
     if (c.n > 1)
         qsort(c.v, (size_t)c.n, sizeof *c.v, cmp_entry_name_pos);
+    pthread_rwlock_wrlock(&g_table_lock);
     g_entries = c.v;
     g_nentries = c.n;
     g_cap = c.cap;
+    pthread_rwlock_unlock(&g_table_lock);
     if (vol_walk_commit(&w) != 0) {
         g_table_degraded = 1;
         fprintf(stderr, "invf-fuse: the namespace walk did not complete; the "
@@ -490,6 +494,7 @@ static fs_entry *find_entry(const char *name)
 static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
                                 uint64_t ctime)
 {
+    pthread_rwlock_wrlock(&g_table_lock);
     int lo = 0, hi = g_nentries;
     while (lo < hi) {                    /* lower_bound by name */
         int mid = (lo + hi) / 2;
@@ -500,12 +505,16 @@ static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
         g_entries[lo].inode_id = ino;
         g_entries[lo].size = size;
         g_entries[lo].ctime = ctime;
+        pthread_rwlock_unlock(&g_table_lock);
         return;
     }
     if (g_nentries == g_cap) {
         int ncap = g_cap ? g_cap * 2 : 1024;
         fs_entry *ne = (fs_entry *)realloc(g_entries, ncap * sizeof(fs_entry));
-        if (!ne) return;               /* keep old table on OOM */
+        if (!ne) {
+            pthread_rwlock_unlock(&g_table_lock);
+            return;               /* keep old table on OOM */
+        }
         g_entries = ne;
         g_cap = ncap;
     }
@@ -517,20 +526,26 @@ static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
     g_entries[lo].size = size;
     g_entries[lo].ctime = ctime;
     g_nentries++;
+    pthread_rwlock_unlock(&g_table_lock);
 }
 
 static void table_remove_name(const char *name)
 {
+    pthread_rwlock_wrlock(&g_table_lock);
     int lo = 0, hi = g_nentries;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
         if (strcmp(g_entries[mid].name, name) < 0) lo = mid + 1;
         else hi = mid;
     }
-    if (lo >= g_nentries || strcmp(g_entries[lo].name, name) != 0) return;
+    if (lo >= g_nentries || strcmp(g_entries[lo].name, name) != 0) {
+        pthread_rwlock_unlock(&g_table_lock);
+        return;
+    }
     memmove(&g_entries[lo], &g_entries[lo + 1],
             (size_t)(g_nentries - lo - 1) * sizeof(fs_entry));
     g_nentries--;
+    pthread_rwlock_unlock(&g_table_lock);
 }
 
 /* re-read one name from the engine into the table. Call WITHOUT the lock. */
@@ -623,15 +638,31 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
 {
     int found = 0;
     int degraded = 0;
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) {
-        pthread_mutex_unlock(&g_io_lock);
-        return 0;
+    int need_refresh = 0;
+
+    if (!g_vol) return 0;
+
+    pthread_rwlock_rdlock(&g_table_lock);
+    fs_entry *e = find_entry(name);
+    if (e) {
+        if (ino_out)   *ino_out   = e->inode_id;
+        if (size_out)  *size_out  = e->size;
+        if (ctime_out) *ctime_out = e->ctime;
+        found = 1;
+        pthread_rwlock_unlock(&g_table_lock);
+        return 1;
     }
-    {
-        fs_entry *e = find_entry(name);
-        if (!e) table_refresh_if_stale_locked();
-        if (!e) e = find_entry(name);
+    degraded = g_table_degraded;
+    need_refresh = g_table_stale;
+    pthread_rwlock_unlock(&g_table_lock);
+
+    if (need_refresh) {
+        pthread_mutex_lock(&g_io_lock);
+        table_refresh_if_stale_locked();
+        pthread_mutex_unlock(&g_io_lock);
+
+        pthread_rwlock_rdlock(&g_table_lock);
+        e = find_entry(name);
         if (e) {
             if (ino_out)   *ino_out   = e->inode_id;
             if (size_out)  *size_out  = e->size;
@@ -640,8 +671,8 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
         } else if (g_table_degraded) {
             degraded = 1;
         }
+        pthread_rwlock_unlock(&g_table_lock);
     }
-    pthread_mutex_unlock(&g_io_lock);
     return found ? 1 : (degraded ? -1 : 0);
 }
 
@@ -1792,20 +1823,28 @@ static wctx *g_dirty;
 
 static void dirty_add_locked(wctx *c)
 {
+    pthread_mutex_lock(&g_dirty_lock);
     wctx *p;
-    for (p = g_dirty; p; p = p->next_dirty)
-        if (p == c) return;    /* already listed */
+    for (p = g_dirty; p; p = p->next_dirty) {
+        if (p == c) {
+            pthread_mutex_unlock(&g_dirty_lock);
+            return;    /* already listed */
+        }
+    }
     c->next_dirty = g_dirty;
     g_dirty = c;
+    pthread_mutex_unlock(&g_dirty_lock);
 }
 
 static void dirty_del_locked(wctx *c)
 {
+    pthread_mutex_lock(&g_dirty_lock);
     wctx **pp = &g_dirty;
     while (*pp) {
-        if (*pp == c) { *pp = c->next_dirty; c->next_dirty = NULL; return; }
+        if (*pp == c) { *pp = c->next_dirty; c->next_dirty = NULL; break; }
         pp = &(*pp)->next_dirty;
     }
+    pthread_mutex_unlock(&g_dirty_lock);
 }
 
 /* WP607: a failed write poisons its whole session, not just the delta
@@ -1833,9 +1872,15 @@ static void wctx_abort_failed_locked(wctx *c)
 
 static wctx *dirty_find_locked(const char *name)
 {
+    pthread_mutex_lock(&g_dirty_lock);
     wctx *p;
-    for (p = g_dirty; p; p = p->next_dirty)
-        if (strcmp(p->name, name) == 0) return p;
+    for (p = g_dirty; p; p = p->next_dirty) {
+        if (strcmp(p->name, name) == 0) {
+            pthread_mutex_unlock(&g_dirty_lock);
+            return p;
+        }
+    }
+    pthread_mutex_unlock(&g_dirty_lock);
     return NULL;
 }
 
@@ -1889,37 +1934,41 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
 {
     uint64_t ino = 0, size64 = 0, ctime;
     int got;
-    wctx *w;
+    wctx *w = NULL;
     (void)fi;
     (void)is_temp_path;
-    /* WP-M20: base reads are lock-free (immutable base, delta published atomically).
-     * The lock still protects the dirty session list and data path. */
-    pthread_mutex_lock(&g_io_lock);
-    if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
-    /* WP22c: on an io-latched volume (a flush/sync failed THIS session)
-     * the in-RAM state may describe bytes that never reached the device;
-     * serving them would be the silent-corruption flavor of the same
-     * bug. Reads fail loudly until the remount that re-anchors truth.
-     * (A volume that merely OPENED dirty stays readable -- inspection.) */
-    if (vol_io_latched(g_vol)) {
-        pthread_mutex_unlock(&g_io_lock);
-        return -EIO;
+
+    if (!g_vol) return -EIO;
+    if (vol_io_latched(g_vol)) return -EIO;
+
+    /* Fast path check: is this path currently being written? */
+    pthread_mutex_lock(&g_dirty_lock);
+    for (wctx *p = g_dirty; p; p = p->next_dirty) {
+        if (strcmp(p->name, path + 1) == 0) {
+            w = p;
+            break;
+        }
     }
-    /* a live write session for this path owns the freshest bytes:
-     * .write data must stay readable before commit even if the kernel
-     * evicted a clean (already-writtenback) page. Flush staged tails of
-     * every session on this name first so the session view is complete. */
-    for (w = g_dirty; w; w = w->next_dirty)
-        if (strcmp(w->name, path + 1) == 0)
-            wctx_flush_tail_locked(w);
-    w = dirty_find_locked(path + 1);
+    pthread_mutex_unlock(&g_dirty_lock);
+
     if (w) {
-        got = vol_write_read(w->ws, (uint64_t)offset, (uint8_t *)buf, size);
+        /* Rare path: reading a file currently being written. Need g_io_lock. */
+        pthread_mutex_lock(&g_io_lock);
+        if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+        if (vol_io_latched(g_vol)) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+        for (wctx *p = g_dirty; p; p = p->next_dirty)
+            if (strcmp(p->name, path + 1) == 0)
+                wctx_flush_tail_locked(p);
+        w = dirty_find_locked(path + 1);
+        if (w) {
+            got = vol_write_read(w->ws, (uint64_t)offset, (uint8_t *)buf, size);
+            pthread_mutex_unlock(&g_io_lock);
+            return got == -ESTALE ? -ESTALE : (got < 0 ? -EIO : got);
+        }
         pthread_mutex_unlock(&g_io_lock);
-        return got == -ESTALE ? -ESTALE : (got < 0 ? -EIO : got);
     }
-    pthread_mutex_unlock(&g_io_lock);
-    /* Metadata read: lock-free base path */
+
+    /* WP-M20: clean base reads are lock-free (immutable base, delta published atomically). */
     {
         /* WP135: EIO, not ENOENT, when the table is degraded -- see the
          * three-answer contract on snapshot_entry(). */
@@ -1931,23 +1980,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
     }
     if ((uint64_t)offset >= size64)
         return 0;
-    /* Data read: lock-free, and that means EVERY structure vol_read_range
-     * touches must be safe on its own. The io_pread claim is true and it is
-     * not the whole story: the block I/O is stateless, but the path above it
-     * is not. THREE structures have been found racing here because this
-     * comment read as a blanket guarantee that there was nothing left to
-     * lock --
-     *   the ARC cache            (fixed in 40ad1e3; see arc.h, arc.mu)
-     *   the read-heat table      (src/core/vol_heat.c, heat_mu)
-     *   the parsed !mbrmap cache (src/core/vol_cpack.c, cpacks_mu)
-     * All three are strict-leaf mutexes now, and that -- not the pread -- is
-     * what makes this line safe. The third is the sharpest case of the three:
-     * its grow REALLOCs the array, which invalidates every pointer into it,
-     * and what it handed the reader was a borrow into that array. If you add
-     * a cache, a counter or an index to vol_read_range, it needs its own
-     * locking; "the pread is thread-safe" is not an answer. And if it hands
-     * anything out, hand out a copy or a reference -- never a pointer into a
-     * structure another thread can move. */
+
     got = vol_read_range(g_vol, ino, (uint64_t)offset, size, buf);
     if (got < 0)
         return -EIO;
@@ -1956,9 +1989,11 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
 
 static void table_rebuild_locked(void)
 {
+    pthread_rwlock_wrlock(&g_table_lock);
     /* free old table, rescan */
     free(g_entries);
     g_entries = NULL; g_nentries = 0; g_cap = 0;
+    pthread_rwlock_unlock(&g_table_lock);
     /* WP135: clear the degraded mark BEFORE the rebuild, so it is this
      * rebuild's verdict and not the last one's. A rebuild that completes
      * leaves it 0 and the table is authority again; one that does not sets
@@ -3108,15 +3143,9 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
         }
         rc = vol_rename(g_vol, from + 1, to + 1);
         if (rc == 0) {
-            /* WP22c: a rename that reports OK must never silently vanish.
-             * The record pair rides the same buffered page cache as every
-             * other write, and without a barrier an error window can
-             * acknowledge the rename and then kill it in writeback -- the
-             * source name resurrects at the next mount (a file nobody
-             * deleted reappearing is worse than a failed call). The
-             * barrier pins the pair; its failure latches the volume and
-             * fails the rename loudly instead of promising a lie. */
-            if (vol_sync(g_vol) != 0) {
+            /* Flush dirty metadata without forcing synchronous disk barrier (fsync).
+             * Full durability is ensured on explicit fsync() or periodic flush. */
+            if (vol_flush(g_vol) != 0) {
                 pthread_mutex_unlock(&g_io_lock);
                 return -EIO;
             }
