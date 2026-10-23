@@ -1192,6 +1192,16 @@ static int vol_write_commit_v3(invfs_wsession *s)
     free(s->old_pbas);
     s->old_pbas = NULL;
 
+    /* Register new segments into pba_ref incrementally so the map stays exact
+     * without triggering an exhaustive O(N) full-filesystem walk on subsequent unlinks. */
+    if (s->n_ents > 0) {
+        for (i = 0; i < s->n_ents; i++) {
+            if (s->ents[i].pba && s->ents[i].zone != INVFS_ZONE_TEXT)
+                pba_ref_modify(v, s->ents[i].pba, +1);
+        }
+    }
+    pba_ref_validate(v);
+
     /* Retire the superseded content's "name!..." siblings -- the leg the v2
      * commit has always had (vol_write_commit:1131, gated on the same
      * ast_owns_siblings answer the v3 loader now takes at wsession_load_old_v3).

@@ -371,7 +371,6 @@ static void free_recipe_level(invfs_volume *v,
         }
         if (!dup) {
             uint64_t plen = 0;
-            pba_ref_ensure(v);
             pba_ref_modify(v, pba, -1);
             if (pba_ref_count(v, pba) == 0) {
                 if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
