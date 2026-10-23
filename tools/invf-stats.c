@@ -49,42 +49,31 @@ static void human(uint64_t bytes, char *buf, size_t cap)
     snprintf(buf, cap, "%.1f %s", v, u[i]);
 }
 
-static void draw_bar(const invfs_volume *v, const invfs_superblock *sb,
-                     uint64_t *asis_out, uint64_t *sem_out,
-                     uint64_t *used_out, uint64_t *free_out)
+static void draw_bar(const invfs_volume_stats *st, uint64_t total_bytes,
+                     uint64_t free_bytes)
 {
-    const uint8_t *bm = vol_bitmap((invfs_volume *)v, NULL);
-    uint64_t total = sb->total_blocks;
-    uint64_t asis = 0, sem = 0, used = 0;
-    for (uint64_t b = 0; b < total; b++) {
-        if (!(bm[b >> 3] & (1 << (b & 7)))) continue;
-        if (b < sb->raw_zone_start) continue;  /* skip metadata */
-        used++;
-        if (b >= sb->shadow_zone_start) sem++;
-        else                            asis++;
-    }
-    uint64_t data_total = (total > sb->raw_zone_start) ? (total - sb->raw_zone_start) : 0;
-    uint64_t freeb = (data_total > used) ? (data_total - used) : 0;
+    uint64_t raw_b     = st->raw_used_bytes;
+    uint64_t shadow_b  = st->shadow_used_bytes;
+    uint64_t text_b    = st->text_used_bytes;
+    uint64_t unclaim_b = st->unclaimed_used_bytes;
+    uint64_t used_b    = raw_b + shadow_b + text_b + unclaim_b;
+    uint64_t data_total = used_b + free_bytes;
+    if (data_total == 0) data_total = total_bytes ? total_bytes : 1;
 
     printf("  vol [");
     uint64_t rem = BAR_W;
-    uint64_t groups[2] = { sem, asis };
-    const char *cols[2] = { C_BLUE, C_GRAY };
-    uint64_t cells[2];
-    for (int g = 0; g < 2; g++)
-        cells[g] = (uint64_t)((double)groups[g] / (data_total ? data_total : 1) * rem + 0.5);
-    for (int g = 0; g < 2; g++) {
+    uint64_t groups[4] = { shadow_b, text_b, raw_b, unclaim_b };
+    const char *cols[4] = { C_BLUE, C_CYAN, C_GRAY, C_GREEN };
+    uint64_t cells[4];
+    for (int g = 0; g < 4; g++)
+        cells[g] = (uint64_t)((double)groups[g] / (double)data_total * rem + 0.5);
+    for (int g = 0; g < 4; g++) {
         if (cells[g] > rem) cells[g] = rem;
         for (uint64_t c = 0; c < cells[g] && rem > 0; c++, rem--)
             printf("%s█%s", cols[g], C_RST);
     }
     for (uint64_t c = 0; c < rem; c++) printf(C_DIM "░" C_RST);
     printf("]\n");
-
-    if (asis_out) *asis_out = asis;
-    if (sem_out)  *sem_out  = sem;
-    if (used_out) *used_out = used;
-    if (free_out) *free_out = freeb;
 }
 
 typedef struct {
@@ -209,11 +198,13 @@ int main(int argc, char **argv)
     printf("  capacity         : %llu blocks x %u = %s\n\n",
            (unsigned long long)sb->total_blocks, INVFS_BLOCK_SIZE, cap_str);
 
-    uint64_t asis = 0, sem = 0, alloc_b = 0, freeb_b = 0;
     if (!no_bar) {
-        draw_bar(v, sb, &asis, &sem, &alloc_b, &freeb_b);
-        printf("\n  " C_GRAY "█ As-IS (RAW)" C_RST "  " C_BLUE "█ semantic (Shadow)" C_RST
-               "  " C_DIM "░ free" C_RST "\n\n");
+        draw_bar(&st, total_b, free_b);
+        printf("\n  " C_GRAY "█ RAW (verbatim / as-is)" C_RST
+               "  " C_BLUE "█ Shadow (consolidated / recipes)" C_RST
+               "  " C_CYAN "█ Text (batch)" C_RST
+               "  " C_GREEN "█ Unclaimed" C_RST
+               "  " C_DIM "░ Free" C_RST "\n\n");
     }
 
     if (verbose) {
