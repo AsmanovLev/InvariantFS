@@ -259,7 +259,7 @@ $(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O) | $(OUT)
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls stat why arctest blkio_test resize \
+CLI_MAINS := mkfs verify fsck cp cat ls why arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
              sweep_test sweep_orig_len_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
@@ -1902,3 +1902,5 @@ $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-stats.o: tools/invf-stats.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
+$(OUT)/invf-stat: $(OUT)/invf-stats
+	ln -sf invf-stats $@
