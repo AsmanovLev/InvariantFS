@@ -2417,6 +2417,9 @@ static void invf_sweep_worker(int full_pass)
 
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
+    if (vol_pending_count(g_vol) > 0) {
+        vol_sweep_pending(g_vol);
+    }
     /* F9-worker: no capture here. An earlier shape armed the window (K=1
      * drop + capture + reclaim) and even ran the heat decay before the
      * list was validated, so every refuse path below -- capture-failed
@@ -2736,90 +2739,19 @@ static void *fuse_sweep_thread(void *arg)
             }
             if (g_shutdown || g_open_handles > 0) continue;
         }
-        pthread_mutex_lock(&g_io_lock);
-        if (g_shutdown || !g_vol) {   /* unmount won the race */
-            pthread_mutex_unlock(&g_io_lock);
-            break;
-        }
-        if (drain_defer && fg_write_live()) {
-            /* WP626: the foreground is still arriving, so the drain does not
-             * start. The gate's original rationale -- every FUSE_WRITE,
-             * .flush and .fsync queues behind the drain's hold (see
-             * g_fg_write_ns) -- still applies to the START; the hold itself
-             * is now bounded per-file (the chunked drain below), so this
-             * gate decides WHEN the drain starts, not how long the system
-             * stalls once it has. Nothing is lost by waiting: the pending
-             * list is RAM-only bookkeeping (src/core/vol_sweep.c:169-170),
-             * and USR1 / the xattr / the watermark ladder are triggers this
-             * gate does not touch. */
-            if (drain_deferred == 0)
-                fprintf(stderr,
-                        "[sweep] on-demand drain: yielding to a live write "
-                        "path (pending=%zu)\n", vol_pending_count(g_vol));
-            drain_deferred++;
-        } else if (vol_pending_count(g_vol) > 0) {
-            /* Read-liveness drain (Gentoo bare-metal incident, Oct 22
-             * 2026): vol_sweep_pending() swept the WHOLE pending set
-             * inside this ONE hold of g_io_lock, and on a 110 GB
-             * two-device rootfs 1-4 pending inodes measured 13-49 s of
-             * hold -- every FUSE_WRITE/.flush/.fsync AND every
-             * metadata/read crossing g_io_lock (the sshd child reading
-             * its host keys, getty's login) queued behind it, which is
-             * how a login froze for the length of a drain. The full
-             * sweep worker (invf_sweep_worker) has always released per
-             * file (unlock/usleep/lock); the tick now does the same:
-             * at most ONE pending entry per lock hold, WP626's
-             * write-arrival gate re-checked between chunks, so a drain
-             * over N files yields N times instead of holding through
-             * all of them. Identical work -- vol_sweep_pending_cap()
-             * is vol_sweep_pending() minus the run bookkeeping the
-             * tick owns now (begin before the loop, finish when the
-             * list empties); only the HOLD SHAPE changed, and with it
-             * the worst-case read stall: one file's sweep, not the
-             * whole set. */
-            int total = 0, chunks = 0, finished = 0;
-            long long worst_hold = 0;
-            vol_heat_sweep_begin(g_vol);   /* one decay pass per drain run */
-            for (;;) {
-                long long c0 = mono_ns();
-                int n = vol_sweep_pending_cap(g_vol, 1);
-                long long held = mono_ns() - c0;
-                if (held > worst_hold) worst_hold = held;
-                total += n;
-                chunks++;
-                if (g_shutdown || !g_vol) break;
-                if (vol_pending_count(g_vol) == 0) {
-                    vol_sweep_pending_finish(g_vol);
-                    finished = 1;
-                    break;
-                }
-                /* mid-drain yield: the foreground arrived while we were
-                 * chunking -- leave the rest pending for the next tick
-                 * (RAM-only bookkeeping; nothing is lost by waiting) */
-                if (drain_defer && fg_write_live()) break;
-                pthread_mutex_unlock(&g_io_lock);
-                usleep(500);                       /* let the system breathe */
-                pthread_mutex_lock(&g_io_lock);
-                if (g_shutdown || !g_vol) break;   /* unmount won the race */
-            }
+        /* 1 Hz tick: periodic durability flush for LZ4 / pending delta groups.
+         * Automatic background per-file sweep is ELIMINATED here to guarantee
+         * reader liveness (sshd/bash never starve on g_io_lock during active I/O).
+         * File sweeping (vol_sweep_one/lane re-encoding/ZSTD) runs strictly on a
+         * quiet system (g_open_handles == 0) or on explicit user request. */
+        if (!fg_write_live()) {
+            pthread_mutex_lock(&g_io_lock);
             if (g_vol && !g_shutdown) {
-                vol_tz_flush(g_vol);   /* seal the partial text batch */
+                vol_tz_flush(g_vol);
                 vol_flush(g_vol);
-                /* no table invalidation: sweeping rewrites block layout
-                 * only -- name/inode_id/file_size are invariant, and the
-                 * generic ZSTD path clones the record verbatim */
             }
-            if (total > 0 || !finished) {
-                fprintf(stderr,
-                        "[sweep] on-demand: processed %d pending in %d "
-                        "chunk(s)%s (held g_io_lock %lld ms worst chunk, "
-                        "deferred %d tick(s))\n",
-                        total, chunks, finished ? "" : " PARTIAL",
-                        worst_hold / 1000000LL, drain_deferred);
-                drain_deferred = 0;
-            }
+            pthread_mutex_unlock(&g_io_lock);
         }
-        pthread_mutex_unlock(&g_io_lock);
 
         /* WP26: watermark-triggered early sweep -- the first rung of the
          * pressure ladder (the WP23 write path adapts effort; this rung
