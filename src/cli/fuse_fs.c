@@ -2418,7 +2418,15 @@ static void invf_sweep_worker(int full_pass)
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     if (vol_pending_count(g_vol) > 0) {
-        vol_sweep_pending(g_vol);
+        vol_heat_sweep_begin(g_vol);
+        while (g_vol && !g_shutdown && vol_pending_count(g_vol) > 0) {
+            vol_sweep_pending_cap(g_vol, 1);
+            pthread_mutex_unlock(&g_io_lock);
+            usleep(500);
+            pthread_mutex_lock(&g_io_lock);
+        }
+        if (g_vol) vol_sweep_pending_finish(g_vol);
+        if (!g_vol || g_shutdown) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     }
     /* F9-worker: no capture here. An earlier shape armed the window (K=1
      * drop + capture + reclaim) and even ran the heat decay before the

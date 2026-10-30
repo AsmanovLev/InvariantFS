@@ -3110,6 +3110,115 @@ static int find_local_pack(const char *name, char *src, size_t src_cap,
     return -1;
 }
 
+static int is_ivpack_file(const char *path)
+{
+    struct stat st;
+    size_t l;
+    FILE *f;
+    uint8_t sig[4];
+    size_t n;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
+        return 0;
+    l = strlen(path);
+    if (l >= 7 && strcmp(path + l - 7, ".ivpack") == 0)
+        return 1;
+    f = fopen(path, "rb");
+    if (!f) return 0;
+    n = fread(sig, 1, 4, f);
+    fclose(f);
+    return (n == 4 && sig[0] == 0x50 && sig[1] == 0x4b && sig[2] == 0x03 && sig[3] == 0x04);
+}
+
+static int stage_local_ivpack(const char *path, char *src_out, size_t src_cap,
+                              char *dstname_out, size_t dst_cap,
+                              char *stage_top_out, size_t stage_cap)
+{
+    char scratch[MAX_PATH], dl[MAX_PATH];
+    char *entries = NULL;
+    size_t elen = 0;
+    int zmiss = 0, any = 0;
+    char *esave = NULL, *e;
+    pack_info pi;
+    char mp[MAX_PATH];
+
+    if (tool_tmpdir(scratch, sizeof scratch, 1 << 20) != 0) {
+        fprintf(stderr, "invf-pack: no scratch available to unpack %s\n", path);
+        return -1;
+    }
+    if (snprintf(stage_top_out, stage_cap, "%s", scratch) >= (int)stage_cap) {
+        fprintf(stderr, "invf-pack: scratch path too long\n");
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+    if (snprintf(dl, sizeof dl, "%s/unpacked", scratch) >= (int)sizeof dl) {
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+    if (mkdir(dl, 0755) != 0) {
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+
+    if (zip_list(path, &entries, &elen, &zmiss) != 0) {
+        if (zmiss) repo_unzip_missing();
+        else fprintf(stderr, "invf-pack: REFUSED: cannot list entries in %s\n", path);
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+    for (e = strtok_r(entries, "\n", &esave); e; e = strtok_r(NULL, "\n", &esave)) {
+        while (*e == ' ' || *e == '\t') e++;
+        strip_nl(e);
+        if (!*e) continue;
+        if (zip_entry_ok(e) != 0) {
+            fprintf(stderr, "invf-pack: REFUSED: %s escapes the pack dir: %s\n", path, e);
+            free(entries);
+            rmtree(scratch);
+            stage_top_out[0] = 0;
+            return -1;
+        }
+        any++;
+    }
+    free(entries);
+    if (!any) {
+        fprintf(stderr, "invf-pack: REFUSED: empty .ivpack bundle %s\n", path);
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+
+    if (zip_extract(path, dl, &zmiss) != 0) {
+        if (zmiss) repo_unzip_missing();
+        else fprintf(stderr, "invf-pack: REFUSED: cannot unpack %s\n", path);
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+
+    if (!is_codecpack(dl)) {
+        fprintf(stderr, "invf-pack: %s has no manifest (not a valid .codecpack)\n", path);
+        rmtree(scratch);
+        stage_top_out[0] = 0;
+        return -1;
+    }
+
+    snprintf(mp, sizeof mp, "%s/manifest", dl);
+    memset(&pi, 0, sizeof pi);
+    if (parse_manifest(mp, &pi) == 0 && pi.name[0]) {
+        snprintf(dstname_out, dst_cap, "%s.codecpack", pi.name);
+    } else {
+        const char *base = strrchr(path, '/');
+        base = base ? base + 1 : path;
+        snprintf(dstname_out, dst_cap, "%s.codecpack", base);
+    }
+
+    snprintf(src_out, src_cap, "%s", dl);
+    return 0;
+}
+
 /* Resolve <name|./path> to a source pack dir + canonical dst dirname.
  * Returns 0 with src[]/dstname[] filled, -1 with a diagnostic printed. */
 static int resolve_pack_source(const char *name, char *src, size_t src_cap,
@@ -3464,15 +3573,24 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
     if (!release && ((rel_tag && *rel_tag) || (platform && *platform)))
         fprintf(stderr, "invf-pack: note: --release-tag/--platform "
                 "need --release; ignoring them\n");
-    if (strchr(name, '/')) {
+    if (strchr(name, '/') || is_ivpack_file(name)) {
         if (release_given) {
             fprintf(stderr, "invf-pack: --release takes a registry pack "
                     "name, not a path: %s\n", name);
             return 1;
         }
-        if (resolve_pack_source(name, src, sizeof src, dstname,
-                                sizeof dstname) != 0)
-            return 1;
+        if (is_ivpack_file(name)) {
+            if (stage_local_ivpack(name, src, sizeof src, dstname,
+                                   sizeof dstname, stage_top, sizeof stage_top) != 0)
+                return 1;
+            staged = 1;
+            was_ivpack = 1;
+            srckind = pack_source_kind(1, was_ivpack);
+        } else {
+            if (resolve_pack_source(name, src, sizeof src, dstname,
+                                    sizeof dstname) != 0)
+                return 1;
+        }
     } else {
         char base[128], want[64], fetch_name[128];
         size_t bl;
