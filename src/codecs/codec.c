@@ -368,6 +368,7 @@ struct pack_manifest {
     /* WP16a: `type = container` (default/absent = codec). Container packs
      * carry the four decomposition commands instead of encode/decode. */
     int      is_container;
+    int      is_helper;
     char     enumerate[512];
     char     extract[512];
     char     strip[512];
@@ -504,6 +505,7 @@ static int pack_parse_lines(FILE *f, struct pack_manifest *m)
         } else if (strcmp(s, "type") == 0) {
             /* WP16a: only "container" is special; anything else = codec */
             m->is_container = (strcmp(val, "container") == 0);
+            m->is_helper = (strcmp(val, "helper") == 0);
         } else if (strcmp(s, "name") == 0) {
             str_copy(m->name, sizeof m->name, val);
         } else if (strcmp(s, "algo") == 0) {
@@ -668,7 +670,10 @@ static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
     memcpy(mpath + plen, "/manifest", 9);
     mpath[plen + 9] = '\0';
 
-    if (!parse_manifest(mpath, &m) || !m.has_encode || !m.has_decode) return 0;
+    if (!parse_manifest(mpath, &m)) return 0;
+    if (m.is_helper) return 1;
+    if (m.is_container) return 1;
+    if (!m.has_encode || !m.has_decode) return 0;
     return manifest_tool_ok(packdir, m.encode) && manifest_tool_ok(packdir, m.decode);
 }
 
@@ -1515,6 +1520,7 @@ static void pack_register_inner(const char *dir, const struct pack_manifest *m,
      * decomposition commands INSTEAD of encode/decode; a codec pack
      * declares encode/decode. A pack missing its type's commands is
      * silently skipped (a half-written pack must not register). */
+    if (m->is_helper) return;
     if (m->is_container) {
         if (!m->has_enumerate || !m->has_extract ||
             !m->has_strip || !m->has_rebuild)

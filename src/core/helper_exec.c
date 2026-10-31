@@ -553,6 +553,18 @@ static void landlock_apply(const tool_sandbox *sb, char *const argv[])
         if (td && *td) ll_add_rule(rfd, ro, td);
     }
     ll_add_rule(rfd, ro, sb->pack_dir);
+    if (sb->pack_dir && *sb->pack_dir) {
+        char root[4096];
+        size_t l = strlen(sb->pack_dir);
+        if (l < sizeof root) {
+            memcpy(root, sb->pack_dir, l + 1);
+            char *s = strrchr(root, '/');
+            if (s && s != root) {
+                *s = '\0';
+                ll_add_rule(rfd, ro, root);
+            }
+        }
+    }
     ll_add_exe(rfd, argv[0]);
     ll_add_argv_files(rfd, argv);
     if (sb->requires) {

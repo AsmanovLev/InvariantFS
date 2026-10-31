@@ -553,6 +553,67 @@ static size_t pack_subst(char *dst, size_t cap, const char *tok,
  * placeholders per token (no shell — WP10 §10). A bare argv[0] stays bare
  * (execvp does the PATH search); a relative path containing '/' is taken
  * relative to the pack dir (mirrors manifest_tool_ok). */
+#ifndef _WIN32
+static const char *helper_resolve_sibling(const char *hostdir, const char *tool,
+                                          char *buf, size_t cap)
+{
+    char root[4096];
+    char pdir[4096];
+    char test[4096];
+    DIR *d, *sub;
+    struct dirent *de, *sde;
+    size_t hl = strlen(hostdir);
+
+    if (hl >= sizeof root) return NULL;
+    memcpy(root, hostdir, hl + 1);
+
+    char *s = strrchr(root, '/');
+    if (!s || s == root) return NULL;
+    *s = '\0';
+    char *s2 = strrchr(root, '/');
+    if (s2 && s2 != root && strcmp(s2 + 1, "codecpacks") != 0) {
+        *s2 = '\0';
+    }
+
+    d = opendir(root);
+    if (!d) return NULL;
+    while ((de = readdir(d)) != NULL) {
+        if (de->d_name[0] == '.') continue;
+        int n = snprintf(test, sizeof test, "%s/%s/bin/%s", root, de->d_name, tool);
+        if (n > 0 && (size_t)n < sizeof test && access(test, X_OK) == 0) {
+            closedir(d);
+            if ((size_t)n < cap) {
+                memcpy(buf, test, (size_t)n + 1);
+                return buf;
+            }
+            return NULL;
+        }
+        n = snprintf(pdir, sizeof pdir, "%s/%s", root, de->d_name);
+        if (n > 0 && (size_t)n < sizeof pdir) {
+            sub = opendir(pdir);
+            if (sub) {
+                while ((sde = readdir(sub)) != NULL) {
+                    if (sde->d_name[0] == '.') continue;
+                    int n2 = snprintf(test, sizeof test, "%s/%s/bin/%s", pdir, sde->d_name, tool);
+                    if (n2 > 0 && (size_t)n2 < sizeof test && access(test, X_OK) == 0) {
+                        closedir(sub);
+                        closedir(d);
+                        if ((size_t)n2 < cap) {
+                            memcpy(buf, test, (size_t)n2 + 1);
+                            return buf;
+                        }
+                        return NULL;
+                    }
+                }
+                closedir(sub);
+            }
+        }
+    }
+    closedir(d);
+    return NULL;
+}
+#endif
+
 static int pack_argv_build(const invfs_pack_def *def, const char *hostdir,
                            const char *tmpl,
                            const char *in, const char *out,
@@ -595,6 +656,8 @@ static int pack_argv_build(const invfs_pack_def *def, const char *hostdir,
                 if (n > 0 && (size_t)n < sizeof rb && access(rb, X_OK) == 0)
                     rp = rb;
             }
+            if (!rp && hostdir)
+                rp = helper_resolve_sibling(hostdir, arena + used, rb, sizeof rb);
             if (!rp)
                 rp = tool_resolve(arena + used, rb, sizeof rb);
             size_t rl = strlen(rp);
@@ -608,10 +671,26 @@ static int pack_argv_build(const invfs_pack_def *def, const char *hostdir,
             if (!hostdir) return -1;
             n = snprintf(joined, sizeof joined, "%s/%s",
                              hostdir, arena + used);
-            if (n <= 0 || (size_t)n >= sizeof joined ||
-                (size_t)n + 1 > acap - used) return -1;
-            memcpy(arena + used, joined, (size_t)n + 1);
-            w = (size_t)n;
+            if (n > 0 && (size_t)n < sizeof joined && access(joined, X_OK) == 0) {
+                if ((size_t)n + 1 > acap - used) return -1;
+                memcpy(arena + used, joined, (size_t)n + 1);
+                w = (size_t)n;
+            } else {
+                const char *tool = strrchr(arena + used, '/');
+                tool = tool ? tool + 1 : arena + used;
+                char rb[4096];
+                const char *sib = helper_resolve_sibling(hostdir, tool, rb, sizeof rb);
+                if (sib) {
+                    size_t sl = strlen(sib);
+                    if (sl + 1 > acap - used) return -1;
+                    memcpy(arena + used, sib, sl + 1);
+                    w = sl;
+                } else if (n > 0 && (size_t)n < sizeof joined) {
+                    if ((size_t)n + 1 > acap - used) return -1;
+                    memcpy(arena + used, joined, (size_t)n + 1);
+                    w = (size_t)n;
+                } else return -1;
+            }
         }
         argv[argc++] = arena + used;
         used += w + 1;
