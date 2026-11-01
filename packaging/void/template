@@ -23,7 +23,7 @@ pkgname=invfs
 # test (INVFS_TEMPLATE_VERSION); real xbps-src builds use the default.
 # The release.yml repin job re-pins version + checksum below after
 # publish; hands stay off unless it fails.
-version=${INVFS_TEMPLATE_VERSION:-0.6.5}
+version=${INVFS_TEMPLATE_VERSION:-0.6.6}
 revision=1
 _artifact="invfs-v${version}-x86_64"
 # No build_style: the artifact is prebuilt, so there is nothing to
@@ -33,7 +33,7 @@ _artifact="invfs-v${version}-x86_64"
 configure_style=none
 makeopts=()
 hostmakedepends=
-depends="fuse3-devel libzstd-devel zlib-devel"
+depends="fuse3 libzstd zlib"
 # Runtime needs only -- no compiler toolchain to install a prebuilt artifact.
 makedepends=
 short_desc="Semantic content-addressed filesystem with a bit-exactness invariant"

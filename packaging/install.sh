@@ -239,6 +239,14 @@ if [ "$WITH_MKINITCPIO" = "1" ]; then
     install -Dm644 "$ROOT"/packaging/mkinitcpio/invfs_hook \
         "$DESTDIR$PREFIX/lib/initcpio/hooks/invfs"
     record "$DESTDIR$PREFIX/lib/initcpio/hooks/invfs"
+    if [ "$PREFIX" != "/usr" ] && [ -d "$DESTDIR/usr/lib/initcpio" ]; then
+        install -Dm644 "$ROOT"/packaging/mkinitcpio/invfs_install \
+            "$DESTDIR/usr/lib/initcpio/install/invfs"
+        record "$DESTDIR/usr/lib/initcpio/install/invfs"
+        install -Dm644 "$ROOT"/packaging/mkinitcpio/invfs_hook \
+            "$DESTDIR/usr/lib/initcpio/hooks/invfs"
+        record "$DESTDIR/usr/lib/initcpio/hooks/invfs"
+    fi
 fi
 if [ "$WITH_INITRAMFS_TOOLS" = "1" ]; then
     install -Dm755 "$ROOT"/packaging/debian/invfs.initramfs-hook \

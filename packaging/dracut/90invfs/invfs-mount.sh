@@ -44,7 +44,9 @@ if command -v fsck.invfs >/dev/null 2>&1; then
         info "invfs: WARNING: pre-mount check of $rootdev reported damage; mounting anyway"
     fi
 fi
-invf-fuse "$rootdev" "$NEWROOT" 2>&1 | vinfo
+mopts="allow_other,survive_term"
+[ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
+invf-fuse -o "$mopts" "$rootdev" "$NEWROOT" 2>&1 | vinfo
 
 if ! ismounted "$NEWROOT"; then
     die "invfs: failed to mount root fs on $rootdev"

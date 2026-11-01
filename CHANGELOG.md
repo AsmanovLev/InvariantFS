@@ -2,6 +2,18 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.6.6] - 2026-11-01
+
+### Added
+- FUSE: emit clear stderr note when root mounts without `-o allow_other` advising use of `allow_other` for rootfs/chroot usage.
+- `mount.invfs`: warn when root mounts without `-o allow_other`.
+- Initramfs boot integration: `mkinitcpio`, `dracut`, and `debian/initramfs-tools` rootfs mount handlers now pass `allow_other,survive_term` by default.
+- `packaging/bootstrap.sh`: automatically detect Arch Linux (`pacman`) and Debian/Ubuntu (`dpkg`) to fetch and install native distro packages with SHA256 verification.
+- `packaging/install.sh`: stage `mkinitcpio` hooks into `/usr/lib/initcpio` regardless of custom `PREFIX`.
+
+### Changed
+- Packaging cleanup: removed obsolete external `optdepends` and `Recommends` (`libjxl`, `p7zip`) across PKGBUILD, RPM spec, Debian control, Gentoo ebuild, and Void template since media/container handling is self-contained.
+
 ## [v0.6.5] - 2026-11-01
 
 ### Fixed

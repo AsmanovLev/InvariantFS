@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.6.5
+Version:        0.6.6
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -29,9 +29,6 @@ BuildRequires:  libzstd
 BuildRequires:  systemd-rpm-macros
 
 Requires:       fuse3
-# cjxl/djxl power the jxl + raw_image codecpacks; absent tools simply
-# defer JPEG/RAW-camera content to generic storage (weak dep)
-Recommends:     libjxl-utils
 
 %description
 InvariantFS is a FUSE filesystem with a bit-exactness invariant: every

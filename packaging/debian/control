@@ -10,7 +10,6 @@ Homepage: https://github.com/AsmanovLev/InvariantFS
 Package: invfs
 Architecture: any
 Depends: ${shlibs:Depends}, ${misc:Depends}, fuse3
-Recommends: libjxl-tools
 Description: semantic content-addressed filesystem (bit-exact invariant)
  InvariantFS is a FUSE filesystem where every compression is verified by
  decompress-and-compare before it is trusted. Containers (ZIP/TAR, disk

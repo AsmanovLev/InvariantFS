@@ -1,8 +1,21 @@
+invfs (0.6.6-1) unstable; urgency=medium
+
+  * fuse: warn on stderr when root mounts without -o allow_other.
+  * mount.invfs: warn when root mounts without -o allow_other.
+  * mkinitcpio / dracut / initramfs-tools: enforce allow_other,survive_term for rootfs mounts.
+  * packaging/bootstrap.sh: natively install distro packages (.pkg.tar.zst / .deb) via pacman/dpkg.
+  * packaging/install.sh: install mkinitcpio hooks to /usr/lib/initcpio regardless of PREFIX.
+  * Drop obsolete external optdepends/recommends (libjxl, p7zip).
+
+ -- InvariantFS Developers <invfs@localhost>  Sun, 01 Nov 2026 19:30:00 +0000
+
 invfs (0.6.5-1) unstable; urgency=medium
 
   * invf-stats: always display zones detail and two-device mirror breakdown by default.
   * vol_compute_stats: populate biggest_size across live v3 inode iteration.
   * Landlock helper isolation and Gentoo stage3 digest resolution fixes.
+
+ -- InvariantFS Developers <invfs@localhost>  Sun, 01 Nov 2026 17:00:00 +0000
 
 invfs (0.6.4-1) unstable; urgency=medium
 
@@ -11,20 +24,28 @@ invfs (0.6.4-1) unstable; urgency=medium
     spt0 broken extent containment (WP632); block 0 static assert grid (WP650);
     storage domain header (WP651); read/sweep safety fixes (WP657/WP658).
 
+ -- InvariantFS Developers <invfs@localhost>  Fri, 30 Oct 2026 00:00:00 +0000
+
 invfs (0.6.3-1) unstable; urgency=medium
 
   * sweep-lane retire-on-fence (WP612); v3 content-cut recovery (WP613).
+
+ -- InvariantFS Developers <invfs@localhost>  Wed, 28 Oct 2026 00:00:00 +0000
 
 invfs (0.6.2-1) unstable; urgency=medium
 
   * invf-pack installs release bundles by default; --fetch-source for
     raw-tree sources. Pack manager renamed invfs-pack -> invf-pack.
 
+ -- InvariantFS Developers <invfs@localhost>  Tue, 20 Oct 2026 00:00:00 +0000
+
 invfs (0.6.1-1) unstable; urgency=medium
 
   * Pack registry fetch (WP608): raw-tree, release-tarball and .ivpack
     install modes with the WP203 signature gate; per-distro release
     pipeline (release.yml) with .rpm.
+
+ -- InvariantFS Developers <invfs@localhost>  Sat, 17 Oct 2026 00:00:00 +0000
 
 invfs (0.6.0-1) unstable; urgency=medium
 

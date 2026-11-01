@@ -485,6 +485,45 @@ do_release() {
     artifact="invfs-$tag-$ARCH.tar.zst"
     mkdir -p "$CACHE"
 
+    # Prefer native distro package (pacman / dpkg) when installing directly
+    if [ -z "$FILE" ] && [ "$CHECK_ONLY" = 0 ] && [ "$DOWNLOAD_ONLY" = 0 ] && [ -z "$DESTDIR" ] && [ -z "$PUBKEY" ]; then
+        ver="${tag#v}"
+        base=$(release_base 2>/dev/null || true)
+        os_info=$(os_id_like)
+        case " $os_info " in
+            *" arch "*|*" archlinux "*|*" manjaro "*|*" endeavouros "*)
+                if command -v pacman >/dev/null 2>&1; then
+                    arch_pkg="invfs-$ver-1-$ARCH.pkg.tar.zst"
+                    if [ -n "$base" ] && url_exists "$base/$arch_pkg"; then
+                        info "detected Arch Linux: fetching native package $arch_pkg"
+                        fetch "$base/$arch_pkg" "$CACHE/$arch_pkg"
+                        fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
+                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
+                        info "installing via pacman..."
+                        pacman -U --noconfirm "$CACHE/$arch_pkg"
+                        info "native Arch Linux package installed successfully"
+                        return 0
+                    fi
+                fi
+                ;;
+            *" debian "*|*" ubuntu "*|*" linuxmint "*|*" pop "*|*" kali "*)
+                if command -v dpkg >/dev/null 2>&1 && [ "$ARCH" = "x86_64" ]; then
+                    deb_pkg="invfs_${ver}-1_amd64.deb"
+                    if [ -n "$base" ] && url_exists "$base/$deb_pkg"; then
+                        info "detected Debian/Ubuntu: fetching native package $deb_pkg"
+                        fetch "$base/$deb_pkg" "$CACHE/$deb_pkg"
+                        fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
+                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$deb_pkg" "$CACHE/SHA256SUMS" "$deb_pkg"
+                        info "installing via dpkg..."
+                        dpkg -i "$CACHE/$deb_pkg" || apt-get install -f -y
+                        info "native Debian/Ubuntu package installed successfully"
+                        return 0
+                    fi
+                fi
+                ;;
+        esac
+    fi
+
     if [ -n "$FILE" ]; then
         TARBALL=$FILE
         SUMS=$(dirname "$FILE")/SHA256SUMS

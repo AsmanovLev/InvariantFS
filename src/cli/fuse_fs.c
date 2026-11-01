@@ -4264,7 +4264,7 @@ int main(int argc, char *argv[])
     /* WP10: pull our keys out of the -o list before libfuse sees it --
      * unknown options make fuse_new reject the mount. */
     uint64_t arc_limit = 0, dec_mem_limit = 0;
-    int have_arc = 0, have_dec = 0;
+    int have_arc = 0, have_dec = 0, have_allow_other = 0;
     if (opts) {
         static char fbuf[1024];
         char tmp[1024];
@@ -4273,6 +4273,7 @@ int main(int argc, char *argv[])
         snprintf(tmp, sizeof tmp, "%s", opts);
         for (tok = strtok_r(tmp, ",", &save); tok;
              tok = strtok_r(NULL, ",", &save)) {
+            if (strcmp(tok, "allow_other") == 0) have_allow_other = 1;
             if (strncmp(tok, "arc_limit=", 10) == 0) {
                 if (parse_size_opt(tok + 10, &arc_limit)) have_arc = 1;
                 else fprintf(stderr, "invf: bad -o arc_limit=%s; ignored\n",
@@ -4430,6 +4431,8 @@ int main(int argc, char *argv[])
     build_file_table();
     fprintf(stderr, "[perf-trace %.3fs] file table complete (%d files)\n", fuse_now_sec() - t_main_start, g_nentries);
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
+    if (!have_allow_other && geteuid() == 0)
+        fprintf(stderr, "invf: note: mounted without -o allow_other; if using as a rootfs or chroot, mount with -o allow_other so non-root users have access\n");
 
     /* The background on-demand sweep thread USED to be created here, twelve
      * lines above the fuse_daemonize() further down, and that was the whole

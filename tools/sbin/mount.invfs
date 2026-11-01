@@ -76,6 +76,11 @@ fi
 [ "$VERBOSE" = 1 ] || [ "$FAKE" = 1 ] && echo "$PROG: $*" >&2
 if [ "$FAKE" = 1 ]; then exit 0; fi
 
+case ",$OPTS," in
+    *,allow_other,*) ;;
+    *) [ "$(id -u)" = "0" ] && echo "$PROG: note: mounted without -o allow_other; if using as rootfs or chroot, pass -o allow_other" >&2;;
+esac
+
 "$@" || exit $?
 # The daemon forks; wait for the mount to show up before reporting success.
 for _i in 1 2 3 4 5; do
