@@ -1,3 +1,11 @@
+invfs (0.6.7-1) unstable; urgency=medium
+
+  * tools: add invf-boot-setup for automated UEFI GRUB installation on InvariantFS rootfs.
+  * tools: support single-device and dual-device mirror boot configurations in invf-boot-setup.
+  * bootstrap: verify SHA256 for distro packages only if entry exists in SHA256SUMS.
+
+ -- InvariantFS Developers <invfs@localhost>  Sun, 01 Nov 2026 21:25:00 +0000
+
 invfs (0.6.6-1) unstable; urgency=medium
 
   * fuse: warn on stderr when root mounts without -o allow_other.

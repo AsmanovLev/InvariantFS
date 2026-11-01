@@ -108,6 +108,12 @@ for s in "$ROOT"/tools/sbin/*; do
     record "$DESTDIR$SBINDIR/${s##*/}"
 done
 
+# Ensure invf-boot-setup is reachable in BINDIR as well
+if [ -f "$DESTDIR$SBINDIR/invf-boot-setup" ] && [ "$BINDIR" != "$SBINDIR" ]; then
+    ln -sf "$SBINDIR/invf-boot-setup" "$DESTDIR$BINDIR/invf-boot-setup"
+    record "$DESTDIR$BINDIR/invf-boot-setup"
+fi
+
 # ---- codecpacks ------------------------------------------------------------
 # Copy each pack verbatim, then ship the C helper the Makefile already built
 # (<pack>/bin/<name>).

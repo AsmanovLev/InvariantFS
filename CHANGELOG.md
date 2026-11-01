@@ -2,6 +2,18 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.6.7] - 2026-11-01
+
+### Added
+- `invf-boot-setup`: automated UEFI bootloader configuration tool for InvariantFS root filesystems.
+  - Automatically identifies root block device and dual-device mirror configuration (`invfs.dev1`).
+  - Auto-locates mounted ESP partition (FAT32) and its UUID.
+  - Generates standalone GRUB EFI binary (`BOOTX64.EFI`) and `grub.cfg` without requiring `grub-probe`.
+  - Registers UEFI boot entry with `efibootmgr` when available.
+
+### Fixed
+- `packaging/bootstrap.sh`: check SHA256SUMS for distro packages only when corresponding entry is present.
+
 ## [v0.6.6] - 2026-11-01
 
 ### Added
