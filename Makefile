@@ -774,11 +774,11 @@ clean:
 # in-process mappings), so the same links pull vol_plugin_inproc.o plus its
 # own deps (pack_sig.o + blake3 + ed25519; -ldl is global in LDLIBS).
 INPROC_MIN_O := $(OBJ)/vol_plugin_inproc.o $(OBJ)/pack_sig.o $(OBJ)/blake3.o $(OBJ)/blake3_dispatch.o $(OBJ)/blake3_portable.o $(OBJ)/ed25519.o
-$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(OBJ)/tool_scratch.o $(INPROC_MIN_O)
+$(OUT)/invf-codec_test: $(OBJ)/codec_test.o $(OBJ)/codec.o $(OBJ)/ivpack_loader.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(OBJ)/tool_scratch.o $(INPROC_MIN_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 # WP61: unit coverage for the shared helper containment launcher.
-$(OUT)/invf-helper_exec_test: $(OBJ)/helper_exec_test.o $(OBJ)/helper_exec.o
+$(OUT)/invf-helper_exec_test: $(OBJ)/helper_exec_test.o $(OBJ)/helper_exec.o $(OBJ)/ivpack_loader.o
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 # WP-M10: delta-log unit harness + offline e2e driver (tools/, not src/cli).
@@ -800,7 +800,7 @@ $(OBJ)/groupcommit_test.o: tools/groupcommit_test.c | $(OBJ)
 # fuzz tier: on-demand property/fuzz harness for the pure/parsing layers.
 # NOT part of `make test` -- `make fuzz` only builds it, run it by hand:
 #   bin/invf-fuzz [iterations] [seed]
-FUZZ_O := $(OBJ)/codec.o $(OBJ)/tool_scratch.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
+FUZZ_O := $(OBJ)/codec.o $(OBJ)/tool_scratch.o $(OBJ)/ivpack_loader.o $(OBJ)/ppmd8.o $(OBJ)/ppmd8enc.o $(OBJ)/ppmd8dec.o \
           $(OBJ)/ppmd_codec.o $(OBJ)/lz4.o $(OBJ)/bcj_x86.o $(INPROC_MIN_O)
 $(OUT)/invf-fuzz: $(OBJ)/fuzz_invfs.o $(FUZZ_O)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

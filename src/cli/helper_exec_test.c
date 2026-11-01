@@ -348,7 +348,7 @@ int main(void)
 
     snprintf(base, sizeof base, "/tmp/invfs_helper_test_%d", (int)getpid());
     snprintf(work, sizeof work, "%s/work", base);
-    snprintf(outside, sizeof outside, "%s/outside", base);
+    snprintf(outside, sizeof outside, "/tmp/invfs_helper_outside_%d", (int)getpid());
     r = mkdir(base, 0755) | mkdir(work, 0755) | mkdir(outside, 0755);
     if (r != 0) { perror("mkdir"); return 2; }
     {
