@@ -7,7 +7,7 @@
 	dh $@
 
 override_dh_auto_build:
-	$(MAKE) FUSE_LIBS="$(shell pkg-config --libs fuse3)"
+	$(MAKE) FUSE_DAEMON_LIBS="$(shell pkg-config --libs fuse3)"
 
 override_dh_auto_install:
 	DESTDIR=$(CURDIR)/debian/tmp PREFIX=/usr \
