@@ -3908,22 +3908,25 @@ static int remove_one_pack(const char *name)
     return 0;
 }
 
-static int cmd_remove_batch(const char **names, int count, int force, int migrate, const char *volume_path)
+static int cmd_remove_batch(const char **names, int count, int force, int migrate, int auto_confirm, const char *volume_path)
 {
     int has_in_use = 0;
     uint64_t total_in_use = 0;
+    int algos[64];
+    uint64_t usages[64];
 
-    for (int i = 0; i < count; i++) {
-        int algo = pack_algo_of(names[i]);
-        if (algo > 0) {
-            uint64_t used = count_algo_usage(algo, volume_path);
-            if (used > 0) {
+    for (int i = 0; i < count && i < 64; i++) {
+        algos[i] = pack_algo_of(names[i]);
+        usages[i] = 0;
+        if (algos[i] > 0) {
+            usages[i] = count_algo_usage(algos[i], volume_path);
+            if (usages[i] > 0) {
                 has_in_use = 1;
-                total_in_use += used;
+                total_in_use += usages[i];
                 if (!force && !migrate) {
                     fprintf(stderr,
                         "invf-pack: error: pack '%s' (algo %d) is in active use by %llu file(s).\n",
-                        names[i], algo, (unsigned long long)used);
+                        names[i], algos[i], (unsigned long long)usages[i]);
                 }
             }
         }
@@ -3932,11 +3935,51 @@ static int cmd_remove_batch(const char **names, int count, int force, int migrat
     if (has_in_use && !force && !migrate) {
         fprintf(stderr,
             "           Removing in-use packs would render these files unreadable.\n"
-            "           Pass --force / -f to remove anyway, or -y / --migrate to decommission and transcode in one pass.\n");
+            "           Pass --force / -f to remove anyway, or --migrate to decommission and transcode in one pass.\n");
         return 1;
     }
 
     if (has_in_use && migrate) {
+        printf("invf-pack: pre-flight decommission analysis:\n");
+        for (int i = 0; i < count && i < 64; i++) {
+            char src[MAX_PATH], dstname[MAX_PATH];
+            char family[64] = "unknown";
+            char replacement[128] = "standard format";
+            if (find_local_pack(names[i], src, sizeof src, dstname, sizeof dstname) == 0) {
+                pack_info pi;
+                memset(&pi, 0, sizeof pi);
+                char mp[MAX_PATH + 64];
+                snprintf(mp, sizeof mp, "%s/manifest", src);
+                if (parse_manifest(mp, &pi) == 0) {
+                    if (pi.family[0]) strncpy(family, pi.family, sizeof family - 1);
+                    else if (pi.provides[0]) strncpy(family, pi.provides, sizeof family - 1);
+                }
+            }
+            if (strcmp(family, "unknown") != 0) {
+                char conf_val[128] = {0};
+                if (read_conf_value(family, conf_val, sizeof conf_val) == 0 && conf_val[0]) {
+                    snprintf(replacement, sizeof replacement, "'%s' (active in family '%s')", conf_val, family);
+                } else {
+                    snprintf(replacement, sizeof replacement, "default engine for family '%s'", family);
+                }
+            }
+            printf("  - Pack '%s' (algo %d):\n", names[i], algos[i]);
+            printf("      Affected files : %llu\n", (unsigned long long)usages[i]);
+            printf("      Target format  : %s\n", replacement);
+        }
+        printf("Total files to migrate: %llu across %d pack(s).\n",
+               (unsigned long long)total_in_use, count);
+
+        if (!auto_confirm) {
+            printf("Proceed with decommissioning and single-pass migration? [y/N]: ");
+            fflush(stdout);
+            char ans[64];
+            if (!fgets(ans, sizeof ans, stdin) || (ans[0] != 'y' && ans[0] != 'Y')) {
+                printf("invf-pack: operation cancelled by user. No files or packs were modified.\n");
+                return 0;
+            }
+        }
+
         printf("invf-pack: single-pass decommission: migrating %llu file(s) across %d pack(s) to active formats...\n",
                (unsigned long long)total_in_use, count);
         int rc = system("invf-sweep --fast /dev/sda2 2>/dev/null || true");
@@ -4701,21 +4744,23 @@ int main(int argc, char **argv)
         const char *targets[64];
         int target_count = 0;
         const char *volume = NULL;
-        int force = 0, migrate = 0;
+        int force = 0, migrate = 0, auto_confirm = 0;
         for (int i = 2; i < argc; i++) {
-            if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0 || strcmp(argv[i], "--migrate") == 0) {
+            if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0) {
+                auto_confirm = 1;
+            } else if (strcmp(argv[i], "--migrate") == 0) {
                 migrate = 1;
             } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
                 force = 1;
             } else if (strcmp(argv[i], "--volume") == 0) {
-                if (++i >= argc) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>...\n"); return 2; }
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes] [--migrate] [--volume IMG] <pack>...\n"); return 2; }
                 volume = argv[i];
             } else if (target_count < 64) {
                 targets[target_count++] = argv[i];
             }
         }
-        if (target_count == 0) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>...\n"); return 2; }
-        return cmd_remove_batch(targets, target_count, force, migrate, volume);
+        if (target_count == 0) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes] [--migrate] [--volume IMG] <pack>...\n"); return 2; }
+        return cmd_remove_batch(targets, target_count, force, migrate, auto_confirm, volume);
     } else if (strcmp(cmd, "replace") == 0) {
         const char *family = NULL;
         const char *old_pack = NULL;
