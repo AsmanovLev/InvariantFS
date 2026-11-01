@@ -207,18 +207,26 @@ int main(int argc, char **argv)
                "  " C_DIM "░ Free" C_RST "\n\n");
     }
 
-    if (verbose) {
-        uint64_t meta_blocks = sb->metadata_zone_blocks;
-        uint64_t raw_blocks  = sb->shadow_zone_start - sb->raw_zone_start;
-        uint64_t shadow_blocks = sb->total_blocks - sb->shadow_zone_start;
+    uint64_t meta_blocks = sb->metadata_zone_blocks;
+    uint64_t raw_blocks  = sb->shadow_zone_start - sb->raw_zone_start;
+    uint64_t shadow_blocks = sb->total_blocks - sb->shadow_zone_start;
 
-        printf("  zones            : meta %.1f MiB | raw %d blk | shadow %d blk\n",
-               meta_blocks * 4096 / 1048576.0, (int)raw_blocks, (int)shadow_blocks);
-        printf("  used             : %.1f MiB | free: %.1f MiB\n",
-               used_b / 1048576.0, free_b / 1048576.0);
-        if (image_allocated)
-            printf("  image allocated  : %.1f MiB (host filesystem blocks)\n",
-                   image_allocated / 1048576.0);
+    printf("  zones            : meta %.1f MiB | raw %d blk | shadow %d blk\n",
+           meta_blocks * 4096 / 1048576.0, (int)raw_blocks, (int)shadow_blocks);
+    printf("  used             : %.1f MiB | free: %.1f MiB\n",
+           used_b / 1048576.0, free_b / 1048576.0);
+    if (image_allocated)
+        printf("  image allocated  : %.1f MiB (host filesystem blocks)\n",
+               image_allocated / 1048576.0);
+
+    char lb[64], mb2[64];
+    human(st.logical_bytes, lb, sizeof lb);
+    human(st.biggest_size, mb2, sizeof mb2);
+    uint64_t total_names = st.files + st.dirs + st.links + st.special;
+    printf("  files            : %" PRIu64 " live of %" PRIu64 " names (%" PRIu64 " directories), %s logical (%.2fx ratio), largest %s\n",
+           st.files, total_names, st.dirs, lb, ratio, mb2);
+
+    if (verbose) {
         printf("population (live)  :\n");
         printf("  regular files    : %" PRIu64 "\n", st.files);
         printf("  directories      : %" PRIu64 "\n", st.dirs);
@@ -226,71 +234,49 @@ int main(int argc, char **argv)
         printf("  special nodes    : %" PRIu64 "\n", st.special);
         printf("  churn            : %" PRIu64 " tombstones, %" PRIu64 " bad records\n",
                st.tombstones, st.bad_records);
-        printf("data               :\n");
-        printf("  logical bytes    : %.1f MiB\n", st.logical_bytes / 1048576.0);
-        printf("  biggest file     : %.1f KiB %s\n",
-               st.biggest_size / 1024.0, st.biggest_name);
-        printf("  est. ratio       : %.2fx logical/on-disk\n", ratio);
-        printf("zones detail (physical used = content class, WP-DZ):\n");
-        {
-            double lr = st.logic_raw_bytes / 1048576.0;
-            double ls = st.logic_shadow_bytes / 1048576.0;
-            double pr = st.raw_used_bytes / 1048576.0;
-            double ps = st.shadow_used_bytes / 1048576.0;
-            if (st.raw_used_bytes)
-                printf("  RAW   : logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
-                       lr, pr, pr ? lr / pr : 0);
-            else
-                printf("  RAW   : empty\n");
-            if (st.shadow_used_bytes)
-                printf("  SHADOW: logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
-                       ls, ps, ps ? ls / ps : 0);
-            else
-                printf("  SHADOW: empty (not swept yet)\n");
-            if (st.logic_text_bytes || st.text_used_bytes)
-                printf("  TEXT  : logic %8.1f MiB | used %8.1f MiB (shared batches)\n",
-                       st.logic_text_bytes / 1048576.0, st.text_used_bytes / 1048576.0);
-            if (st.unclaimed_used_bytes)
-                printf("  unclaimed: %.1f MiB (allocated, no live reference)\n",
-                       st.unclaimed_used_bytes / 1048576.0);
-        }
-        if (vol_ndev(v) == 2) {
-            uint64_t mblocks = 0, tblocks = 0, cpba = 0, dpba = 0;
-            uint64_t mcnt = vol_rawm_count(v, &mblocks);
-            uint64_t tcnt = vol_tier_count(v, &tblocks, &cpba, &dpba);
-            printf("two-device (WP25)  :\n");
-            printf("  devices          : %d%s\n", vol_ndev(v),
-                   vol_degraded(v) ? " (DEGRADED: dev0 absent, read-only)" : "");
-            printf("  mirror           : %s\n",
-                   vol_mirror_stale(v) ? "STALE (resync at next flush)" : "in sync");
-            printf("  raw mirror       : %" PRIu64 " segments, %" PRIu64 " blocks\n", mcnt, mblocks);
-            printf("  tier (dev0 copies): %" PRIu64 " live, %" PRIu64 " blocks\n", tcnt, tblocks);
-            if (tcnt)
-                printf("  first tier copy  : canonical pba %" PRIu64 " -> dev0 pba %" PRIu64 "\n", cpba, dpba);
-        }
-    } else {
-        char fb[64], ab[64], ub[64], pct[32];
-        human(free_b, fb, sizeof fb);
-        human(used_b, ab, sizeof ab);
-        human(total_b, ub, sizeof ub);
-        snprintf(pct, sizeof pct, "%.1f%%", total_b ? (100.0 * used_b / total_b) : 0);
+    }
 
-        printf("  space            : %s used / %s free of %s (%s)\n", ab, fb, ub, pct);
-        printf("  zones            : meta %llu MB | raw %llu MB | shadow %llu MB\n",
-               (unsigned long long)(sb->metadata_zone_blocks * INVFS_BLOCK_SIZE >> 20),
-               (unsigned long long)(sb->raw_zone_blocks * INVFS_BLOCK_SIZE >> 20),
-               (unsigned long long)(sb->shadow_zone_blocks * INVFS_BLOCK_SIZE >> 20));
-
-        char lb[64], mb2[64];
-        human(st.logical_bytes, lb, sizeof lb);
-        human(st.biggest_size, mb2, sizeof mb2);
-        uint64_t total_names = st.files + st.dirs + st.links + st.special;
-        printf("  files            : %" PRIu64 " live of %" PRIu64 " names (%" PRIu64 " directories), %s logical (%.2fx ratio), largest %s\n",
-               st.files, total_names, st.dirs, lb, ratio, mb2);
-        if (vol_ndev(v) == 2) {
-            printf("  devices          : %d (%s)\n", vol_ndev(v),
-                   vol_degraded(v) ? "DEGRADED" : "in sync");
-        }
+    printf("data               :\n");
+    printf("  logical bytes    : %.1f MiB\n", st.logical_bytes / 1048576.0);
+    printf("  biggest file     : %.1f KiB %s\n",
+           st.biggest_size / 1024.0, st.biggest_name);
+    printf("  est. ratio       : %.2fx logical/on-disk\n", ratio);
+    printf("zones detail (physical used = content class, WP-DZ):\n");
+    {
+        double lr = st.logic_raw_bytes / 1048576.0;
+        double ls = st.logic_shadow_bytes / 1048576.0;
+        double pr = st.raw_used_bytes / 1048576.0;
+        double ps = st.shadow_used_bytes / 1048576.0;
+        if (st.raw_used_bytes)
+            printf("  RAW   : logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+                   lr, pr, pr ? lr / pr : 0);
+        else
+            printf("  RAW   : empty\n");
+        if (st.shadow_used_bytes)
+            printf("  SHADOW: logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+                   ls, ps, ps ? ls / ps : 0);
+        else
+            printf("  SHADOW: empty (not swept yet)\n");
+        if (st.logic_text_bytes || st.text_used_bytes)
+            printf("  TEXT  : logic %8.1f MiB | used %8.1f MiB (shared batches)\n",
+                   st.logic_text_bytes / 1048576.0, st.text_used_bytes / 1048576.0);
+        if (st.unclaimed_used_bytes)
+            printf("  unclaimed: %.1f MiB (allocated, no live reference)\n",
+                   st.unclaimed_used_bytes / 1048576.0);
+    }
+    if (vol_ndev(v) == 2) {
+        uint64_t mblocks = 0, tblocks = 0, cpba = 0, dpba = 0;
+        uint64_t mcnt = vol_rawm_count(v, &mblocks);
+        uint64_t tcnt = vol_tier_count(v, &tblocks, &cpba, &dpba);
+        printf("two-device (WP25)  :\n");
+        printf("  devices          : %d%s\n", vol_ndev(v),
+               vol_degraded(v) ? " (DEGRADED: dev0 absent, read-only)" : "");
+        printf("  mirror           : %s\n",
+               vol_mirror_stale(v) ? "STALE (resync at next flush)" : "in sync");
+        printf("  raw mirror       : %" PRIu64 " segments, %" PRIu64 " blocks\n", mcnt, mblocks);
+        printf("  tier (dev0 copies): %" PRIu64 " live, %" PRIu64 " blocks\n", tcnt, tblocks);
+        if (tcnt)
+            printf("  first tier copy  : canonical pba %" PRIu64 " -> dev0 pba %" PRIu64 "\n", cpba, dpba);
     }
 
     if (show_files) {

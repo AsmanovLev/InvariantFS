@@ -1,3 +1,9 @@
+invfs (0.6.5-1) unstable; urgency=medium
+
+  * invf-stats: always display zones detail and two-device mirror breakdown by default.
+  * vol_compute_stats: populate biggest_size across live v3 inode iteration.
+  * Landlock helper isolation and Gentoo stage3 digest resolution fixes.
+
 invfs (0.6.4-1) unstable; urgency=medium
 
   * CHLD recipe trees (WP635/WP660); containerpack streaming (WP641);

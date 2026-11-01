@@ -38,7 +38,11 @@ resolve_latest() {
 # through with its original two-space separator, which sha512sum -c requires.
 digest_sha512() {
     curl -fsSL "$1" 2>/dev/null | tr -d '\r' \
-        | awk -v want="$2" 'length($1)==128 && $1 ~ /^[0-9a-f]+$/ && $2==want {print; exit}'
+        | awk -v want="$2" '
+            /# SHA512 HASH/ { in_sha=1; next }
+            /^# [A-Z0-9]+ HASH/ { in_sha=0 }
+            in_sha && length($1)==128 && $1 ~ /^[0-9a-f]+$/ && $2==want { print; exit }
+        '
 }
 
 # Kernel+initramfs paths INSIDE the ISO. Stable across builds; the copy below

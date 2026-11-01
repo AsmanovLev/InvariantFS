@@ -2,6 +2,16 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.6.5] - 2026-11-01
+
+### Fixed
+- `invf-stats`: Always print zones detail (RAW/SHADOW/TEXT/unclaimed) and two-device
+  mirror state by default alongside the visual bar; preserve `-v` for extended metadata churn.
+- `vol_compute_stats`: Accurately track `biggest_size` and `biggest_name` during live v3 inode iteration.
+- `helper_exec_test`: Isolate Landlock read fixture path from pack directory parent whitelist.
+- `iso-gentoo-install`: Ensure SHA512 hash extraction skips preceding 128-char BLAKE2B lines in Gentoo DIGESTS.
+- Packaging updates across Arch Linux, Gentoo, Debian, Fedora, and Void Linux.
+
 ## [v0.6.4] - 2026-10-21
 
 ### Added
