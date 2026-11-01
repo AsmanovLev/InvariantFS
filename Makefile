@@ -49,7 +49,12 @@ LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 STOCK_ZLIB_SRC := $(wildcard $(SRC)/zlib/*.c)
 STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SRC))
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
+FUSE_STATIC_A := $(wildcard $(shell pkg-config --variable=libdir fuse3 2>/dev/null)/libfuse3.a /usr/lib/libfuse3.a /usr/lib64/libfuse3.a /usr/lib/*-linux-gnu/libfuse3.a)
+ifneq ($(strip $(FUSE_STATIC_A)),)
+FUSE_LIBS   := $(firstword $(FUSE_STATIC_A)) -lpthread -ldl
+else
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
+endif
 
 CORE    := volume vol_cpack helper_exec ivpack_loader tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
