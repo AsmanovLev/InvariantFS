@@ -835,3 +835,8 @@ void blkio_force_flush(blkio *io)
  * so the stub only has to link (0 = durable, never observed here). */
 int vmux_barrier(struct invfs_volume *v, const char *what)
 { (void)v; (void)what; return 0; }
+
+/* ADR-007: direct .ivpack archive check stub for map-cache standalone tests.
+ * Off the map-cache path under test. */
+bool ivpack_is_archive_file(const char *path)
+{ (void)path; return false; }
