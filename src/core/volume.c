@@ -882,7 +882,14 @@ static int wp25_open_degraded(invfs_volume *v)
     v->st.meta_end_bytes = (v->sb.metadata_zone_start +
                          v->sb.metadata_zone_blocks) *
                         (uint64_t)INVFS_BLOCK_SIZE;
-    v->st.raw_mirror = (d2.flags & INVFS_DEVTF_RAW_MIRROR) != 0;
+    {
+        const char *rm_env = getenv("INVFS_RAW_MIRROR");
+        if (rm_env) {
+            v->st.raw_mirror = (strcmp(rm_env, "1") == 0 || strcmp(rm_env, "true") == 0);
+        } else {
+            v->st.raw_mirror = 0; /* default: raw_mirror=0 */
+        }
+    }
     v->arena_start = v->sb.raw_zone_start + v->sb.raw_zone_blocks;
     v->arena_blocks = v->st.dev0_blocks > v->arena_start
                     ? v->st.dev0_blocks - v->arena_start : 0;
@@ -1184,7 +1191,14 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
             v->st.meta_end_bytes = (v->sb.metadata_zone_start +
                                  v->sb.metadata_zone_blocks) *
                                 (uint64_t)INVFS_BLOCK_SIZE;
-            v->st.raw_mirror = (v->st.devt.flags & INVFS_DEVTF_RAW_MIRROR) != 0;
+            {
+        const char *rm_env = getenv("INVFS_RAW_MIRROR");
+        if (rm_env) {
+            v->st.raw_mirror = (strcmp(rm_env, "1") == 0 || strcmp(rm_env, "true") == 0);
+        } else {
+            v->st.raw_mirror = 0; /* default: raw_mirror=0 */
+        }
+    }
             v->arena_start = v->sb.raw_zone_start + v->sb.raw_zone_blocks;
             v->arena_blocks = v->st.dev0_blocks > v->arena_start
                             ? v->st.dev0_blocks - v->arena_start : 0;
@@ -1618,7 +1632,17 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * Building it lazily (the first retire) would lose records superseded
      * between open and that first use, and a retire's -1 on a
      * never-counted record would drive a live sharer's count to zero. */
-    pba_ref_ensure(v);
+    {
+        const char *lr_env = getenv("INVFS_LAZY_RECLAIM");
+        if (lr_env) {
+            v->lazy_reclaim = (strcmp(lr_env, "0") != 0 && strcmp(lr_env, "false") != 0);
+        } else {
+            v->lazy_reclaim = 1; /* default: lazy_reclaim=1 (instant mount) */
+        }
+    }
+    if (!v->lazy_reclaim) {
+        pba_ref_ensure(v);
+    }
     t_after_pba = vol_now_sec();
     *err = 0;
     /* Unclean shutdown. Reading always works -- that is how you find out

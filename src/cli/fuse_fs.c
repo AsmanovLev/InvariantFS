@@ -4274,6 +4274,10 @@ int main(int argc, char *argv[])
         for (tok = strtok_r(tmp, ",", &save); tok;
              tok = strtok_r(NULL, ",", &save)) {
             if (strcmp(tok, "allow_other") == 0) have_allow_other = 1;
+            else if (strcmp(tok, "raw_mirror") == 0) setenv("INVFS_RAW_MIRROR", "1", 1);
+            else if (strcmp(tok, "noraw_mirror") == 0) setenv("INVFS_RAW_MIRROR", "0", 1);
+            else if (strcmp(tok, "lazy_reclaim") == 0) setenv("INVFS_LAZY_RECLAIM", "1", 1);
+            else if (strcmp(tok, "direct_reclaim") == 0) setenv("INVFS_LAZY_RECLAIM", "0", 1);
             if (strncmp(tok, "arc_limit=", 10) == 0) {
                 if (parse_size_opt(tok + 10, &arc_limit)) have_arc = 1;
                 else fprintf(stderr, "invf: bad -o arc_limit=%s; ignored\n",

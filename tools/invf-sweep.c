@@ -2127,6 +2127,9 @@ int main(int argc, char **argv)
     }
     sw_stage_end(dry ? "dry-run policy ready" : "policy ready");
 
+    /* Ensure PBA reference map is populated for sweep operations */
+    vol->lazy_reclaim = 0;
+    pba_ref_ensure(vol);
     sw_stage_begin(2, "collect", 0, "walking live inodes");
 
 

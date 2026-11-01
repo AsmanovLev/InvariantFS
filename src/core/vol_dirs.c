@@ -810,21 +810,19 @@ int vol_unlink(invfs_volume *v, const char *name)
          * landing between them rebuilds against a live set the pending -1
          * does not belong to (and with two sharers retiring at once the
          * second -1 floors at 0 and frees the block a second time). */
-        vol_pba_ref_hold(v);
-        /* the map, taken while the NAME is still there, so this recipe's own
-         * contribution is in it and the -1 below has something to take */
-        pba_ref_ensure(v);
+        if (!v->lazy_reclaim) {
+            vol_pba_ref_hold(v);
+            /* the map, taken while the NAME is still there, so this recipe's own
+             * contribution is in it and the -1 below has something to take */
+            pba_ref_ensure(v);
+        }
         if (vol_dirent_delta_del(v, pino, leaf) != 0) {
-            vol_pba_ref_release(v);
+            if (!v->lazy_reclaim) vol_pba_ref_release(v);
             return -1;
         }
         if (vol_inode_delta_delete(v, id) != 0) {
-            /* WP604/WP607: the dirent is already gone, so a bare -1 reports
-             * failure for a mutation that happened (rc==0 iff changed).
-             * Unwind via doom (infallible; a compensating put-back append
-             * can itself fail under chaos). The hold still needs release. */
             vol_delta_doom(v);
-            vol_pba_ref_release(v);
+            if (!v->lazy_reclaim) vol_pba_ref_release(v);
             return -1;
         }
         /* WP-N1: targeted free of unlinked file data blocks.
@@ -859,7 +857,7 @@ int vol_unlink(invfs_volume *v, const char *name)
          * orphan collector (the op already succeeded; nothing to put
          * back). The row-delete-failure compensation above stays: a
          * staging error still needs the name put back right away. */
-        if (in.type == INVFS_ITYP_REG) {
+        if (in.type == INVFS_ITYP_REG && !v->lazy_reclaim) {
             uint8_t *probe = NULL;
             size_t probelen = 0;
             invfs_ast_hdr pah;
@@ -906,7 +904,8 @@ int vol_unlink(invfs_volume *v, const char *name)
          * so it nests correctly instead of unlocking early. */
         if (strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
-        vol_pba_ref_release(v);
+        if (!v->lazy_reclaim)
+            vol_pba_ref_release(v);
         return 0;
     } else {
         /* More than one name on this inode: this unlink retires a NAME, not
@@ -1025,23 +1024,22 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
              * `pba_ref_ensure(v), vol_inode_delta_delete(...)` is gone
              * because the ordering it encoded is the thing being fixed.
              */
-            vol_pba_ref_hold(v);
-            hold_taken = 1;
-            pba_ref_ensure(v);
+            if (!v->lazy_reclaim) {
+                vol_pba_ref_hold(v);
+                hold_taken = 1;
+                pba_ref_ensure(v);
+            }
             if (vol_dirent_delta_del(v, t_pino, tleaf) != 0)
                 goto rename_abort;
             staged = 1;
             if (vol_inode_delta_delete(v, t_id) != 0)
                 goto rename_abort;
-            /* WP-N1/WP607: targeted free of overwritten destination data
-             * blocks -- RETIRED, not freed: the victim row is staged, not
-             * durable, and an abort unwinds it (doom below). The
-             * delete-kind entry frees at the first fence while the row is
-             * still absent; a restored victim drops it and keeps blocks. */
-            if (t_in.type == INVFS_ITYP_REG)
+            if (t_in.type == INVFS_ITYP_REG && !v->lazy_reclaim)
                 vol_retire_recipe(v, t_id, t_in.recipe_addr, 1);
-            vol_pba_ref_release(v);
-            hold_taken = 0;
+            if (hold_taken) {
+                vol_pba_ref_release(v);
+                hold_taken = 0;
+            }
         }
     }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,

@@ -787,6 +787,9 @@ typedef struct invfs_volume {
      * unrecoverable, which must be a refusal rather than a lossy rollback. */
     uint64_t spn_delta_segs;
     uint64_t spn_delta_head;
+    /* Lazy reclaim: 1 = do not free recipe blocks on unlink; sweep reclaims orphans.
+     * Allows skipping pba_ref_ensure at mount time for instant boot. */
+    int      lazy_reclaim;
     /* WP30 Phase 6+: rwlock protecting meta_mapper and MET0 state.
      * Readers hold shared lock (pthread_rwlock_rdlock); writers hold
      * exclusive lock (pthread_rwlock_wrlock). Protects: meta_mapper_get,
