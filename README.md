@@ -276,6 +276,12 @@ on a global lock.
 * Heat accounting persists only at a sweep run (background sweep is off by
   default), so short read sessions are not accumulated.
 
+## Roadmap
+
+* **DKMS Kernel Module** — Implement a DKMS filesystem driver / fast-path acceleration module.
+* **Windows Support** — Port the InvariantFS FUSE engine to Windows (WinFsp / native filesystem driver).
+* **ISO & Integration Test Suite Overhaul** — Rewrite and modernize the distro ISO boot and installation testing suite with native orchestration.
+
 ## Docs
 
 ```
