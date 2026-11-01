@@ -230,7 +230,9 @@ release_base() {  # -> base URL for the resolved tag
 
 release_assets_exist() {
     base=$(release_base 2>/dev/null) || return 1
-    url_exists "$base/invfs-$VERSION-$ARCH.tar.zst" && \
+    tag=$VERSION
+    [ "$tag" = latest ] && tag=$(resolve_latest 2>/dev/null) || true
+    url_exists "$base/invfs-$tag-$ARCH.tar.zst" && \
         url_exists "$base/SHA256SUMS"
 }
 
@@ -415,7 +417,7 @@ locate_source() {
 fetch_source() {
     tag=$VERSION
     if [ "$tag" = latest ]; then tag=$(resolve_latest); fi
-    mkdir -p "$STAGE"
+    mkdir -p "$STAGE" "$CACHE"
     tgz="$CACHE/invfs-source-$tag.tar.gz"
     if [ -f "$tgz" ] && [ "$RUN" = 1 ]; then
         info "using cached source tarball $tgz"
@@ -478,7 +480,9 @@ do_release() {
     # default was `latest`. An offline install is a normal case (an air-gapped
     # host, a vendored artifact, a CI runner with no egress), and the sig
     # tests only missed it because they pin --version explicitly.
-    artifact="invfs-$VERSION-$ARCH.tar.zst"
+    tag=$VERSION
+    [ -z "$FILE" ] && [ "$tag" = latest ] && tag=$(resolve_latest)
+    artifact="invfs-$tag-$ARCH.tar.zst"
     mkdir -p "$CACHE"
 
     if [ -n "$FILE" ]; then
