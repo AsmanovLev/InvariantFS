@@ -498,7 +498,9 @@ do_release() {
                         info "detected Arch Linux: fetching native package $arch_pkg"
                         fetch "$base/$arch_pkg" "$CACHE/$arch_pkg"
                         fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
-                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
+                        if [ -f "$CACHE/SHA256SUMS" ] && grep -q "[[:space:]]$arch_pkg\$" "$CACHE/SHA256SUMS"; then
+                            verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
+                        fi
                         info "installing via pacman..."
                         pacman -U --noconfirm "$CACHE/$arch_pkg"
                         info "native Arch Linux package installed successfully"
@@ -513,7 +515,9 @@ do_release() {
                         info "detected Debian/Ubuntu: fetching native package $deb_pkg"
                         fetch "$base/$deb_pkg" "$CACHE/$deb_pkg"
                         fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
-                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$deb_pkg" "$CACHE/SHA256SUMS" "$deb_pkg"
+                        if [ -f "$CACHE/SHA256SUMS" ] && grep -q "[[:space:]]$deb_pkg\$" "$CACHE/SHA256SUMS"; then
+                            verify_sha256 "$CACHE/$deb_pkg" "$CACHE/SHA256SUMS" "$deb_pkg"
+                        fi
                         info "installing via dpkg..."
                         dpkg -i "$CACHE/$deb_pkg" || apt-get install -f -y
                         info "native Debian/Ubuntu package installed successfully"
