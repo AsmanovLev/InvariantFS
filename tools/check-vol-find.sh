@@ -46,22 +46,22 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1571:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:1869:SKIP
-src/cli/fuse_fs.c:2205:SKIP
-src/cli/fuse_fs.c:2910:SKIP
-src/cli/fuse_fs.c:3124:SKIP
-src/cli/fuse_fs.c:3179:SKIP
-src/cli/fuse_fs.c:3440:SKIP
-src/cli/fuse_fs.c:3621:SKIP
-src/cli/fuse_fs.c:3693:SKIP
-src/cli/fuse_fs.c:3728:SKIP
-src/cli/fuse_fs.c:3765:SKIP
+src/cli/fuse_fs.c:1697:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:1995:SKIP
+src/cli/fuse_fs.c:2333:SKIP
+src/cli/fuse_fs.c:3042:SKIP
+src/cli/fuse_fs.c:3263:SKIP
+src/cli/fuse_fs.c:3318:SKIP
+src/cli/fuse_fs.c:3579:SKIP
+src/cli/fuse_fs.c:3784:SKIP
+src/cli/fuse_fs.c:3871:SKIP
+src/cli/fuse_fs.c:3906:SKIP
+src/cli/fuse_fs.c:3943:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
-src/cli/pack.c:2839:SKIP   # list --volume: unreadable manifest skips the pack row
-src/cli/pack.c:2872:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
-src/cli/pack.c:3342:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
+src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row
+src/cli/pack.c:2902:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
+src/cli/pack.c:3471:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP
 src/cli/ls.c:135:SKIP
@@ -107,21 +107,21 @@ src/cli/window_test.c:176:SKIP
 src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
 src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
-src/core/vol_cpack.c:399:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:2973:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3316:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3317:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3413:SKIP   # map-gen probe: miss means no map (gen 0)
-src/core/vol_cpack.c:3414:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:3848:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
-src/core/vol_cpack.c:4380:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:4480:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:4495:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:4496:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:4500:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:4521:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:4575:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:4607:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:400:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
+src/core/vol_cpack.c:3072:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3415:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3416:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3512:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3513:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:3947:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
+src/core/vol_cpack.c:4479:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:4579:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:4594:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:4595:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:4599:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:4620:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:4674:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:4706:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
@@ -144,9 +144,10 @@ src/core/vol_sweep.c:624:ACTS
 src/core/vol_sweep.c:657:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
-src/core/volume.c:960:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1404:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1405:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:961:SKIP   # reserve scan: direct .ivpack file lookup
+src/core/volume.c:982:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1449:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1450:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

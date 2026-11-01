@@ -91,5 +91,5 @@ Exit codes recorded explicitly, no piped suites.
   CAVLC corpus that pays for the lane's complexity (this bench: 0 B);
   (3) exec remains sandboxed with abort-tolerant refusal, given the
   tool aborts rather than errors. None holds today — no lane, but the
-  item stays on the roadmap (`docs/ROADMAP.md`): revisit when upstream
+  item stays on the roadmap (`AGENTS.md`): revisit when upstream
   fixes the CABAC-encode path or a fork-and-fix WP is scheduled.
