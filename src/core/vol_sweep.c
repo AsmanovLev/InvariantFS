@@ -2422,6 +2422,13 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
         return 0;               /* engine bookkeeping, not a user file */
     out->files++;
     out->logical_bytes += in.size;
+    if (in.size > out->biggest_size) {
+        out->biggest_size = in.size;
+        if (name) {
+            strncpy(out->biggest_name, name, sizeof(out->biggest_name) - 1);
+            out->biggest_name[sizeof(out->biggest_name) - 1] = '\0';
+        }
+    }
     if (in.size == 0)
         return 0;
     if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {

@@ -126,15 +126,20 @@ typedef struct {
 static int parse_stat(const char *text, stat_model *m)
 {
     const char *p = strstr(text, "  files : ");
+    if (!p) p = strstr(text, "  files            : ");
     char lnum[32], lunit[32];
     memset(m, 0, sizeof *m);
     if (!p) return -1;
-    p += strlen("  files : ");
+    if (strncmp(p, "  files : ", 10) == 0) p += 10;
+    else if (strncmp(p, "  files            : ", 21) == 0) p += 21;
     /* two whitespace-separated words for the size ("4.9 KiB"), "logical"
      * suppressed, then the largest size up to the line end */
-    if (sscanf(p, "%llu live of %llu names (%llu %*[^)]), %31[^ ] %31[^ ]"
-                  " %*[^,], largest %39[^,\r\n]",
-               &m->live, &m->names, &m->dirs, lnum, lunit, m->largest) != 6)
+    const char *lpos = strstr(p, "largest ");
+    if (!lpos) return -1;
+    lpos += strlen("largest ");
+    if (sscanf(lpos, "%39[^\r\n]", m->largest) != 1) return -1;
+    if (sscanf(p, "%llu live of %llu names (%llu %*[^)]), %31[^ ] %31[^ ]",
+               &m->live, &m->names, &m->dirs, lnum, lunit) != 5)
         return -1;
     snprintf(m->logical, sizeof m->logical, "%s %s", lnum, lunit);
     return 0;

@@ -281,10 +281,12 @@ int main(int argc, char **argv)
                (unsigned long long)(sb->raw_zone_blocks * INVFS_BLOCK_SIZE >> 20),
                (unsigned long long)(sb->shadow_zone_blocks * INVFS_BLOCK_SIZE >> 20));
 
-        char lb[64];
+        char lb[64], mb2[64];
         human(st.logical_bytes, lb, sizeof lb);
-        printf("  files            : %" PRIu64 " live files (%" PRIu64 " dirs), %s logical (%.2fx ratio)\n",
-               st.files, st.dirs, lb, ratio);
+        human(st.biggest_size, mb2, sizeof mb2);
+        uint64_t total_names = st.files + st.dirs + st.links + st.special;
+        printf("  files            : %" PRIu64 " live of %" PRIu64 " names (%" PRIu64 " directories), %s logical (%.2fx ratio), largest %s\n",
+               st.files, total_names, st.dirs, lb, ratio, mb2);
         if (vol_ndev(v) == 2) {
             printf("  devices          : %d (%s)\n", vol_ndev(v),
                    vol_degraded(v) ? "DEGRADED" : "in sync");
