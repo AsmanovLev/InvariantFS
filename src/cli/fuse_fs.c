@@ -359,6 +359,8 @@ typedef struct {
 
 static fs_entry *g_entries;
 static int g_nentries, g_cap;
+static fs_entry *g_stage_entries;
+static int g_nstage, g_stage_cap;
 
 /* sort helpers */
 
@@ -489,12 +491,88 @@ static void build_file_table(void)
 
 
 
+/* Merges staged mutations into g_entries using an O(N + K) 2-way merge.
+ * Eliminates catastrophic O(N^2) memmove stalls during rapid file creation.
+ * Caller must hold g_io_lock. */
+static void table_stage_flush_locked(void)
+{
+    if (g_nstage == 0) return;
+
+    /* Sort staged mutations */
+    qsort(g_stage_entries, (size_t)g_nstage, sizeof(fs_entry), cmp_entry_name_pos);
+
+    int max_total = g_nentries + g_nstage;
+    fs_entry *merged = (fs_entry *)malloc((size_t)max_total * sizeof(fs_entry));
+    if (!merged) {
+        return; /* On OOM keep staged mutations */
+    }
+
+    int i = 0, j = 0, k = 0;
+    while (i < g_nentries && j < g_nstage) {
+        /* Deduplicate stage: pick the newest entry for the same name */
+        while (j + 1 < g_nstage && strcmp(g_stage_entries[j].name, g_stage_entries[j + 1].name) == 0) {
+            j++;
+        }
+
+        int cmp = strcmp(g_entries[i].name, g_stage_entries[j].name);
+        if (cmp < 0) {
+            if (g_entries[i].inode_id != 0) {
+                merged[k++] = g_entries[i];
+            }
+            i++;
+        } else if (cmp > 0) {
+            if (g_stage_entries[j].inode_id != 0) {
+                merged[k++] = g_stage_entries[j];
+            }
+            j++;
+        } else {
+            /* Staged mutation supersedes main table */
+            if (g_stage_entries[j].inode_id != 0) {
+                merged[k++] = g_stage_entries[j];
+            }
+            i++;
+            j++;
+        }
+    }
+    while (i < g_nentries) {
+        if (g_entries[i].inode_id != 0) {
+            merged[k++] = g_entries[i];
+        }
+        i++;
+    }
+    while (j < g_nstage) {
+        while (j + 1 < g_nstage && strcmp(g_stage_entries[j].name, g_stage_entries[j + 1].name) == 0) {
+            j++;
+        }
+        if (g_stage_entries[j].inode_id != 0) {
+            merged[k++] = g_stage_entries[j];
+        }
+        j++;
+    }
+
+    free(g_entries);
+    g_entries = merged;
+    g_nentries = k;
+    g_cap = max_total;
+    g_nstage = 0;
+}
+
 static fs_entry *find_entry(const char *name)
 {
+    /* Check staged mutations first (newest to oldest) */
+    for (int i = g_nstage - 1; i >= 0; i--) {
+        if (strcmp(g_stage_entries[i].name, name) == 0) {
+            if (g_stage_entries[i].inode_id == 0) return NULL; /* tombstoned */
+            return &g_stage_entries[i];
+        }
+    }
     if (g_nentries == 0) return NULL;
-    return (fs_entry *)bsearch(name, g_entries, (size_t)g_nentries,
+    fs_entry *e = (fs_entry *)bsearch(name, g_entries, (size_t)g_nentries,
                                sizeof(fs_entry), cmp_entry_key);
+    if (e && e->inode_id == 0) return NULL; /* tombstoned */
+    return e;
 }
+
 /* ---- incremental single-name sync (avoids full rebuild per mutation) ----
  * Common ops (create/flush/unlink/truncate/mkdir/rmdir) touch exactly one
  * name; syncing that name costs one engine lookup instead of rescanning a
@@ -503,6 +581,17 @@ static fs_entry *find_entry(const char *name)
 static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
                                 uint64_t ctime)
 {
+    /* 1. If in stage, update in place */
+    for (int i = g_nstage - 1; i >= 0; i--) {
+        if (strcmp(g_stage_entries[i].name, name) == 0) {
+            g_stage_entries[i].inode_id = ino;
+            g_stage_entries[i].size = size;
+            g_stage_entries[i].ctime = ctime;
+            return;
+        }
+    }
+
+    /* 2. If in main table, update in place */
     int lo = 0, hi = g_nentries;
     while (lo < hi) {                    /* lower_bound by name */
         int mid = (lo + hi) / 2;
@@ -515,35 +604,48 @@ static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
         g_entries[lo].ctime = ctime;
         return;
     }
-    if (g_nentries == g_cap) {
-        int ncap = g_cap ? g_cap * 2 : 1024;
-        fs_entry *ne = (fs_entry *)realloc(g_entries, ncap * sizeof(fs_entry));
+
+    /* 3. New entry: append to stage in O(1) */
+    if (g_nstage == g_stage_cap) {
+        int ncap = g_stage_cap ? g_stage_cap * 2 : 256;
+        fs_entry *ne = (fs_entry *)realloc(g_stage_entries, ncap * sizeof(fs_entry));
         if (!ne) return;               /* keep old table on OOM */
-        g_entries = ne;
-        g_cap = ncap;
+        g_stage_entries = ne;
+        g_stage_cap = ncap;
     }
-    memmove(&g_entries[lo + 1], &g_entries[lo],
-            (size_t)(g_nentries - lo) * sizeof(fs_entry));
-    memset(&g_entries[lo], 0, sizeof(fs_entry));
-    strncpy(g_entries[lo].name, name, sizeof(g_entries[lo].name) - 1);
-    g_entries[lo].inode_id = ino;
-    g_entries[lo].size = size;
-    g_entries[lo].ctime = ctime;
-    g_nentries++;
+    memset(&g_stage_entries[g_nstage], 0, sizeof(fs_entry));
+    strncpy(g_stage_entries[g_nstage].name, name, sizeof(g_stage_entries[g_nstage].name) - 1);
+    g_stage_entries[g_nstage].inode_id = ino;
+    g_stage_entries[g_nstage].size = size;
+    g_stage_entries[g_nstage].ctime = ctime;
+    g_nstage++;
+
+    if (g_nstage >= 1024) {
+        table_stage_flush_locked();
+    }
 }
 
 static void table_remove_name(const char *name)
 {
+    /* 1. If in stage, mark tombstone */
+    for (int i = g_nstage - 1; i >= 0; i--) {
+        if (strcmp(g_stage_entries[i].name, name) == 0) {
+            g_stage_entries[i].inode_id = 0;
+            return;
+        }
+    }
+
+    /* 2. If in main table, mark tombstone in main table */
     int lo = 0, hi = g_nentries;
     while (lo < hi) {
         int mid = (lo + hi) / 2;
         if (strcmp(g_entries[mid].name, name) < 0) lo = mid + 1;
         else hi = mid;
     }
-    if (lo >= g_nentries || strcmp(g_entries[lo].name, name) != 0) return;
-    memmove(&g_entries[lo], &g_entries[lo + 1],
-            (size_t)(g_nentries - lo - 1) * sizeof(fs_entry));
-    g_nentries--;
+    if (lo < g_nentries && strcmp(g_entries[lo].name, name) == 0) {
+        g_entries[lo].inode_id = 0;
+        return;
+    }
 }
 
 /* re-read one name from the engine into the table. Call WITHOUT the lock. */
@@ -1972,6 +2074,8 @@ static void table_rebuild_locked(void)
     /* free old table, rescan */
     free(g_entries);
     g_entries = NULL; g_nentries = 0; g_cap = 0;
+    free(g_stage_entries);
+    g_stage_entries = NULL; g_nstage = 0; g_stage_cap = 0;
     /* WP135: clear the degraded mark BEFORE the rebuild, so it is this
      * rebuild's verdict and not the last one's. A rebuild that completes
      * leaves it 0 and the table is authority again; one that does not sets
@@ -2770,6 +2874,7 @@ static void *fuse_sweep_thread(void *arg)
             if (g_vol && !g_shutdown) {
                 vol_tz_flush(g_vol);
                 vol_flush(g_vol);
+                table_stage_flush_locked();
             }
             pthread_mutex_unlock(&g_io_lock);
         }
@@ -3563,6 +3668,7 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         invfs_spt0 sp;
         int live = 0;
         pthread_mutex_lock(&g_io_lock);
+        table_stage_flush_locked();
         /* WP134: a rollback window nobody can see is useless. `savepoint=`
          * is the operator's proof that a sweep armed one -- the offline
          * invf-sweep, the watermark pass and the USR1/xattr pass all leave
@@ -3639,6 +3745,29 @@ static int invf_getxattr(const char *path, const char *name, char *value,
                 invfs_inproc_last_route());
         pthread_mutex_unlock(&g_io_lock);
         if (n < 0 || (size_t)n >= sizeof buf) n = sizeof buf - 1;
+        if (!value || size == 0) return n;
+        if ((size_t)n + 1 > size) return -ERANGE;
+        memcpy(value, buf, (size_t)n + 1);
+        return n;
+    }
+    if (strcmp(path, "/") == 0 && strncmp(name, "user.invfs.algo_usage.", 22) == 0) {
+        int target_algo = atoi(name + 22);
+        char buf[64];
+        uint64_t count = 0;
+        pthread_mutex_lock(&g_io_lock);
+        table_stage_flush_locked();
+        if (!g_vol) { pthread_mutex_unlock(&g_io_lock); return -EIO; }
+        for (int i = 0; i < g_nentries; i++) {
+            if (g_entries[i].inode_id != 0) {
+                uint8_t cls = 0, a = 0;
+                uint16_t gen = 0;
+                if (vol_get_class(g_vol, g_entries[i].inode_id, &cls, &a, &gen) == 0) {
+                    if (a == (uint8_t)target_algo) count++;
+                }
+            }
+        }
+        pthread_mutex_unlock(&g_io_lock);
+        int n = snprintf(buf, sizeof buf, "%llu\n", (unsigned long long)count);
         if (!value || size == 0) return n;
         if ((size_t)n + 1 > size) return -ERANGE;
         memcpy(value, buf, (size_t)n + 1);
