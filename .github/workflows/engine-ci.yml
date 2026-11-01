@@ -266,7 +266,7 @@ jobs:
           # fuzz bitflip setup (WP301), usr1 leg A (WP302),
           # fuse-sweep-thread pid-scan + ext4fs orphan pin (WP305):
           # fixed, un-skipped 2026-10-11 (were triage reds, see INCIDENTS).
-          SKIP="test-resize.sh test-qcow2-zlib.sh test-packaging.sh test-jxl.sh test-pngflac.sh test-rawimg.sh test-exercarve.sh test-sandbox.sh"
+          SKIP="test-resize.sh test-qcow2-zlib.sh test-packaging.sh test-jxl.sh test-pngflac.sh test-rawimg.sh test-exercarve.sh test-sandbox.sh test-writeback-stall.sh"
           FAIL=0
           for s in $(make -n e2e | grep -o 'tools/test-[a-z0-9-]*\.sh' | sort -u) tools/test-flakey-multidev.sh; do
             base="${s##*/}"

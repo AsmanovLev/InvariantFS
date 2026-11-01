@@ -19,10 +19,9 @@ no conversion path). Durability contract: acknowledged writes are durable
 (`fsync` fences before it returns; a failed call leaves the pre-call
 state, never a torn prefix) --
 see `docs/adr/ADR-009-v3-durability-contract.md`. Anything not yet
-acknowledged may be absent after a crash, never torn. Still not a
-replacement for ext4/XFS on general workloads: pre-production means
-reviewed snapshots and raw `dd` backups before anything you cannot
-re-import (see `INCIDENTS.md`).
+acknowledged may be absent after a crash, never torn. Pre-production
+status: keep reviewed snapshots and raw `dd` backups before storing
+anything you cannot re-import (see `INCIDENTS.md`).
 
 ## Features
 
@@ -35,16 +34,17 @@ re-import (see `INCIDENTS.md`).
   segments, so partial reads touch only what is needed (reading a FLAC's tags
   never decompresses the audio).
 * **Per-content codecs** — writes land LZ4-compressed (or verbatim) in RAW,
-  then offline sweep re-encodes into ZSTD Shadow where bit-exactness is proven.
+  then sweep consolidates into ZSTD Shadow where bit-exactness is proven.
   In-tree codecs: LZ4, ZSTD, BLAKE3, FLAC, BCJ-x86, miniz, Reed–Solomon.
 * **Verified transcode families** — FLAC (`FLACR`), TAR (`TARR`), gzip (`GZR`),
   PNG (`PNGR`), PE/EXE (`EXER`).
 * **Containers kept original** — ZIP/TAR/7z/VDI/qcow2/... are stored
   byte-original with members exposed as on-demand windows.
-* **Immutable segments + offline sweep** — new bytes land in RAW as new
-  segments, then the sweep drains them into Shadow, re-encoding where proven
-  bit-exact. The zone fields are advisory policy over one shared free pool,
-  not fixed regions.
+* **Tiered segment lifecycle** — new bytes allocate in the RAW zone from the
+  shared free-block pool (dynamic, not append-only), then background or
+  explicit sweep consolidates them into Shadow, re-encoding where proven
+  bit-exact. Zone fields are dynamic advisory policy over one shared pool,
+  not rigid physical regions.
 * **Meta-v3 Metadata Architecture** — B+ tree base metadata + append-only Delta
   Log with background fold worker and lock-free reads.
 * **Content Addressing & Dedup** — immutable recipes and shadow blobs are
@@ -93,9 +93,9 @@ FUSE gives this for free. The alternatives are worse:
   that still calls user-space for every compressed segment. Two code
   bases, kernel panics on AST parse bugs, and the same context switches
   with extra ioctl marshalling. Not simpler, just harder to debug.
-* **ublk / block-device layer** — adds ext4/XFS on top, doubling the
-  metadata overhead and the page cache, for no measurable gain on a
-  content-addressed store that doesn't have fixed block semantics.
+* **ublk / block-device layer** — adds a conventional block filesystem on top,
+  doubling the metadata overhead and page cache usage for no measurable gain on
+  a content-addressed store that doesn't have fixed block semantics.
 * **eBPF hot-path** — the kernel verifier limits instruction count and
   memory allocations; it cannot hold 512 MiB ZSTD dictionaries or run
   multi-millisecond FLAC decode loops. Good for stats, not data-plane.
@@ -124,28 +124,31 @@ handles requests internally. The mechanisms that matter:
 With these, FUSE overhead becomes negligible compared to disk I/O and
 codec CPU cost.
 
-## Non-features
+## Design boundaries
 
-* Not a drop-in ext4/XFS/ZFS replacement for general workloads.
-* No network/SAN support; single host only.
-* No high write throughput: new bytes always allocate fresh segments (never patched in place) and consolidation is offline.
-* Power loss keeps only acknowledged writes (`fsync`-durable); unacknowledged
-  writes may be absent afterwards, never torn (`make flakey` soaks exactly
-  this boundary).
-* No snapshots/CoW clones in the btrfs/ZFS sense — savepoints/rollback only.
-* The on-disk format is not frozen; the v3 record layout is a deliberate
-  break, and it is the only one this build reads.
-* Not for metadata-space-dominated sets (millions of empty files).
-* No NFSv4 ACLs; the xattr cap is 64 KiB per attribute (xattrs live in the
-  metadata B+ tree, matching Linux VFS);
-* **Format v3 only.** A volume written by a pre-v0.5 build (formats v1 and
-  v2) will not open, and there is no in-tree conversion: `invf-mkfs` has
-  refused to *create* a v2 volume since v0.5.0, the `invf-migrate-v2`
-  v1-to-v2 converter was removed with the format, and no v1/v2-to-v3 path
-  has ever existed. To keep the data, create a new volume and re-import
-  from a copy of the source tree, or restore from a backup.
-  `trusted.*`/`security.*` require root with capabilities (`CAP_SYS_ADMIN`),
-  `security.capability` requires mounting without `nosuid`; mtime truncated to seconds.
+* **Tiered write path** — incoming writes land dynamically in the RAW zone
+  (accelerated via kernel writeback aggregation and fast LZ4/verbatim encoding)
+  from the shared free-block pool, and are consolidated into Shadow via
+  background or explicit sweep. Not intended for heavy in-place random overwrite
+  patterns (e.g. transactional OLTP database engines).
+* **Local filesystem** — standard POSIX filesystem for local block devices.
+  It exports cleanly over standard network protocols (NFS, Samba), but is not
+  a clustered or distributed filesystem (no concurrent multi-host block access).
+* **Savepoints over branching clones** — durable transactional savepoints
+  (SPT0) provide instant volume rollback (`invf-rollback`), rather than
+  branching copy-on-write snapshot trees.
+* **Crash consistency** — power loss preserves all acknowledged writes
+  (`fsync`-durable); unacknowledged in-flight writes may be absent afterwards,
+  never torn (`make flakey` soaks exactly this boundary).
+* **Metadata scale** — not suited for metadata-dominated sets (millions of
+  empty zero-byte files).
+* **Format v3 only** — the on-disk format is Meta-v3. Pre-v0.5 volumes (v1/v2)
+  will not open and are not converted in-place: create a new volume and
+  re-import from source, or restore from backup.
+* **POSIX details** — POSIX.1e ACLs supported via `system.posix_acl_*`; xattr
+  cap is 64 KiB per attribute (stored in the metadata B+ tree); `trusted.*`
+  and `security.*` require root (`CAP_SYS_ADMIN`), `security.capability`
+  requires mounting without `nosuid`; mtime is stored with 1-second resolution.
 
 ## How it works
 
@@ -184,14 +187,14 @@ For complete architecture specifications, see:
 | | ext4 / XFS | btrfs / ZFS | InvariantFS |
 |---|---|---|---|
 | Unit of storage | fixed blocks | blocks + COW | content segments + recipe |
-| Write model | in-place | COW | write-once segments, offline consolidation |
+| Write model | in-place | COW | dynamic RAW landing, background/offline sweep |
 | Compression | no / opt | opt, not bit-exact-checked | per-segment, **proven** bit-exact |
 | Deduplication | no | btrfs yes | content-addressed recipe & shadow blobs (BLAKE3) |
 | Metadata | fixed inode table / B-tree | B-tree | Meta-v3 (B+ tree + Delta Log) |
 | Snapshots | no / LVM | yes (COW) | savepoints + rollback (`invf-rollback`) |
 | Containers | opaque | opaque | stored original, members on demand |
 | Codecs | in-kernel | in-kernel | external versioned packs |
-| Best at | general workloads | general + snapshots | archives, read-mostly roots, dedup |
+| Best at | general workloads | general + snapshots | archives, system roots, dedup, media |
 
 ## Install
 

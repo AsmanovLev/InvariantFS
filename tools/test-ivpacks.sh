@@ -123,7 +123,7 @@ for p in $CPACKS; do
     [ -s "$d/lib$p.so" ] || bad "$p: make plugin-so produced no lib$p.so"
 done
 cc -std=gnu11 -O2 -Wall -Wextra -Werror -I"$REPO/src" -o "$WORK/bin/ivpack-probe" \
-    "$REPO/tools/ivpack_probe.c" -ldl
+    "$REPO/tools/ivpack_probe.c" "$REPO/src/core/ivpack_loader.c" -ldl
 ok "8 CLI helpers + 8 plugin .so built clean"
 
 # ---------------------------------------------------------------- fixtures --
