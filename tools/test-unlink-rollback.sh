@@ -183,8 +183,8 @@ grep -q "CONSISTENT-FAIL" "$WORK/legB.log" || fail "leg B: no CONSISTENT-FAIL li
 $RB "$IMG" ino keeper.txt > "$WORK/ino1.log" 2>&1
 $RB "$IMG" ino keeper2.txt > "$WORK/ino2.log" 2>&1
 cat "$WORK/ino1.log" "$WORK/ino2.log"
-I1=$(sed 's/.*ino=//' "$WORK/ino1.log")
-I2=$(sed 's/.*ino=//' "$WORK/ino2.log")
+I1=$(sed -n 's/.*ino=//p' "$WORK/ino1.log")
+I2=$(sed -n 's/.*ino=//p' "$WORK/ino2.log")
 grep -q "present=1" "$WORK/ino1.log" || fail "leg B: keeper.txt gone"
 grep -q "present=1" "$WORK/ino2.log" || fail "leg B: keeper2.txt gone"
 [ "$I1" = "$I2" ] || fail "leg B: survivors not the same inode ($I1 vs $I2)"
