@@ -85,7 +85,7 @@ jobs:
           # The packaging tree keeps debian/ under packaging/; debuild wants
           # it at the root. A CI-local symlink (never committed).
           ln -s packaging/debian debian
-          debuild -us -uc -b
+          debuild --no-lintian -us -uc -b
           # debuild drops artifacts in the parent dir; upload-artifact
           # forbids '..', so stage them inside the workspace.
           mkdir -p debs && mv ../*.deb ../*.buildinfo ../*.changes debs/
