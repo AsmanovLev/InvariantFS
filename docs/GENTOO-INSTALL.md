@@ -1,10 +1,10 @@
 # Gentoo on InvariantFS — Install Guide
 
-**Status:** `Testing (~amd64)` — Hardware-Verified Bare-Metal & QEMU Bootstrap (Updated Nov 2026)
+**Status:** `Unstable (~amd64)` — Hardware-Verified Bare-Metal & QEMU Bootstrap (Updated Nov 2026)
 
 > [!NOTE]
-> **Maturity Level: Testing (~amd64) / Technology Preview**
-> Gentoo on InvariantFS has graduated from an experimental VM prototype to a proven **Testing (`~amd64`)** bare-metal configuration. It has been validated on physical x86_64 hardware (Intel Core i3, dual-drive NVMe/SATA setup, SysVinit/OpenRC, kernel 6.18.57) with clean shutdown/reboot cycles, automated failover crash recovery, and full Portage repository trees (~150,000 files) operating directly over FUSE.
+> **Maturity Level: Unstable (~amd64) / Technology Preview**
+> Gentoo on InvariantFS has graduated from an experimental prototype to a proven **Unstable (`~amd64`)** bare-metal configuration. It has been validated on physical x86_64 hardware (Intel Core i3, dual-drive NVMe/SATA setup, SysVinit/OpenRC, kernel 6.18.57) with clean shutdown/reboot cycles, automated failover crash recovery, and full Portage repository trees (~150,000 files) operating directly over FUSE.
 
 This guide covers three installation paths:
 - **Bare-metal** (Step 8): Real hardware, UEFI + GRUB, dual-drive InvFS root with automated failover and clean reboot.
