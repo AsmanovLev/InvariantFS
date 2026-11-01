@@ -51,7 +51,7 @@ STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SR
 FUSE_CFLAGS := $(shell pkg-config --cflags fuse3)
 FUSE_LIBS   := $(shell pkg-config --libs fuse3)
 
-CORE    := volume vol_cpack helper_exec tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
+CORE    := volume vol_cpack helper_exec ivpack_loader tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \

@@ -8,8 +8,11 @@
 #define _GNU_SOURCE
 #endif
 #include "helper_exec.h"
+#include "ivpack_loader.h"
 
 #ifndef _WIN32
+
+extern char **environ;
 
 #include <dirent.h>
 #include <errno.h>
@@ -769,6 +772,27 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
 
         helper_child_setup(sb, sbmode, argv, mem_cap, tmo, is_root,
                            h_uid, h_gid, work_dir);
+
+        /* ADR-007: direct in-memory execution from uncompressed .ivpack archive */
+        if (argv[0]) {
+            char *bang = strstr(argv[0], ".ivpack!");
+            if (bang) {
+                char arch[4096];
+                size_t alen = (size_t)(bang - argv[0]) + 7;
+                if (alen < sizeof(arch)) {
+                    memcpy(arch, argv[0], alen);
+                    arch[alen] = '\0';
+                    const char *entry = bang + 8;
+                    ivpack_fexecve(arch, entry, argv, environ);
+                }
+            } else {
+                size_t l0 = strlen(argv[0]);
+                if (l0 >= 7 && strcmp(argv[0] + l0 - 7, ".ivpack") == 0) {
+                    ivpack_fexecve(argv[0], NULL, argv, environ);
+                }
+            }
+        }
+
         if (no_path_search) execv(argv[0], argv);
         else execvp(argv[0], argv);
         _exit(127);

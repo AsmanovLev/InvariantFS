@@ -32,6 +32,13 @@
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
 #include "tmpstore.h"
 
+static inline double fuse_now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
+
 static invfs_volume *g_vol;
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 
@@ -450,6 +457,8 @@ static void build_file_table(void)
     ftable_ctx c;
     vol_walk_t w;
     int rc;
+    double t_start = fuse_now_sec();
+    double t_walk, t_sort;
 
     memset(&c, 0, sizeof c);
     vol_walk_init(&w, g_vol, "build_file_table");
@@ -460,11 +469,15 @@ static void build_file_table(void)
      * caller that must not get a partial view, and this is a second. */
     rc = vol_walk_strict(g_vol, bft_cb, &c);
     vol_walk_result(&w, rc, (size_t)(c.n > 0 ? c.n : 0), (size_t)(c.n > 0 ? c.n : 0));
+    t_walk = fuse_now_sec();
     if (c.n > 1)
         qsort(c.v, (size_t)c.n, sizeof *c.v, cmp_entry_name_pos);
+    t_sort = fuse_now_sec();
     g_entries = c.v;
     g_nentries = c.n;
     g_cap = c.cap;
+    fprintf(stderr, "[perf-trace] build_file_table: total=%.3fs (walk=%.3fs, qsort=%.3fs, %d files)\n",
+            t_sort - t_start, t_walk - t_start, t_sort - t_walk, c.n);
     if (vol_walk_commit(&w) != 0) {
         g_table_degraded = 1;
         fprintf(stderr, "invf-fuse: the namespace walk did not complete; the "
@@ -3858,6 +3871,10 @@ static int invf_unlink(const char *path)
         table_remove_name(path + 1);   /* no flush: tombstone+bitmap are
         durable on the next flush/close; per-unlink fsync-class writes
         made rm -rf of a source tree take minutes */
+    } else {
+        uint64_t fid = 0;
+        if (g_vol && vol_find_rc(g_vol, path + 1, &fid) == 0)
+            table_remove_name(path + 1);
     }
     /* There is deliberately no "index ghost" recovery here any more.
      *
@@ -4028,6 +4045,7 @@ static int parse_size_opt(const char *s, uint64_t *out)
 
 int main(int argc, char *argv[])
 {
+    double t_main_start = fuse_now_sec();
     /* usage: invf-fuse [-f] [-o opt[,opt...]] <image> <mountpoint> */
     const char *img = NULL, *mnt = NULL, *opts = NULL;
     int fg = 0, err, i;
@@ -4201,11 +4219,13 @@ int main(int argc, char *argv[])
         opts = fl ? fbuf : NULL;
     }
 
+    fprintf(stderr, "[perf-trace 0.000s] opening volume %s...\n", img);
     g_vol = vol_open(img, &err);
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
+    fprintf(stderr, "[perf-trace %.3fs] volume open complete\n", fuse_now_sec() - t_main_start);
 
     /* WP59: codec-policy mount gate.
      * - No PCK0 (legacy volume): refuse unless -o ignore-missing-codecs.
@@ -4262,7 +4282,9 @@ int main(int argc, char *argv[])
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     snprintf(g_mnt_path, sizeof g_mnt_path, "%s", mnt);
     setvbuf(stderr, NULL, _IONBF, 0);
+    fprintf(stderr, "[perf-trace %.3fs] building file table...\n", fuse_now_sec() - t_main_start);
     build_file_table();
+    fprintf(stderr, "[perf-trace %.3fs] file table complete (%d files)\n", fuse_now_sec() - t_main_start, g_nentries);
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
 
     /* The background on-demand sweep thread USED to be created here, twelve
@@ -4363,6 +4385,7 @@ int main(int argc, char *argv[])
             if (g_vol) { g_shutdown = 1; vol_close(g_vol); g_vol = NULL; }
             return 1;
         }
+        fprintf(stderr, "[perf-trace %.3fs] FUSE mounted at %s\n", fuse_now_sec() - t_main_start, mnt);
         if (!fg) fuse_daemonize(0);
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);

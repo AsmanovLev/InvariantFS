@@ -29,6 +29,7 @@
 #include <poll.h>
 
 #include "core/invf_plugin_ipc.h"
+#include "core/ivpack_loader.h"
 #include "include/ivpack_api.h"
 
 static volatile sig_atomic_t g_stop = 0;
@@ -64,16 +65,24 @@ static worker_plugin *find_or_load_plugin(const char *name, const char *path)
         return NULL;
 
     void *h = NULL;
+    if (ivpack_is_archive_file(path)) {
 #ifdef LM_ID_NEWLM
-    /* Load into isolated link-map namespace */
-    h = dlmopen(LM_ID_NEWLM, path, RTLD_NOW | RTLD_LOCAL);
+        h = ivpack_dlmopen(path, NULL, LM_ID_NEWLM, RTLD_NOW | RTLD_LOCAL);
+#else
+        h = ivpack_dlmopen(path, NULL, 0, RTLD_NOW | RTLD_LOCAL);
 #endif
-    if (!h) {
-        /* Fallback to standard dlopen */
-        h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    } else {
+#ifdef LM_ID_NEWLM
+        /* Load into isolated link-map namespace */
+        h = dlmopen(LM_ID_NEWLM, path, RTLD_NOW | RTLD_LOCAL);
+#endif
+        if (!h) {
+            /* Fallback to standard dlopen */
+            h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+        }
     }
     if (!h) {
-        fprintf(stderr, "invf-plugin-host: dlopen(%s) failed: %s\n", path, dlerror());
+        fprintf(stderr, "invf-plugin-host: load(%s) failed: %s\n", path, dlerror());
         return NULL;
     }
 

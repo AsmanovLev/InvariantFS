@@ -11,6 +11,7 @@
 #include "tool_scratch.h"
 #include "vol_plugin_client.h"
 #include "vol_plugin_inproc.h"
+#include "ivpack_loader.h"
 #include "../codecs/deflate_repro.h"
 #include <dirent.h>
 #include <sys/stat.h>
@@ -651,7 +652,12 @@ static int pack_argv_build(const invfs_pack_def *def, const char *hostdir,
              * packs resolve their staged helpers here. */
             char rb[4096];
             const char *rp = NULL;
-            if (hostdir) {
+            if (hostdir && ivpack_is_archive_file(hostdir)) {
+                int n = snprintf(rb, sizeof rb, "%s!bin/%s", hostdir, arena + used);
+                if (n > 0 && (size_t)n < sizeof rb)
+                    rp = rb;
+            }
+            if (!rp && hostdir) {
                 int n = snprintf(rb, sizeof rb, "%s/bin/%s", hostdir, arena + used);
                 if (n > 0 && (size_t)n < sizeof rb && access(rb, X_OK) == 0)
                     rp = rb;
@@ -786,8 +792,15 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
      * which falls through to the CLI exec below. */
     if (invfs_plugin_pool_is_available() && c && c->name) {
         char so_path[512];
-        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
-        if (access(so_path, R_OK) == 0) {
+        int have_plugin = 0;
+        if (hd && ivpack_is_archive_file(hd)) {
+            snprintf(so_path, sizeof(so_path), "%s", hd);
+            have_plugin = 1;
+        } else if (hd) {
+            snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
+            if (access(so_path, R_OK) == 0) have_plugin = 1;
+        }
+        if (have_plugin) {
             int pcmd = 0;
             const char *p_in = NULL, *p_out = NULL;
             const char *p_recipe = NULL, *p_dir = NULL, *p_idx = NULL;
@@ -892,8 +905,15 @@ int invfs_codec_pack_estimate(const invfs_codec *c, const char *in_path,
     /* ADR-007: Try worker pool daemon first for estimate */
     if (invfs_plugin_pool_is_available() && c && c->name) {
         char so_path[512];
-        snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
-        if (access(so_path, R_OK) == 0) {
+        int have_plugin = 0;
+        if (hd && ivpack_is_archive_file(hd)) {
+            snprintf(so_path, sizeof(so_path), "%s", hd);
+            have_plugin = 1;
+        } else if (hd) {
+            snprintf(so_path, sizeof(so_path), "%s/lib%s.so", hd, c->name);
+            if (access(so_path, R_OK) == 0) have_plugin = 1;
+        }
+        if (have_plugin) {
             uint64_t est_sz = 0;
             if (invfs_plugin_pool_container_estimate(c->name, so_path, in_path, &est_sz) == 0) {
                 if (out_bytes) *out_bytes = est_sz;

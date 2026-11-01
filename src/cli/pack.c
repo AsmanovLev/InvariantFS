@@ -59,6 +59,7 @@
 #include "../core/vol_plugin_inproc.h" /* WP625: inproc gates */
 #include "tool_scratch.h"
 #include "volume.h"   /* vol_open for --volume (links CORE_O) */
+#include "../core/ivpack_loader.h"
 
 #define HOST_ROOT "/.invariantfs/codecpacks"
 #define LEGACY_ROOT "/.invfs/codecpacks"
@@ -100,8 +101,8 @@
 #define DEFAULT_RELEASE_BASE \
     "https://github.com/AsmanovLev/InvariantFS-registry"
 /* Default tag carrying the .ivpack assets (registry/docs/IVPACK-RELEASES.md:
- * one tag carries all packs; v1.1.0 is the .ivpack deliverable). */
-#define DEFAULT_IVPACK_TAG "v1.1.0"
+ * one tag carries all packs; v1.2.0 is the static musl .ivpack deliverable). */
+#define DEFAULT_IVPACK_TAG "v1.2.0"
 /* Cap on files named by one sha256 listing (release extras check). */
 #define MAX_REL_FILES 1024
 
@@ -243,6 +244,20 @@ static int parse_manifest(const char *path, pack_info *pi)
     if (!f) return -1;
     rc = parse_manifest_stream(f, pi);
     fclose(f);
+    return rc;
+}
+
+static int parse_manifest_ivpack(const char *ivpath, pack_info *pi)
+{
+    void *mbuf = NULL;
+    size_t msz = 0;
+    if (ivpack_read_entry_file(ivpath, "manifest", &mbuf, &msz) != 0 || !mbuf)
+        return -1;
+    FILE *f = fmemopen(mbuf, msz, "r");
+    if (!f) { free(mbuf); return -1; }
+    int rc = parse_manifest_stream(f, pi);
+    fclose(f);
+    free(mbuf);
     return rc;
 }
 
@@ -2344,13 +2359,17 @@ static int repo_fetch_ivpack(const reg_pack *best, pack_repo *raw,
                 return -1;
             }
             if (lstat(dest, &st) != 0 || !S_ISREG(st.st_mode)) {
-                fprintf(stderr, "invf-pack: REFUSED: %s %s/%s is missing "
-                        "from the .ivpack bundle (tampered pack?)\n",
-                        best->name, best->version, rel);
-                free(rshtext);
-                rmtree(scratch);
-                stage_top_out[0] = 0;
-                return -1;
+                if (strcmp(rel, "manifest") == 0) {
+                    fprintf(stderr, "invf-pack: REFUSED: %s %s/%s is missing "
+                            "from the .ivpack bundle (tampered pack?)\n",
+                            best->name, best->version, rel);
+                    free(rshtext);
+                    rmtree(scratch);
+                    stage_top_out[0] = 0;
+                    return -1;
+                }
+                /* Source or build payload in raw-tree not shipped in binary .ivpack bundle */
+                continue;
             }
             if (r256_file(dest, got) != 0 ||
                 strcasecmp(expect, got) != 0) {
@@ -2922,31 +2941,38 @@ static void cmd_list(const char *filter_family, int installed_only,
             if (pathf(full, sizeof full, "%s/%s", roots[r], de->d_name) != 0)
                 continue;
             struct stat st;
-            if (stat(full, &st) != 0 || !S_ISDIR(st.st_mode)) continue;
-            if (!is_codecpack(full)) continue;
-            /* installed = same dirname present under the host root */
+            if (stat(full, &st) != 0) continue;
+            int is_iv = ivpack_is_archive_file(full);
+            if (!S_ISDIR(st.st_mode) && !is_iv) continue;
+            if (!is_iv && !is_codecpack(full)) continue;
+            /* installed = same name present under the host root */
             char probe[MAX_PATH + 64];
             struct stat pst;
             int is_host = (strcmp(roots[r], HOST_ROOT) == 0);
             int is_inst = is_host; /* --installed scans the host root itself */
             if (!is_inst &&
                 pathf(probe, sizeof probe, "%s/%s", HOST_ROOT, de->d_name) == 0 &&
-                stat(probe, &pst) == 0 && S_ISDIR(pst.st_mode))
+                stat(probe, &pst) == 0)
                 is_inst = 1;
             pack_info pi;
             char srctag[16] = "";
             char markpath[MAX_PATH + 80];
             memset(&pi, 0, sizeof pi);
-            if (pathf(markpath, sizeof markpath, "%s.source", full,
-                       NULL) == 0) {
-                char kind[16];
-                if (read_source_marker(markpath, kind,
-                                       sizeof kind) == 0)
-                    snprintf(srctag, sizeof srctag, " [%s]", kind);
+            if (is_iv) {
+                snprintf(srctag, sizeof srctag, " [ivpack]");
+                if (parse_manifest_ivpack(full, &pi) != 0) continue;
+            } else {
+                if (pathf(markpath, sizeof markpath, "%s.source", full,
+                           NULL) == 0) {
+                    char kind[16];
+                    if (read_source_marker(markpath, kind,
+                                           sizeof kind) == 0)
+                        snprintf(srctag, sizeof srctag, " [%s]", kind);
+                }
+                char mp[MAX_PATH + 64];
+                if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
+                parse_manifest(mp, &pi);
             }
-            char mp[MAX_PATH + 64];
-            if (pathf(mp, sizeof mp, "%s/manifest", full, NULL) != 0) continue;
-            parse_manifest(mp, &pi);
             if (filter_family[0] && strcmp(pi.family, filter_family) != 0)
                 continue;
             printf("%-20s %-8s %-6s %-12s %-10s %s%s%s\n",
@@ -3112,21 +3138,7 @@ static int find_local_pack(const char *name, char *src, size_t src_cap,
 
 static int is_ivpack_file(const char *path)
 {
-    struct stat st;
-    size_t l;
-    FILE *f;
-    uint8_t sig[4];
-    size_t n;
-    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode))
-        return 0;
-    l = strlen(path);
-    if (l >= 7 && strcmp(path + l - 7, ".ivpack") == 0)
-        return 1;
-    f = fopen(path, "rb");
-    if (!f) return 0;
-    n = fread(sig, 1, 4, f);
-    fclose(f);
-    return (n == 4 && sig[0] == 0x50 && sig[1] == 0x4b && sig[2] == 0x03 && sig[3] == 0x04);
+    return ivpack_is_archive_file(path);
 }
 
 static int stage_local_ivpack(const char *path, char *src_out, size_t src_cap,
@@ -3672,7 +3684,7 @@ static int cmd_install(const char *name, int overwrite, int dry_run,
             rc = 1;
             goto done;
         }
-        exists = (stat(dst, &st) == 0 && S_ISDIR(st.st_mode));
+        exists = (stat(dst, &st) == 0 || lstat(dst, &st) == 0);
         if (dry_run) {
             if (exists)
                 printf("would reinstall '%s' -> %s (%s)\n", src, dst,
@@ -3789,35 +3801,61 @@ static void cmd_remove(const char *name)
 {
     char dst[MAX_PATH];
     struct stat st;
-    snprintf(dst, sizeof dst, "%s/%s.codecpack", HOST_ROOT, name);
-    if (stat(dst, &st) != 0 || !S_ISDIR(st.st_mode)) {
+    int found = 0;
+    static const char *candidates[] = {
+        "%s/%s.ivpack",
+        "%s/%s.codecpack",
+        "%s/%s",
+        "/.invariantfs/packs/containers/%s.ivpack",
+        "/.invariantfs/packs/codecs/%s.ivpack",
+        "/.invariantfs/packs/helpers/%s.ivpack",
+        "/.invariantfs/packs/%s.ivpack",
+        NULL
+    };
+
+    for (int i = 0; candidates[i]; i++) {
+        if (strchr(candidates[i], '/')) {
+            if (candidates[i][0] == '/') {
+                snprintf(dst, sizeof dst, candidates[i], name);
+            } else {
+                snprintf(dst, sizeof dst, candidates[i], HOST_ROOT, name);
+            }
+        }
+        if (stat(dst, &st) == 0) {
+            found = 1;
+            if (S_ISDIR(st.st_mode)) {
+                pid_t pid = fork();
+                if (pid < 0) {
+                    fprintf(stderr, "failed to fork for remove %s\n", dst);
+                    return;
+                }
+                if (pid == 0) {
+                    execlp("rm", "rm", "-rf", dst, (char *)NULL);
+                    _exit(127);
+                }
+                int status = 0;
+                while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
+                    ;
+                if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+                    fprintf(stderr, "failed to remove %s\n", dst);
+                    return;
+                }
+            } else {
+                if (unlink(dst) != 0) {
+                    fprintf(stderr, "failed to remove %s: %s\n", dst, strerror(errno));
+                    return;
+                }
+            }
+            char mark[MAX_PATH + 16];
+            if (snprintf(mark, sizeof mark, "%s.source", dst) < (int)sizeof mark)
+                unlink(mark);
+            printf("removed '%s'\n", name);
+            return;
+        }
+    }
+    if (!found) {
         fprintf(stderr, "pack '%s' not installed at %s\n", name, HOST_ROOT);
-        return;
-    }    /* No shell (see cmd_install): dst derives from the pack name. */
-    pid_t pid = fork();
-    if (pid < 0) {
-        fprintf(stderr, "failed to fork for remove %s\n", dst);
-        return;
     }
-    if (pid == 0) {
-        execlp("rm", "rm", "-rf", dst, (char *)NULL);
-        _exit(127);
-    }
-    int status = 0;
-    while (waitpid(pid, &status, 0) < 0 && errno == EINTR)
-        ;
-    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-        fprintf(stderr, "failed to remove %s\n", dst);
-        return;
-    }
-    /* drop the install-source sibling too (best effort) */
-    {
-        char mark[MAX_PATH + 16];
-        if (snprintf(mark, sizeof mark, "%s.source",
-                     dst) < (int)sizeof mark)
-            unlink(mark);
-    }
-    printf("removed '%s'\n", name);
 }
 
 /* Signature status of one installed pack dir. Printed by verify next
@@ -4337,8 +4375,13 @@ int main(int argc, char **argv)
         }
         return cmd_sign(keyfile, target);
     } else if (strcmp(cmd, "remove") == 0) {
-        if (argc < 3) { fprintf(stderr, "usage: invf-pack remove <pack>\n"); return 2; }
-        cmd_remove(argv[2]);
+        const char *target = NULL;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "-y") == 0 || strcmp(argv[i], "--yes") == 0) continue;
+            if (!target) target = argv[i];
+        }
+        if (!target) { fprintf(stderr, "usage: invf-pack remove [-y] <pack>\n"); return 2; }
+        cmd_remove(target);
     } else if (strcmp(cmd, "verify") == 0) {
         return cmd_verify(argc > 2 ? argv[2] : NULL);
     } else if (strcmp(cmd, "inproc") == 0) {

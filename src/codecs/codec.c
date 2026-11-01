@@ -22,6 +22,7 @@
 #include "codec.h"
 #include "../core/tool_scratch.h"
 #include "../core/vol_plugin_inproc.h"
+#include "../core/ivpack_loader.h"
 #include "lz4.h"
 #include "ppmd_codec.h"
 #include "zstd.h"
@@ -624,6 +625,20 @@ static int manifest_tool_ok(const char *packdir, const char *argv)
     }
     tok[i] = '\0';
     if (!tok[0]) return 0;
+
+    /* ADR-007: tool resolution inside uncompressed .ivpack archive */
+    if (packdir && ivpack_is_archive_file(packdir)) {
+        char ent[512];
+        if (strchr(tok, '/')) {
+            snprintf(ent, sizeof ent, "%s", tok);
+        } else {
+            snprintf(ent, sizeof ent, "bin/%s", tok);
+        }
+        if (ivpack_find_entry_file(packdir, ent, NULL, NULL, NULL, 0) == 0)
+            return 1;
+        return on_path(tok);
+    }
+
     if (strchr(tok, '/')) {
         char full[4096];
         size_t plen = strlen(packdir), tlen = strlen(tok);
@@ -648,7 +663,7 @@ static int manifest_tool_ok(const char *packdir, const char *argv)
     return on_path(tok);
 }
 
-/* <dir>/<name>.codecpack/manifest, usable only if it names encode/decode
+/* <dir>/<name>.codecpack/manifest or <dir>/<name>.ivpack, usable only if it names encode/decode
  * helpers that are all executable */
 static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
 {
@@ -656,6 +671,29 @@ static int probe_pack_dir(const char *dir, size_t dlen, const char *name)
     char mpath[4096];
     size_t nlen = strlen(name), plen;
     struct pack_manifest m;
+
+    /* ADR-007: check <dir>/<name>.ivpack */
+    snprintf(packdir, sizeof packdir, "%.*s/%s.ivpack", (int)dlen, dir, name);
+    if (ivpack_is_archive_file(packdir)) {
+        void *mbuf = NULL;
+        size_t mlen = 0;
+        if (ivpack_read_entry_file(packdir, "manifest", &mbuf, &mlen) == 0 && mbuf) {
+            FILE *f = fmemopen(mbuf, mlen, "r");
+            int ok = 0;
+            if (f) {
+                if (pack_parse_lines(f, &m)) {
+                    if (m.is_helper || m.is_container ||
+                        (m.has_encode && m.has_decode &&
+                         manifest_tool_ok(packdir, m.encode) &&
+                         manifest_tool_ok(packdir, m.decode)))
+                        ok = 1;
+                }
+                fclose(f);
+            }
+            free(mbuf);
+            if (ok) return 1;
+        }
+    }
 
     plen = dlen + 1 + nlen + 10;                    /* "/<name>.codecpack" */
     if (plen + 1 > sizeof packdir) return 0;
@@ -1729,6 +1767,19 @@ static void pack_scan_dir(const char *dir, size_t dlen)
         size_t plen = dlen + 1 + nl;
         struct pack_manifest m;
 
+        /* ADR-007: direct .ivpack archives */
+        if (nl >= 7 && strcmp(de->d_name + nl - 7, ".ivpack") == 0) {
+            char ipath[4096];
+            snprintf(ipath, sizeof ipath, "%s/%s", path, de->d_name);
+            void *mbuf = NULL;
+            size_t mlen = 0;
+            if (ivpack_read_entry_file(ipath, "manifest", &mbuf, &mlen) == 0 && mbuf) {
+                invfs_codec_register_pack_mem(ipath, (const uint8_t *)mbuf, mlen, NULL);
+                free(mbuf);
+            }
+            continue;
+        }
+
         if (nl < 11 || strcmp(de->d_name + nl - 10, ".codecpack") != 0)
             continue;
         if (plen + 9 + 1 > sizeof path) continue;    /* "/manifest" */
@@ -1864,6 +1915,12 @@ static const char *pack_host_dir(pack_entry *p)
     if (!p->origin_vol) return p->dir;
     if (p->mat_ok == 1) return p->mat_dir;
     if (invfs_no_autopack()) return NULL;
+    /* ADR-007: .ivpack files are self-contained and run directly from RAM */
+    if (ivpack_is_archive_file(p->dir)) {
+        snprintf(p->mat_dir, sizeof p->mat_dir, "%s", p->dir);
+        p->mat_ok = 1;
+        return p->mat_dir;
+    }
     if (invfs_vol_pack_materialize(p->origin_vol, p->dir,
                                    staged, sizeof staged) != 0)
         return NULL;

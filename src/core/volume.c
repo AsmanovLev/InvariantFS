@@ -28,12 +28,21 @@
 #define _GNU_SOURCE
 #endif
 
+#include <time.h>
 #include "perf_counters.h"
+
+static inline double vol_now_sec(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+}
 #include "volume_internal.h"
 #include "vol_metabuf.h"
 #include "vol_delta.h"
 #include "vol_spt0.h"
 #include "vol_anchor.h"
+#include "ivpack_loader.h"
 #ifdef INVFS_CORRUPT_DEBUG
 #include <stdarg.h>
 #ifndef _WIN32
@@ -919,20 +928,19 @@ static void probe_rt30(invfs_volume *v)
  * an os/arch mismatch skips silently-or-loudly (the register call
  * logs), and NEVER fails the open. Runs at the end of vol_open_inner,
  * when reads already work. */
-static void vol_load_volume_packs(invfs_volume *v)
+static int vol_scan_pack_dir(invfs_volume *v, const char *packdir)
 {
-    static const char *packdir = ".invariantfs/codecpacks";
     int cap = 64, n = 0, i, loaded = 0;
     invfs_dirent *ents = NULL;
     for (;;) {
         free(ents);
         ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
         if (!ents)
-            return;
+            return 0;
         n = vol_list_dir(v, packdir, ents, cap);
         if (n < 0) {
             free(ents);
-            return;   /* no store on this volume: the common case */
+            return 0;
         }
         if (n < cap)
             break;
@@ -941,35 +949,67 @@ static void vol_load_volume_packs(invfs_volume *v)
     for (i = 0; i < n; i++) {
         char nm[256];
         size_t nl;
-        char mpath[320];
-        /* vol_list_dir returns directory names with a trailing '/'
-         * (anchor convention); strip it before the suffix match. */
         snprintf(nm, sizeof nm, "%s", ents[i].name);
         nl = strlen(nm);
         while (nl && nm[nl - 1] == '/')
             nm[--nl] = '\0';
-        uint64_t ino;
-        uint8_t *buf = NULL;
-        size_t blen = 0;
-        char dirlabel[352];
-        if (nl < 11 || strcmp(nm + nl - 10, ".codecpack") != 0)
-            continue;
-        if (snprintf(mpath, sizeof mpath, "%s/%s/manifest", packdir,
-                     nm) >= (int)sizeof mpath)
-            continue;
-        ino = vol_find(v, mpath);
-        if (!ino)
-            continue;
-        if (vol_read_file(v, ino, &buf, &blen) != 0 || !buf) {
-            free(buf);
+
+        /* ADR-007: direct .ivpack files */
+        if (nl >= 7 && strcmp(nm + nl - 7, ".ivpack") == 0) {
+            char fpath[352];
+            snprintf(fpath, sizeof fpath, "%s/%s", packdir, nm);
+            uint64_t ino = vol_find(v, fpath);
+            if (ino) {
+                uint8_t *buf = NULL;
+                size_t blen = 0;
+                if (vol_read_file(v, ino, &buf, &blen) == 0 && buf) {
+                    const uint8_t *mdata = NULL;
+                    size_t mlen = 0;
+                    if (ivpack_find_entry_mem(buf, blen, "manifest", &mdata, &mlen, NULL, 0) == 0 && mdata) {
+                        if (invfs_codec_register_pack_mem(fpath, mdata, mlen, v) == 0)
+                            loaded++;
+                    }
+                    free(buf);
+                }
+            }
             continue;
         }
-        snprintf(dirlabel, sizeof dirlabel, "%s/%s", packdir, nm);
-        if (invfs_codec_register_pack_mem(dirlabel, buf, blen, v) == 0)
-            loaded++;
-        free(buf);
+
+        /* Legacy .codecpack directories */
+        if (nl >= 11 && strcmp(nm + nl - 10, ".codecpack") == 0) {
+            char mpath[352], dirlabel[352];
+            if (snprintf(mpath, sizeof mpath, "%s/%s/manifest", packdir, nm) < (int)sizeof mpath) {
+                uint64_t ino = vol_find(v, mpath);
+                if (ino) {
+                    uint8_t *buf = NULL;
+                    size_t blen = 0;
+                    if (vol_read_file(v, ino, &buf, &blen) == 0 && buf) {
+                        snprintf(dirlabel, sizeof dirlabel, "%s/%s", packdir, nm);
+                        if (invfs_codec_register_pack_mem(dirlabel, buf, blen, v) == 0)
+                            loaded++;
+                        free(buf);
+                    }
+                }
+            }
+        }
     }
     free(ents);
+    return loaded;
+}
+
+static void vol_load_volume_packs(invfs_volume *v)
+{
+    static const char *subdirs[] = {
+        ".invariantfs/packs/containers",
+        ".invariantfs/packs/codecs",
+        ".invariantfs/packs/helpers",
+        ".invariantfs/packs",
+        ".invariantfs/codecpacks",
+    };
+    int loaded = 0;
+    for (size_t s = 0; s < sizeof(subdirs) / sizeof(subdirs[0]); s++) {
+        loaded += vol_scan_pack_dir(v, subdirs[s]);
+    }
     if (loaded)
         fprintf(stderr, "vol: %d pack(s) loaded from this volume's"
                 " .invariantfs\n", loaded);
@@ -977,6 +1017,8 @@ static void vol_load_volume_packs(invfs_volume *v)
 
 static invfs_volume *vol_open_inner(const char *path, int *err_out)
 {
+    double t_open_start = vol_now_sec();
+    double t_after_sb = 0, t_after_mbuf = 0, t_after_delta = 0, t_after_pba = 0, t_after_cpacks = 0;
     int dummy_err = 0;
     int *err = err_out ? err_out : &dummy_err;
     char devbuf[64];
@@ -1368,10 +1410,12 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * is deliberately NOT the same answer as "absent" -- see
      * vol_anchor.c. Only a v3 volume probes: a v2 volume has no RT30 or
      * SPT0 to mirror and its tail is never touched. */
+    t_after_sb = vol_now_sec();
     anchor_probe(v, NULL);
     if (mbuf_rt30_load(v) < 0) { *err = -6; goto fail; }
     probe_rt30(v);
     mbuf_init(v);
+    t_after_mbuf = vol_now_sec();
     /* WP-M5: skip the WP-M2 bootstrap pool (see ready in
      * vol_btree.c) -- its cursor resets every open, so reusing it would
      * let a COW write clobber a live page from a previous session. */
@@ -1391,6 +1435,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * this only reconstructs the recent tier so a crash/remount keeps
      * it. A torn tail is truncated inside vol_delta_mount. */
     if (vol_delta_mount(v) != 0) { *err = -6; goto fail; }
+    t_after_delta = vol_now_sec();
     /* WP-M16: load the save-point descriptor if one exists. */
     if (spt0_load(v) < 0) { *err = -6; goto fail; }
     if (!invfs_sweep_ui_active())
@@ -1574,6 +1619,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * between open and that first use, and a retire's -1 on a
      * never-counted record would drive a live sharer's count to zero. */
     pba_ref_ensure(v);
+    t_after_pba = vol_now_sec();
     *err = 0;
     /* Unclean shutdown. Reading always works -- that is how you find out
      * what survived. For WRITES the old behavior was a hard latch: every
@@ -1616,6 +1662,14 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     if (v->st.degraded)
         v->needs_recovery = 1;   /* a degraded mount is always read-only */
     vol_load_volume_packs(v);
+    t_after_cpacks = vol_now_sec();
+    fprintf(stderr, "[perf-trace] vol_open(%s): total=%.3fs (sb=%.3fs, mbuf=%.3fs, delta=%.3fs, pba_ref=%.3fs, cpacks=%.3fs)\n",
+            real, t_after_cpacks - t_open_start,
+            t_after_sb - t_open_start,
+            t_after_mbuf - t_after_sb,
+            t_after_delta - t_after_mbuf,
+            t_after_pba - t_after_delta,
+            t_after_cpacks - t_after_pba);
     return v;
 fail:
     vol_delta_close(v);   /* WP-M10: free any replay index (no-op if none) */

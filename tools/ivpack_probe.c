@@ -22,17 +22,26 @@
 #include <string.h>
 
 #include "include/ivpack_api.h"
+#include "core/ivpack_loader.h"
 
 static void *load(const char *path)
 {
     void *h = NULL;
 
+    if (ivpack_is_archive_file(path)) {
 #ifdef LM_ID_NEWLM
-    /* The daemon loads into an isolated link map; do the same so the suite
-     * covers that path (and falls back to dlopen exactly like the daemon). */
-    h = dlmopen(LM_ID_NEWLM, path, RTLD_NOW | RTLD_LOCAL);
+        h = ivpack_dlmopen(path, NULL, LM_ID_NEWLM, RTLD_NOW | RTLD_LOCAL);
+#else
+        h = ivpack_dlmopen(path, NULL, 0, RTLD_NOW | RTLD_LOCAL);
 #endif
-    if (!h) h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    } else {
+#ifdef LM_ID_NEWLM
+        /* The daemon loads into an isolated link map; do the same so the suite
+         * covers that path (and falls back to dlopen exactly like the daemon). */
+        h = dlmopen(LM_ID_NEWLM, path, RTLD_NOW | RTLD_LOCAL);
+#endif
+        if (!h) h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    }
     if (!h) fprintf(stderr, "ivpack-probe: load %s: %s\n", path, dlerror());
     return h;
 }
