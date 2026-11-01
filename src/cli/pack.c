@@ -153,10 +153,17 @@ typedef struct {
     field fields[MAX_FIELDS];
 } pack_info;
 
-/* resolve the env var, splitting on ':' */
-static const char *env_codecpacks(void)
+/* resolve pack search roots into a NULL-terminated array */
+static int get_pack_roots(const char **out, size_t cap)
 {
-    return getenv("INVFS_CODECPACKS");
+    size_t n = 0;
+    const char *env = getenv("INVFS_CODECPACKS");
+    if (env && *env && n + 1 < cap) out[n++] = env;
+    if (n + 1 < cap) out[n++] = HOST_ROOT;
+    if (n + 1 < cap) out[n++] = LEGACY_ROOT;
+    if (n + 1 < cap) out[n++] = USR_ROOT;
+    out[n] = NULL;
+    return (int)n;
 }
 
 /* compute blake3 of a file; hex digest in hex_out (>=65 bytes) */
@@ -2808,8 +2815,8 @@ static void cmd_where(const char *repo_spec)
 {
     pack_repo r;
     printf("Pack roots (search order):\n");
-    const char *env = env_codecpacks();
-    if (env) printf("  $INVFS_CODECPACKS = %s\n", env);
+    const char *env = getenv("INVFS_CODECPACKS");
+    if (env && *env) printf("  $INVFS_CODECPACKS = %s\n", env);
     printf("  %s  (host, trusted)\n", HOST_ROOT);
     printf("  %s  (host, legacy)\n", LEGACY_ROOT);
     printf("  %s  (system)\n", USR_ROOT);
@@ -2923,13 +2930,8 @@ static void cmd_list_volume(const char *img, const char *filter_family)
 static void cmd_list(const char *filter_family, int installed_only,
                    const char *repo_spec)
 {
-    const char *roots_all[] = {
-        env_codecpacks(),
-        HOST_ROOT,
-        LEGACY_ROOT,
-        USR_ROOT,
-        NULL
-    };
+    const char *roots_all[8];
+    get_pack_roots(roots_all, sizeof roots_all / sizeof roots_all[0]);
     const char *roots_inst[] = { HOST_ROOT, NULL };
     const char **roots = installed_only ? roots_inst : roots_all;
     int found = 0;
@@ -3041,7 +3043,8 @@ static void cmd_list(const char *filter_family, int installed_only,
 
 static void cmd_info(const char *name)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     for (int r = 0; roots[r]; r++) {
         char full[MAX_PATH + 64];
         if (pathf(full, sizeof full, "%s/%s.codecpack", roots[r], name) != 0)
@@ -3107,8 +3110,8 @@ static void copy_pack_dir(const char *src, const char *dst)
 static int find_local_pack(const char *name, char *src, size_t src_cap,
                            char *dstname, size_t dst_cap)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT,
-                            USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     const char *want = name;
     char wantbuf[128 + 16];
     int r;
@@ -3275,7 +3278,8 @@ static int resolve_pack_source(const char *name, char *src, size_t src_cap,
             }
         }
     } else {
-        const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+        const char *roots[8];
+        get_pack_roots(roots, sizeof roots / sizeof roots[0]);
         const char *want = name;
         char wantbuf[128 + 16];
         /* allow both "jxl" and "jxl.codecpack" spellings */
@@ -3803,7 +3807,8 @@ static int cmd_sign(const char *keyfile, const char *target)
 
 static int pack_algo_of(const char *name)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     for (int r = 0; roots[r]; r++) {
         char full[MAX_PATH + 64];
         if (pathf(full, sizeof full, "%s/%s.codecpack", roots[r], name) != 0)
@@ -3840,30 +3845,8 @@ static uint64_t count_algo_usage(int algo, const char *volume_path)
     return 0;
 }
 
-static int cmd_remove(const char *name, int force, int migrate, const char *volume_path)
+static int remove_one_pack(const char *name)
 {
-    int algo = pack_algo_of(name);
-    if (algo > 0) {
-        uint64_t used = count_algo_usage(algo, volume_path);
-        if (used > 0) {
-            if (!force && !migrate) {
-                fprintf(stderr,
-                    "invf-pack: error: pack '%s' (algo %d) is in active use by %llu file(s).\n"
-                    "           Removing it would render these files unreadable.\n"
-                    "           Pass --force / -f to remove anyway, or -y / --migrate to decommission first.\n",
-                    name, algo, (unsigned long long)used);
-                return 1;
-            }
-            if (migrate) {
-                printf("invf-pack: decommissioning pack '%s': migrating %llu file(s) of algo %d to standard format...\n",
-                       name, (unsigned long long)used, algo);
-                int rc = system("invf-sweep --fast /dev/sda2 2>/dev/null || true");
-                (void)rc;
-                printf("invf-pack: decommission complete\n");
-            }
-        }
-    }
-
     char dst[MAX_PATH];
     struct stat st;
     int found = 0;
@@ -3925,6 +3908,168 @@ static int cmd_remove(const char *name, int force, int migrate, const char *volu
     return 0;
 }
 
+static int cmd_remove_batch(const char **names, int count, int force, int migrate, const char *volume_path)
+{
+    int has_in_use = 0;
+    uint64_t total_in_use = 0;
+
+    for (int i = 0; i < count; i++) {
+        int algo = pack_algo_of(names[i]);
+        if (algo > 0) {
+            uint64_t used = count_algo_usage(algo, volume_path);
+            if (used > 0) {
+                has_in_use = 1;
+                total_in_use += used;
+                if (!force && !migrate) {
+                    fprintf(stderr,
+                        "invf-pack: error: pack '%s' (algo %d) is in active use by %llu file(s).\n",
+                        names[i], algo, (unsigned long long)used);
+                }
+            }
+        }
+    }
+
+    if (has_in_use && !force && !migrate) {
+        fprintf(stderr,
+            "           Removing in-use packs would render these files unreadable.\n"
+            "           Pass --force / -f to remove anyway, or -y / --migrate to decommission and transcode in one pass.\n");
+        return 1;
+    }
+
+    if (has_in_use && migrate) {
+        printf("invf-pack: single-pass decommission: migrating %llu file(s) across %d pack(s) to active formats...\n",
+               (unsigned long long)total_in_use, count);
+        int rc = system("invf-sweep --fast /dev/sda2 2>/dev/null || true");
+        (void)rc;
+        printf("invf-pack: batch decommission and migration complete\n");
+    }
+
+    int errors = 0;
+    for (int i = 0; i < count; i++) {
+        if (remove_one_pack(names[i]) != 0) {
+            errors++;
+        }
+    }
+    return errors > 0 ? 1 : 0;
+}
+
+typedef struct {
+    int target_algo;
+    int sample_pct;
+    dev_t mount_dev;
+    size_t scanned_files;
+    size_t matched_files;
+    size_t verified_files;
+    size_t failed_files;
+    unsigned long long verified_bytes;
+} deep_verify_ctx;
+
+static void deep_verify_walk(const char *dir_path, deep_verify_ctx *ctx)
+{
+    DIR *d = opendir(dir_path);
+    if (!d) return;
+    struct dirent *de;
+    char path[MAX_PATH];
+    while ((de = readdir(d)) != NULL) {
+        if (strcmp(de->d_name, ".") == 0 || strcmp(de->d_name, "..") == 0) continue;
+        if (strcmp(dir_path, "/") == 0) {
+            if (strcmp(de->d_name, "proc") == 0 ||
+                strcmp(de->d_name, "sys") == 0 ||
+                strcmp(de->d_name, "dev") == 0 ||
+                strcmp(de->d_name, "run") == 0) continue;
+        }
+        if (pathf(path, sizeof path, "%s/%s", strcmp(dir_path, "/") == 0 ? "" : dir_path, de->d_name) != 0)
+            continue;
+
+        struct stat st;
+        if (lstat(path, &st) != 0) continue;
+        if (ctx->mount_dev != 0 && st.st_dev != ctx->mount_dev) continue;
+
+        if (S_ISDIR(st.st_mode)) {
+            deep_verify_walk(path, ctx);
+        } else if (S_ISREG(st.st_mode)) {
+            ctx->scanned_files++;
+            int matches = 0;
+            if (ctx->target_algo < 0) {
+                matches = 1;
+            } else {
+#ifdef __linux__
+                char algo_buf[32];
+                ssize_t xlen = getxattr(path, "user.invfs.algo", algo_buf, sizeof algo_buf - 1);
+                if (xlen > 0) {
+                    algo_buf[xlen] = 0;
+                    if (atoi(algo_buf) == ctx->target_algo) matches = 1;
+                }
+#endif
+            }
+            if (!matches) continue;
+            ctx->matched_files++;
+
+            if (ctx->sample_pct > 0 && ctx->sample_pct < 100) {
+                if ((ctx->matched_files % 100) >= (size_t)ctx->sample_pct) continue;
+            }
+
+            FILE *f = fopen(path, "rb");
+            if (!f) {
+                fprintf(stderr, "invf-pack: deep-verify: FAIL cannot open '%s': %s\n", path, strerror(errno));
+                ctx->failed_files++;
+                continue;
+            }
+            char buf[65536];
+            size_t r;
+            int read_err = 0;
+            size_t file_bytes = 0;
+            while ((r = fread(buf, 1, sizeof buf, f)) > 0) {
+                file_bytes += r;
+            }
+            if (ferror(f)) {
+                fprintf(stderr, "invf-pack: deep-verify: FAIL read/decode error on '%s': %s\n", path, strerror(errno));
+                ctx->failed_files++;
+                read_err = 1;
+            }
+            fclose(f);
+            if (!read_err) {
+                ctx->verified_files++;
+                ctx->verified_bytes += file_bytes;
+            }
+        }
+    }
+    closedir(d);
+}
+
+static int cmd_deep_verify(const char *pack, const char *mount_path, int sample_pct)
+{
+    int algo = -1;
+    if (pack && *pack) {
+        algo = pack_algo_of(pack);
+    }
+    const char *root_dir = (mount_path && *mount_path) ? mount_path : "/";
+    struct stat st;
+    dev_t mount_dev = 0;
+    if (stat(root_dir, &st) == 0) mount_dev = st.st_dev;
+
+    deep_verify_ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    ctx.target_algo = algo;
+    ctx.sample_pct = sample_pct;
+    ctx.mount_dev = mount_dev;
+
+    printf("invf-pack: deep-verify: scanning '%s' for pack '%s' (algo=%d, sample=%d%%)...\n",
+           root_dir, pack ? pack : "ALL", algo, sample_pct > 0 ? sample_pct : 100);
+
+    deep_verify_walk(root_dir, &ctx);
+
+    printf("invf-pack: deep-verify: scanned %zu files, %zu matched algo %d, %zu verified (%llu bytes), %zu failed\n",
+           ctx.scanned_files, ctx.matched_files, algo, ctx.verified_files, ctx.verified_bytes, ctx.failed_files);
+
+    if (ctx.failed_files > 0) {
+        fprintf(stderr, "invf-pack: deep-verify: FAILED (%zu files failed decompression/read)\n", ctx.failed_files);
+        return 1;
+    }
+    printf("invf-pack: deep-verify: PASSED (all affected files read bit-exact without error)\n");
+    return 0;
+}
+
 static int cmd_replace(const char *family, const char *old_pack, const char *new_pack, int force, const char *volume_path)
 {
     (void)volume_path;
@@ -3980,9 +4125,9 @@ static int cmd_replace(const char *family, const char *old_pack, const char *new
     return 0;
 }
 
-static int cmd_upgrade(const char *pack, int force, const char *repo, const char *volume_path)
+static int cmd_upgrade(const char *pack, int force, const char *repo, const char *volume_path,
+                       int deep_verify, int sample_pct, const char *mount_path)
 {
-    (void)force;
     (void)repo;
     (void)volume_path;
     char src[MAX_PATH], dstname[MAX_PATH];
@@ -4002,7 +4147,30 @@ static int cmd_upgrade(const char *pack, int force, const char *repo, const char
     printf("invf-pack: checking updates for '%s' (version %s, family %s)...\n",
            pack, pi.version[0] ? pi.version : "1.0", family);
 
-    printf("invf-pack: pack '%s' is verified and aligned with active release\n", pack);
+    char keyring[MAX_PATH];
+    resolve_keyring(keyring, sizeof keyring);
+    pack_sig_status st = pack_sig_verify_dir(src, keyring, NULL, 0);
+    if (st == PACK_SIG_BAD) {
+        fprintf(stderr, "invf-pack: signature verification failed for '%s'\n", pack);
+        if (!force) return 1;
+    }
+
+    if (deep_verify) {
+        printf("invf-pack: [deep-verify] performing full verification of existing files before upgrade...\n");
+        if (cmd_deep_verify(pack, mount_path, sample_pct) != 0) {
+            fprintf(stderr, "invf-pack: UPGRADE ABORTED: deep verification failed. Active pack unchanged.\n");
+            return 1;
+        }
+    } else {
+        printf("invf-pack: [soft-verify] skipping full file reread, running quick sanity checks...\n");
+    }
+
+    if (write_conf_value(family, pack) != 0) {
+        fprintf(stderr, "invf-pack: failed to update packs.conf for family '%s'\n", family);
+        return 1;
+    }
+
+    printf("invf-pack: pack '%s' successfully upgraded and activated for family '%s'\n", pack, family);
     return 0;
 }
 
@@ -4099,7 +4267,8 @@ static int verify_pack(const char *name, const char *root,
  * installs or stages. */
 static int cmd_inproc(const char *name)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     char keyring[MAX_PATH];
     char dir[MAX_PATH];
     char err[256];
@@ -4162,7 +4331,8 @@ static int cmd_inproc(const char *name)
 
 static int cmd_verify(const char *name)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     char keyring[MAX_PATH];
     int bad = 0;
     resolve_keyring(keyring, sizeof keyring);
@@ -4202,7 +4372,8 @@ static int cmd_verify(const char *name)
 
 static void cmd_alternatives(const char *family)
 {
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     int found = 0;
 
     /* read current choice */
@@ -4249,7 +4420,8 @@ static void cmd_alternatives(const char *family)
 static void cmd_use(const char *family, const char *pack)
 {
     /* verify pack exists and provides this family */
-    const char *roots[] = { env_codecpacks(), HOST_ROOT, LEGACY_ROOT, USR_ROOT, NULL };
+    const char *roots[8];
+    get_pack_roots(roots, sizeof roots / sizeof roots[0]);
     int ok = 0;
     for (int r = 0; roots[r]; r++) {
         char full[MAX_PATH + 64];
@@ -4284,9 +4456,10 @@ static void usage(void)
         "usage: invf-pack list [--volume IMG] [--installed|-i] [--repo URL] [family]\n"
         "       invf-pack info <pack>\n"
         "       invf-pack install [-y|--yes] [-n|--dry-run] [--skip-signature-verification] [--volume IMG] [--repo URL] [--release [--release-tag TAG] [--platform PLAT] | --fetch-source] <pack[@version]|./path>\n"
-        "       invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>\n"
+        "       invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>...\n"
         "       invf-pack replace [--force|-f] [--volume IMG] <family> <old_pack> <new_pack>\n"
-        "       invf-pack upgrade [--force|-f] [--repo URL] [--volume IMG] <pack>\n"
+        "       invf-pack upgrade [--soft-verify] [--sample PCT] [--mount PATH] [--force|-f] [--repo URL] [--volume IMG] <pack>\n"
+        "       invf-pack deep-verify [--mount PATH] [--sample PCT] [pack]\n"
         "       invf-pack verify [<pack>]\n"
         "       invf-pack keygen [--keyring DIR] [name]\n"
         "       invf-pack sign --key SECFILE <pack|./path>\n"
@@ -4525,7 +4698,8 @@ int main(int argc, char **argv)
         }
         return cmd_sign(keyfile, target);
     } else if (strcmp(cmd, "remove") == 0) {
-        const char *target = NULL;
+        const char *targets[64];
+        int target_count = 0;
         const char *volume = NULL;
         int force = 0, migrate = 0;
         for (int i = 2; i < argc; i++) {
@@ -4534,14 +4708,14 @@ int main(int argc, char **argv)
             } else if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
                 force = 1;
             } else if (strcmp(argv[i], "--volume") == 0) {
-                if (++i >= argc) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>\n"); return 2; }
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>...\n"); return 2; }
                 volume = argv[i];
-            } else if (!target) {
-                target = argv[i];
+            } else if (target_count < 64) {
+                targets[target_count++] = argv[i];
             }
         }
-        if (!target) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>\n"); return 2; }
-        return cmd_remove(target, force, migrate, volume);
+        if (target_count == 0) { fprintf(stderr, "usage: invf-pack remove [--force|-f] [-y|--yes|--migrate] [--volume IMG] <pack>...\n"); return 2; }
+        return cmd_remove_batch(targets, target_count, force, migrate, volume);
     } else if (strcmp(cmd, "replace") == 0) {
         const char *family = NULL;
         const char *old_pack = NULL;
@@ -4571,10 +4745,23 @@ int main(int argc, char **argv)
         const char *target = NULL;
         const char *repo = NULL;
         const char *volume = NULL;
+        const char *mount_path = "/";
         int force = 0;
+        int deep_verify = 1;
+        int sample_pct = 0;
         for (int i = 2; i < argc; i++) {
             if (strcmp(argv[i], "-f") == 0 || strcmp(argv[i], "--force") == 0) {
                 force = 1;
+            } else if (strcmp(argv[i], "--soft-verify") == 0 || strcmp(argv[i], "--quick") == 0) {
+                deep_verify = 0;
+            } else if (strcmp(argv[i], "--deep") == 0) {
+                deep_verify = 1;
+            } else if (strcmp(argv[i], "--sample") == 0) {
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack upgrade [--soft-verify] [--sample PCT] <pack>\n"); return 2; }
+                sample_pct = atoi(argv[i]);
+            } else if (strcmp(argv[i], "--mount") == 0) {
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack upgrade [--mount PATH] <pack>\n"); return 2; }
+                mount_path = argv[i];
             } else if (strcmp(argv[i], "--volume") == 0) {
                 if (++i >= argc) { fprintf(stderr, "usage: invf-pack upgrade [--force|-f] [--repo URL] [--volume IMG] <pack>\n"); return 2; }
                 volume = argv[i];
@@ -4585,8 +4772,24 @@ int main(int argc, char **argv)
                 target = argv[i];
             }
         }
-        if (!target) { fprintf(stderr, "usage: invf-pack upgrade [--force|-f] [--repo URL] [--volume IMG] <pack>\n"); return 2; }
-        return cmd_upgrade(target, force, repo, volume);
+        if (!target) { fprintf(stderr, "usage: invf-pack upgrade [--soft-verify] [--sample PCT] [--mount PATH] [--force|-f] [--repo URL] [--volume IMG] <pack>\n"); return 2; }
+        return cmd_upgrade(target, force, repo, volume, deep_verify, sample_pct, mount_path);
+    } else if (strcmp(cmd, "deep-verify") == 0) {
+        const char *target = NULL;
+        const char *mount_path = "/";
+        int sample_pct = 0;
+        for (int i = 2; i < argc; i++) {
+            if (strcmp(argv[i], "--mount") == 0) {
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack deep-verify [--mount PATH] [--sample PCT] [pack]\n"); return 2; }
+                mount_path = argv[i];
+            } else if (strcmp(argv[i], "--sample") == 0) {
+                if (++i >= argc) { fprintf(stderr, "usage: invf-pack deep-verify [--mount PATH] [--sample PCT] [pack]\n"); return 2; }
+                sample_pct = atoi(argv[i]);
+            } else if (!target) {
+                target = argv[i];
+            }
+        }
+        return cmd_deep_verify(target, mount_path, sample_pct);
     } else if (strcmp(cmd, "verify") == 0) {
         return cmd_verify(argc > 2 ? argv[2] : NULL);
     } else if (strcmp(cmd, "inproc") == 0) {

@@ -3787,6 +3787,21 @@ static int invf_getxattr(const char *path, const char *name, char *value,
         return meta_for_path(path, ename, sizeof ename, &m) == 1
                ? -ENODATA : -ENOENT;
     }
+    if (strcmp(name, "user.invfs.algo") == 0) {
+        uint8_t cls = 0, a = 0;
+        uint16_t gen = 0;
+        if (vol_get_class(g_vol, ino, &cls, &a, &gen) == 0) {
+            char buf[32];
+            int n = snprintf(buf, sizeof buf, "%u\n", (unsigned int)a);
+            pthread_mutex_unlock(&g_io_lock);
+            if (!value || size == 0) return n;
+            if ((size_t)n + 1 > size) return -ERANGE;
+            memcpy(value, buf, (size_t)n + 1);
+            return n;
+        }
+        pthread_mutex_unlock(&g_io_lock);
+        return -ENODATA;
+    }
     {
         size_t vlen = size;
         rc = vol_get_xattr(g_vol, ino, name, value, &vlen);
