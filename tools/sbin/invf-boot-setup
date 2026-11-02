@@ -97,6 +97,13 @@ if [ -z "$ROOT_DEV" ]; then
 fi
 
 [ -n "$ROOT_DEV" ] || die "could not auto-detect root device; specify with --root <device>"
+
+# Normalize ROOT_DEV
+case "$ROOT_DEV" in
+    UUID=*|PARTUUID=*) ;;
+    /dev/*) ;;
+    *) ROOT_DEV="/dev/$ROOT_DEV" ;;
+esac
 info "detected root device: $ROOT_DEV"
 
 # 2. Detect Dual-Device dev1 if not set
@@ -167,8 +174,53 @@ if [ "$DRY_RUN" = 0 ]; then
 fi
 
 # 6. Build Kernel Command Line
-kcmd="root=$ROOT_DEV rootfstype=invfs rw"
-[ -n "$DEV1_DEV" ] && kcmd="$kcmd invfs.dev1=$DEV1_DEV"
+root_part_uuid=""
+if command -v blkid >/dev/null 2>&1 && [ -b "$ROOT_DEV" ]; then
+    root_part_uuid=$(blkid -s UUID -o value "$ROOT_DEV" 2>/dev/null || true)
+fi
+
+root_invfs_uuid=""
+if command -v invf-fuse >/dev/null 2>&1 && [ -b "$ROOT_DEV" ]; then
+    root_invfs_uuid=$(invf-fuse --probe-uuid "$ROOT_DEV" 2>/dev/null || true)
+fi
+
+if [ -n "$root_part_uuid" ]; then
+    kcmd="root=UUID=$root_part_uuid rootfstype=invfs rw"
+    info "using root partition UUID: $root_part_uuid"
+else
+    kcmd="root=$ROOT_DEV rootfstype=invfs rw"
+fi
+
+if [ -n "$root_invfs_uuid" ]; then
+    kcmd="$kcmd invfs.raw_uuid=$root_invfs_uuid"
+    info "using InvariantFS volume UUID: $root_invfs_uuid"
+fi
+
+if [ -n "$DEV1_DEV" ]; then
+    case "$DEV1_DEV" in
+        UUID=*|PARTUUID=*) ;;
+        /dev/*) ;;
+        *) DEV1_DEV="/dev/$DEV1_DEV" ;;
+    esac
+    dev1_part_uuid=""
+    if command -v blkid >/dev/null 2>&1 && [ -b "$DEV1_DEV" ]; then
+        dev1_part_uuid=$(blkid -s UUID -o value "$DEV1_DEV" 2>/dev/null || true)
+    fi
+    if [ -n "$dev1_part_uuid" ]; then
+        kcmd="$kcmd invfs.dev1=UUID=$dev1_part_uuid"
+        info "using dev1 partition UUID: $dev1_part_uuid"
+    else
+        kcmd="$kcmd invfs.dev1=$DEV1_DEV"
+    fi
+    dev1_invfs_uuid=""
+    if command -v invf-fuse >/dev/null 2>&1 && [ -b "$DEV1_DEV" ]; then
+        dev1_invfs_uuid=$(invf-fuse --probe-uuid "$DEV1_DEV" 2>/dev/null || true)
+    fi
+    if [ -n "$dev1_invfs_uuid" ]; then
+        kcmd="$kcmd invfs.dev1_uuid=$dev1_invfs_uuid"
+        info "using dev1 InvariantFS volume UUID: $dev1_invfs_uuid"
+    fi
+fi
 [ -n "$EXTRA_CMDLINE" ] && kcmd="$kcmd $EXTRA_CMDLINE"
 
 # 7. Write grub.cfg
