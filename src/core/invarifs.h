@@ -14,10 +14,10 @@
 #include <string.h>
 
 #ifndef INVFS_VERSION_STRING
-#define INVFS_VERSION_STRING "v0.6.7"
+#define INVFS_VERSION_STRING "v0.6.8"
 #endif
 #ifndef INVFS_BUILD_DATE
-#define INVFS_BUILD_DATE "2026-11-01"
+#define INVFS_BUILD_DATE "2026-11-02"
 #endif
 #ifndef INVFS_AUTHOR_NAME
 #define INVFS_AUTHOR_NAME "Lev_Asmanov"
