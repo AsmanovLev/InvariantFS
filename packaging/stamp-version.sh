@@ -43,7 +43,7 @@ if [ -f packaging/debian/changelog ]; then
     if ! head -n 1 packaging/debian/changelog | grep -q "($VER-"; then
         date_str=$(date -R 2>/dev/null || date)
         tmpfile=$(mktemp)
-        printf 'invfs (%s-1) unstable; urgency=medium\n\n  * Release %s\n\n -- InvariantFS Developers <invfs@localhost>  %s\n\n' "$VER" "$TAG" "$date_str" > "$tmpfile"
+        printf 'invfs (%s-1) unstable; urgency=medium\n\n  * Release %s\n\n  -- InvariantFS Developers <invfs@localhost>  %s\n\n' "$VER" "$TAG" "$date_str" > "$tmpfile"
         cat packaging/debian/changelog >> "$tmpfile"
         mv "$tmpfile" packaging/debian/changelog
     fi

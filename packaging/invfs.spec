@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.6.9
+Version:        0.6.10
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
