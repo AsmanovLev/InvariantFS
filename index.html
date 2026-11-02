@@ -1,217 +1,69 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>InvariantFS — Semantic Content-Addressed Filesystem</title>
-  <meta name="description" content="A semantic, content-addressed Linux filesystem with bit-exact verification and native rootfs boot.">
+  <meta name="description" content="Семантическая файловая система с контентной адресацией, защитой данных decompress-and-compare и поддержкой загрузки Linux rootfs.">
   <style>
-    :root {
-      --bg: #e8e6e1;
-      --surface: #f2f0ec;
-      --surface-subtle: #dedcd7;
-      --border: #1a1a1a;
-      --border-light: #707070;
-      --text: #1a1a1a;
-      --text-muted: #4a4a46;
-      --accent: #204060;
-      --mono: ui-monospace, "SF Mono", "Cascadia Code", "Liberation Mono", Menlo, Consolas, monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    :root[data-theme="paper"] {
+      --bg: #e6e3dc;
+      --surface: #f0ede6;
+      --surface-subtle: #dcd8cf;
+      --border: #141414;
+      --border-light: #5a5a54;
+      --text: #141414;
+      --text-muted: #4a4a44;
+      --shadow: #141414;
+      --btn-bg: #e6e3dc;
+      --btn-hover: #141414;
+      --btn-hover-text: #e6e3dc;
+      --wire: #141414;
+    }
+
+    :root[data-theme="dark"] {
+      --bg: #111215;
+      --surface: #181a1f;
+      --surface-subtle: #22252c;
+      --border: #d0d2d8;
+      --border-light: #6e727e;
+      --text: #e4e6eb;
+      --text-muted: #9da1ad;
+      --shadow: #000000;
+      --btn-bg: #181a1f;
+      --btn-hover: #e4e6eb;
+      --btn-hover-text: #111215;
+      --wire: #d0d2d8;
     }
 
     * {
       box-sizing: border-box;
       margin: 0;
       padding: 0;
-      border-radius: 0 !important; /* E-Ink strict sharp edges */
+      border-radius: 0 !important;
     }
 
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: var(--sans);
-      line-height: 1.6;
+      font-family: ui-monospace, "SF Mono", "Cascadia Code", "Liberation Mono", Menlo, Monaco, Consolas, monospace;
+      line-height: 1.55;
       -webkit-font-smoothing: antialiased;
-      padding: 3.5rem 1.5rem;
+      padding: 2.5rem 1.5rem 4rem;
+      transition: background 0.15s ease, color 0.15s ease;
     }
 
     .container {
-      max-width: 740px;
+      max-width: 820px;
       margin: 0 auto;
     }
 
-    /* Top navigation */
-    nav {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      border-bottom: 2px solid var(--border);
-      padding-bottom: 1rem;
-      margin-bottom: 4rem;
-    }
-
-    .brand {
-      font-family: var(--mono);
-      font-size: 1.15rem;
-      font-weight: 700;
-      letter-spacing: -0.03em;
-      color: var(--text);
-      text-decoration: none;
-    }
-
-    .nav-links {
-      display: flex;
-      gap: 1.25rem;
-      flex-wrap: wrap;
-    }
-
-    .nav-links a {
-      font-family: var(--mono);
-      font-size: 0.88rem;
-      color: var(--text);
-      text-decoration: none;
-      border-bottom: 1px solid transparent;
-      transition: border-color 0.1s;
-    }
-
-    .nav-links a:hover {
-      border-bottom: 1px solid var(--border);
-    }
-
-    .nav-links a.tg {
-      font-weight: 700;
-    }
-
-    /* Hero */
-    .hero {
-      margin-bottom: 4rem;
-    }
-
-    .status-tag {
-      display: inline-block;
-      font-family: var(--mono);
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      padding: 0.2rem 0.5rem;
-      background: var(--border);
-      color: var(--bg);
-      margin-bottom: 1.5rem;
-    }
-
-    h1 {
-      font-size: 3.2rem;
-      font-weight: 800;
-      letter-spacing: -0.05em;
-      line-height: 1.05;
-      margin-bottom: 1.25rem;
-    }
-
-    .lead {
-      font-size: 1.15rem;
-      color: var(--text-muted);
-      max-width: 620px;
-      line-height: 1.6;
-      margin-bottom: 2.5rem;
-    }
-
-    /* Terminal installer box */
-    .install-bar {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 1rem;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      padding: 0.9rem 1.1rem;
-      margin-bottom: 4.5rem;
-      box-shadow: 2px 2px 0 var(--border);
-    }
-
-    .cmd-text {
-      font-family: var(--mono);
-      font-size: 0.95rem;
-      color: var(--text);
-      overflow-x: auto;
-      white-space: nowrap;
-    }
-
-    .prompt {
-      color: var(--border-light);
-      margin-right: 0.5rem;
-      user-select: none;
-    }
-
-    .copy-btn {
-      background: var(--bg);
-      color: var(--text);
-      border: 1px solid var(--border);
-      padding: 0.4rem 0.85rem;
-      font-family: var(--mono);
-      font-size: 0.8rem;
-      font-weight: 600;
-      cursor: pointer;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      flex-shrink: 0;
-      transition: background 0.1s, color 0.1s;
-    }
-
-    .copy-btn:hover {
-      background: var(--border);
-      color: var(--bg);
-    }
-
-    .copy-btn.copied {
-      background: var(--border);
-      color: var(--bg);
-    }
-
-    /* Section layout */
-    .section-label {
-      font-family: var(--mono);
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--text-muted);
-      margin-bottom: 1.5rem;
-      border-bottom: 1px dashed var(--border-light);
-      padding-bottom: 0.35rem;
-    }
-
-    .features {
-      display: grid;
-      grid-template-columns: 1fr;
-      gap: 2rem;
-      margin-bottom: 5rem;
-    }
-
-    .feature-item {
-      padding-left: 1.25rem;
-      border-left: 2px solid var(--border);
-    }
-
-    .feature-item h3 {
-      font-family: var(--mono);
-      font-size: 1.05rem;
-      font-weight: 700;
-      margin-bottom: 0.4rem;
-      letter-spacing: -0.02em;
-    }
-
-    .feature-item p {
-      font-size: 0.94rem;
-      color: var(--text-muted);
-      line-height: 1.55;
-    }
-
-    /* Quick Community Box */
-    .community-box {
-      border: 1px solid var(--border);
-      background: var(--surface);
-      padding: 1.5rem;
-      margin-bottom: 5rem;
-      box-shadow: 2px 2px 0 var(--border);
+    /* Chunky top bar */
+    .chunky-bar {
+      border-top: 3px solid var(--border);
+      border-bottom: 3px solid var(--border);
+      padding: 1.25rem 0;
+      margin-bottom: 3.5rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
@@ -219,141 +71,465 @@
       flex-wrap: wrap;
     }
 
-    .community-text h4 {
-      font-family: var(--mono);
-      font-size: 1rem;
-      margin-bottom: 0.25rem;
+    .site-title {
+      font-size: 2.1rem;
+      font-weight: 900;
+      letter-spacing: -0.05em;
+      line-height: 1;
+      text-transform: uppercase;
+      color: var(--text);
+      user-select: none;
     }
 
-    .community-text p {
-      font-size: 0.88rem;
+    .nav-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.9rem;
+      flex-wrap: wrap;
+      font-size: 0.82rem;
+    }
+
+    .nav-link {
+      color: var(--text);
+      text-decoration: none;
+      padding: 0.25rem 0.45rem;
+      border: 1px solid transparent;
+      transition: all 0.1s;
+    }
+
+    .nav-link:hover {
+      border-color: var(--border);
+      background: var(--surface);
+    }
+
+    .nav-link.bold {
+      font-weight: 700;
+      border: 1px solid var(--border);
+      background: var(--surface);
+    }
+
+    .btn-toggle {
+      background: var(--btn-bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      font-family: inherit;
+      font-size: 0.8rem;
+      font-weight: 700;
+      padding: 0.3rem 0.6rem;
+      cursor: pointer;
+      text-transform: uppercase;
+      box-shadow: 2px 2px 0 var(--border);
+      transition: all 0.1s;
+    }
+
+    .btn-toggle:hover {
+      background: var(--btn-hover);
+      color: var(--btn-hover-text);
+      box-shadow: 0 0 0 var(--border);
+      transform: translate(2px, 2px);
+    }
+
+    /* Hero */
+    .hero-text {
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      margin-bottom: 2.5rem;
+      max-width: 720px;
+      line-height: 1.65;
+      border-left: 3px solid var(--border);
+      padding-left: 1.25rem;
+    }
+
+    /* Terminal installer */
+    .install-bar {
+      border: 2px solid var(--border);
+      background: var(--surface);
+      padding: 1rem 1.25rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1rem;
+      margin-bottom: 3.5rem;
+      box-shadow: 4px 4px 0 var(--shadow);
+    }
+
+    .install-cmd {
+      font-size: 0.95rem;
+      overflow-x: auto;
+      white-space: nowrap;
+      color: var(--text);
+      font-weight: 600;
+    }
+
+    .install-cmd span.prompt {
+      color: var(--border-light);
+      user-select: none;
+      margin-right: 0.4rem;
+    }
+
+    .copy-btn {
+      background: var(--bg);
+      color: var(--text);
+      border: 2px solid var(--border);
+      padding: 0.4rem 0.9rem;
+      font-family: inherit;
+      font-size: 0.82rem;
+      font-weight: 800;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+      box-shadow: 2px 2px 0 var(--border);
+      transition: all 0.1s;
+    }
+
+    .copy-btn:hover {
+      background: var(--btn-hover);
+      color: var(--btn-hover-text);
+      box-shadow: 0 0 0 var(--border);
+      transform: translate(2px, 2px);
+    }
+
+    .copy-btn.copied {
+      background: var(--border);
+      color: var(--bg);
+      box-shadow: none;
+    }
+
+    /* ASCII / Schematic wire */
+    .diagram-box {
+      border: 1px dashed var(--border-light);
+      padding: 1rem;
+      margin-bottom: 3.5rem;
+      font-size: 0.78rem;
+      line-height: 1.35;
+      overflow-x: auto;
+      white-space: pre;
+      background: var(--surface);
       color: var(--text-muted);
     }
 
-    .tg-button {
-      display: inline-block;
-      font-family: var(--mono);
-      font-size: 0.85rem;
-      font-weight: 700;
-      text-decoration: none;
-      background: var(--border);
-      color: var(--bg);
-      border: 1px solid var(--border);
-      padding: 0.55rem 1.1rem;
-      transition: background 0.1s, color 0.1s;
+    /* Quirky boxes */
+    .section-label {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      font-weight: 800;
+      margin-bottom: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
     }
 
-    .tg-button:hover {
-      background: transparent;
-      color: var(--border);
+    .section-label::after {
+      content: "";
+      flex: 1;
+      height: 2px;
+      background: var(--border);
+    }
+
+    .grid-quirky {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 4rem;
+    }
+
+    .card {
+      border: 2px solid var(--border);
+      background: var(--surface);
+      padding: 1.25rem 1.4rem;
+      box-shadow: 3px 3px 0 var(--shadow);
+      transition: transform 0.1s, box-shadow 0.1s;
+    }
+
+    .card:hover {
+      transform: translate(-2px, -2px);
+      box-shadow: 5px 5px 0 var(--shadow);
+    }
+
+    .card-num {
+      font-size: 0.75rem;
+      font-weight: 800;
+      display: inline-block;
+      border: 1px solid var(--border);
+      padding: 0.15rem 0.4rem;
+      margin-bottom: 0.75rem;
+      background: var(--bg);
+    }
+
+    .card-title {
+      font-size: 1rem;
+      font-weight: 800;
+      margin-bottom: 0.45rem;
+      letter-spacing: -0.02em;
+      color: var(--text);
+    }
+
+    .card-body {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+      line-height: 1.55;
+    }
+
+    /* Community block */
+    .banner {
+      border: 2px solid var(--border);
+      background: var(--surface);
+      padding: 1.5rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+      margin-bottom: 4rem;
+      box-shadow: 4px 4px 0 var(--shadow);
+    }
+
+    .banner-text h3 {
+      font-size: 1.05rem;
+      font-weight: 800;
+      margin-bottom: 0.25rem;
+    }
+
+    .banner-text p {
+      font-size: 0.85rem;
+      color: var(--text-muted);
+    }
+
+    .tg-cta {
+      display: inline-block;
+      text-decoration: none;
+      font-size: 0.85rem;
+      font-weight: 800;
+      padding: 0.6rem 1.2rem;
+      border: 2px solid var(--border);
+      background: var(--border);
+      color: var(--bg);
+      box-shadow: 2px 2px 0 var(--shadow);
+      transition: all 0.1s;
+    }
+
+    .tg-cta:hover {
+      background: var(--bg);
+      color: var(--text);
+      box-shadow: 0 0 0 var(--shadow);
+      transform: translate(2px, 2px);
     }
 
     /* Footer */
     footer {
+      border-top: 2px solid var(--border);
+      padding-top: 1.75rem;
       display: flex;
       justify-content: space-between;
       align-items: center;
-      border-top: 1px solid var(--border-light);
-      padding-top: 1.75rem;
-      font-family: var(--mono);
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       color: var(--text-muted);
+      flex-wrap: wrap;
+      gap: 1rem;
     }
 
     footer a {
       color: var(--text);
       text-decoration: none;
-      border-bottom: 1px dotted var(--text);
+      border-bottom: 1px solid var(--text);
     }
 
     footer a:hover {
-      border-bottom-style: solid;
+      background: var(--border);
+      color: var(--bg);
     }
 
-    @media (max-width: 600px) {
-      body { padding: 2rem 1.25rem; }
-      h1 { font-size: 2.4rem; }
-      nav { margin-bottom: 3rem; }
+    @media (max-width: 650px) {
+      body { padding: 1.5rem 1rem 3rem; }
+      .site-title { font-size: 1.75rem; }
+      .chunky-bar { gap: 1rem; }
       .install-bar { flex-direction: column; align-items: stretch; }
       .copy-btn { text-align: center; }
-      .community-box { flex-direction: column; align-items: flex-start; }
-      footer { flex-direction: column; gap: 0.75rem; text-align: center; }
+      .banner { flex-direction: column; align-items: flex-start; }
+      footer { flex-direction: column; text-align: center; }
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <nav>
-      <a href="/" class="brand">invfs</a>
-      <div class="nav-links">
-        <a href="https://t.me/InvariantFS" class="tg">telegram</a>
-        <a href="https://github.com/AsmanovLev/InvariantFS">github</a>
-        <a href="https://github.com/AsmanovLev/InvariantFS/releases">releases</a>
-        <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs">docs</a>
-      </div>
-    </nav>
 
-    <main class="hero">
-      <div class="status-tag">Linux Rootfs · Bit-Exact</div>
-      <h1>InvariantFS</h1>
-      <p class="lead">
-        Semantic, content-addressed filesystem engineered for verified storage invariants, zero silent corruption, and instant dual-device rootfs boots.
+    <!-- Swollen / Chunky top bar -->
+    <header class="chunky-bar">
+      <div class="site-title">InvariantFS</div>
+      <nav class="nav-controls">
+        <a href="https://t.me/InvariantFS" class="nav-link bold" target="_blank" rel="noopener">telegram</a>
+        <a href="https://github.com/AsmanovLev/InvariantFS" class="nav-link" target="_blank" rel="noopener">github</a>
+        <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs" class="nav-link" target="_blank" rel="noopener" data-i18n="nav_docs">доки</a>
+        <button class="btn-toggle" id="lang-btn" onclick="toggleLang()">EN</button>
+        <button class="btn-toggle" id="theme-btn" onclick="toggleTheme()">DARK</button>
+      </nav>
+    </header>
+
+    <!-- Hero -->
+    <main>
+      <p class="hero-text" data-i18n="hero_desc">
+        Семантическая файловая система с контентной адресацией, гарантированным побитовым инвариантом (decompress-and-compare) и поддержкой загрузки Linux rootfs на реальном железе.
       </p>
 
+      <!-- Quick Install Box -->
       <div class="install-bar">
-        <div class="cmd-text">
+        <div class="install-cmd">
           <span class="prompt">$</span>curl -fsSL https://invfs.ru/sh | sh
         </div>
-        <button class="copy-btn" id="copy-btn" onclick="copyInstall()">copy</button>
+        <button class="copy-btn" id="copy-btn" onclick="copyInstall()" data-i18n="copy_label">копировать</button>
       </div>
 
-      <div class="section-label">System Architecture</div>
-      <div class="features">
-        <div class="feature-item">
-          <h3>01 / Bit-Exact Invariant</h3>
-          <p>Every stored block undergoes an immediate decompress-and-compare verification roundtrip before commit. Corrupted payloads cannot be published.</p>
+      <!-- ASCII schematic -->
+      <div class="diagram-box">
+┌─────────────────┐      spill / sweep      ┌─────────────────────────┐
+│ SSD RAW TIER    │  ────────────────────>  │ HDD SHADOW TIER         │
+│ sync mutations  │                         │ content-addressed dedupe│
+│ lazy_reclaim=1  │  <────────────────────  │ immutable block recipes │
+└─────────────────┘      orphan reclaim     └─────────────────────────┘</div>
+
+      <!-- Architecture grid -->
+      <div class="section-label" data-i18n="sec_arch">Архитектурные основы</div>
+      <div class="grid-quirky">
+        <div class="card">
+          <div class="card-num">01</div>
+          <div class="card-title" data-i18n="c1_title">Инвариант побитовой точности</div>
+          <div class="card-body" data-i18n="c1_body">
+            Каждая операция записи и упаковки проверяется немедленным циклом «разжать и побайтово сравнить». Повреждённые блоки физически не могут быть зафиксированы.
+          </div>
         </div>
-        <div class="feature-item">
-          <h3>02 / Semantic Deduplication</h3>
-          <p>Multi-level recipe trees (CHLD) and container unpacking (ISO, WIM, TAR, ZIP) eliminate duplicate payloads across independent workloads.</p>
+
+        <div class="card">
+          <div class="card-num">02</div>
+          <div class="card-title" data-i18n="c2_title">Семантическая дедупликация</div>
+          <div class="card-body" data-i18n="c2_body">
+            Многоуровневые деревья рецептов CHLD и умный парсинг архивных контейнеров (ISO9660, WIM, TAR, ZIP) исключают хранение дубликатов между независимыми ОС и сборками.
+          </div>
         </div>
-        <div class="feature-item">
-          <h3>03 / Dual-Tier Storage & Sweep</h3>
-          <p>Fast SSD raw zone handles live synchronous writes, backed by immutable HDD shadow storage with offline reference-counting compaction (sweep).</p>
+
+        <div class="card">
+          <div class="card-num">03</div>
+          <div class="card-title" data-i18n="c3_title">Двухуровневое хранилище</div>
+          <div class="card-body" data-i18n="c3_body">
+            Горячий SSD RAW-слой обслуживает синхронные записи без задержек на зеркалирование, а фоновый sweep выполняет сборку мусора и уплотнение в неизменяемый HDD Shadow.
+          </div>
         </div>
-        <div class="feature-item">
-          <h3>04 / Native Rootfs Boot</h3>
-          <p>Runs directly as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.</p>
+
+        <div class="card">
+          <div class="card-num">04</div>
+          <div class="card-title" data-i18n="c4_title">Загрузка Linux Rootfs</div>
+          <div class="card-body" data-i18n="c4_body">
+            Прямая работа в качестве корня (PID 1) на физическом стенде с интеграцией в mkinitcpio, dracut и initramfs для Arch Linux, Gentoo, Debian и Void.
+          </div>
         </div>
       </div>
 
-      <div class="community-box">
-        <div class="community-text">
-          <h4>Join the Discussion</h4>
-          <p>Development updates, deployment notes, and architecture discussions.</p>
+      <!-- Telegram Banner -->
+      <div class="banner">
+        <div class="banner-text">
+          <h3 data-i18n="tg_title">Канал разработки и сообщество</h3>
+          <p data-i18n="tg_desc">Логи разработки, архитектурные решения, бенчмарки и обсуждение проекта.</p>
         </div>
-        <a href="https://t.me/InvariantFS" class="tg-button">t.me/InvariantFS &rarr;</a>
+        <a href="https://t.me/InvariantFS" class="tg-cta" target="_blank" rel="noopener">t.me/InvariantFS &rarr;</a>
       </div>
     </main>
 
+    <!-- Footer -->
     <footer>
-      <span>GPL-2.0 Open Source</span>
-      <span>Created by <a href="https://github.com/AsmanovLev">Lev Asmanov</a></span>
+      <span>Open Source · GPL-2.0</span>
+      <span><span data-i18n="author_by">Автор:</span> <a href="https://github.com/AsmanovLev" target="_blank" rel="noopener">Лев Асманов</a></span>
     </footer>
   </div>
 
   <script>
+    const I18N = {
+      ru: {
+        nav_docs: "доки",
+        lang_btn: "EN",
+        hero_desc: "Семантическая файловая система с контентной адресацией, гарантированным побитовым инвариантом (decompress-and-compare) и поддержкой загрузки Linux rootfs на реальном железе.",
+        copy_label: "копировать",
+        copied_label: "скопировано",
+        sec_arch: "Архитектурные основы",
+        c1_title: "Инвариант побитовой точности",
+        c1_body: "Каждая операция записи и упаковки проверяется немедленным циклом «разжать и побайтово сравнить». Повреждённые блоки физически не могут быть зафиксированы.",
+        c2_title: "Семантическая дедупликация",
+        c2_body: "Многоуровневые деревья рецептов CHLD и умный парсинг архивных контейнеров (ISO9660, WIM, TAR, ZIP) исключают хранение дубликатов между независимыми ОС и сборками.",
+        c3_title: "Двухуровневое хранилище",
+        c3_body: "Горячий SSD RAW-слой обслуживает синхронные записи без задержек на зеркалирование, а фоновый sweep выполняет сборку мусора и уплотнение в неизменяемый HDD Shadow.",
+        c4_title: "Загрузка Linux Rootfs",
+        c4_body: "Прямая работа в качестве корня (PID 1) на физическом стенде с интеграцией в mkinitcpio, dracut и initramfs для Arch Linux, Gentoo, Debian и Void.",
+        tg_title: "Канал разработки и сообщество",
+        tg_desc: "Логи разработки, архитектурные решения, бенчмарки и обсуждение проекта.",
+        author_by: "Автор:"
+      },
+      en: {
+        nav_docs: "docs",
+        lang_btn: "RU",
+        hero_desc: "A semantic, content-addressed filesystem engineered for verified storage invariants, zero silent corruption, and instant dual-device rootfs boots.",
+        copy_label: "copy",
+        copied_label: "copied",
+        sec_arch: "Core Architecture",
+        c1_title: "Bit-Exactness Invariant",
+        c1_body: "Every stored block undergoes an immediate decompress-and-compare verification roundtrip before commit. Corrupted payloads cannot be published.",
+        c2_title: "Semantic Deduplication",
+        c2_body: "Multi-level recipe trees (CHLD) and container unpacking (ISO, WIM, TAR, ZIP) eliminate duplicate payloads across independent OS installations.",
+        c3_title: "Dual-Tier Storage & Sweep",
+        c3_body: "Fast SSD raw zone handles live synchronous writes, backed by immutable HDD shadow storage with offline reference-counting compaction (sweep).",
+        c4_title: "Native Rootfs Boot",
+        c4_body: "Runs directly as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.",
+        tg_title: "Development Channel",
+        tg_desc: "Engineering updates, architectural decisions, benchmarks, and project discussions.",
+        author_by: "Created by"
+      }
+    };
+
+    let currentLang = localStorage.getItem("invfs:lang") || "ru";
+    let currentTheme = localStorage.getItem("invfs:theme") || "paper";
+
+    function applyLang(lang) {
+      currentLang = lang;
+      localStorage.setItem("invfs:lang", lang);
+      document.documentElement.lang = lang;
+      const dict = I18N[lang];
+      document.querySelectorAll("[data-i18n]").forEach(el => {
+        const key = el.getAttribute("data-i18n");
+        if (dict[key]) el.textContent = dict[key];
+      });
+      document.getElementById("lang-btn").textContent = dict.lang_btn;
+    }
+
+    function toggleLang() {
+      applyLang(currentLang === "ru" ? "en" : "ru");
+    }
+
+    function applyTheme(theme) {
+      currentTheme = theme;
+      localStorage.setItem("invfs:theme", theme);
+      document.documentElement.setAttribute("data-theme", theme);
+      document.getElementById("theme-btn").textContent = theme === "paper" ? "DARK" : "PAPER";
+    }
+
+    function toggleTheme() {
+      applyTheme(currentTheme === "paper" ? "dark" : "paper");
+    }
+
     function copyInstall() {
+      const dict = I18N[currentLang];
       navigator.clipboard.writeText('curl -fsSL https://invfs.ru/sh | sh').then(() => {
         const btn = document.getElementById('copy-btn');
-        btn.textContent = 'COPIED';
+        btn.textContent = dict.copied_label;
         btn.classList.add('copied');
         setTimeout(() => {
-          btn.textContent = 'COPY';
+          btn.textContent = dict.copy_label;
           btn.classList.remove('copied');
         }, 1500);
       });
     }
+
+    // Init
+    applyTheme(currentTheme);
+    applyLang(currentLang);
   </script>
 </body>
 </html>
