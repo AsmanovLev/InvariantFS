@@ -1,221 +1,296 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>InvariantFS — Semantic Content-Addressed Filesystem</title>
-  <meta name="description" content="Файловая система с инвариантом побитовой точности, семантической дедупликацией и поддержкой rootfs boot.">
+  <meta name="description" content="A semantic, content-addressed Linux filesystem with bit-exact verification and native rootfs boot.">
   <style>
     :root {
-      --bg: #0d1117;
-      --card-bg: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --heading: #f0f6fc;
+      --bg: #090a0f;
+      --card-bg: #11131a;
+      --border: #1e2230;
+      --border-hover: #2e3447;
+      --text: #8e95a5;
+      --text-bright: #e6e8ee;
+      --heading: #ffffff;
       --accent: #58a6ff;
-      --accent-glow: rgba(88, 166, 255, 0.15);
-      --code-bg: #0b0e14;
-      --green: #3fb950;
+      --accent-muted: #1f3554;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      font-family: var(--sans);
       line-height: 1.6;
-      padding: 2rem 1rem;
+      -webkit-font-smoothing: antialiased;
+      padding: 3rem 1.5rem;
     }
+
     .container {
-      max-width: 900px;
+      max-width: 760px;
       margin: 0 auto;
     }
-    header {
-      text-align: center;
-      margin-bottom: 3rem;
-      padding-top: 1rem;
+
+    /* Navigation */
+    nav {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 5rem;
     }
+
+    .brand {
+      font-family: var(--mono);
+      font-size: 1.05rem;
+      font-weight: 700;
+      color: var(--heading);
+      letter-spacing: -0.02em;
+      text-decoration: none;
+    }
+
+    .nav-links {
+      display: flex;
+      gap: 1.5rem;
+    }
+
+    .nav-links a {
+      color: var(--text);
+      text-decoration: none;
+      font-size: 0.9rem;
+      transition: color 0.15s ease;
+    }
+
+    .nav-links a:hover {
+      color: var(--text-bright);
+    }
+
+    /* Hero */
+    .hero {
+      margin-bottom: 4rem;
+    }
+
     .badge {
       display: inline-block;
-      background: var(--accent-glow);
+      font-family: var(--mono);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
       color: var(--accent);
-      padding: 0.25rem 0.75rem;
-      border-radius: 999px;
-      font-size: 0.85rem;
-      font-weight: 600;
-      border: 1px solid rgba(88, 166, 255, 0.3);
-      margin-bottom: 1rem;
+      background: var(--accent-muted);
+      padding: 0.2rem 0.6rem;
+      border-radius: 4px;
+      margin-bottom: 1.25rem;
     }
+
     h1 {
-      font-size: 2.8rem;
+      font-size: 3rem;
+      font-weight: 700;
       color: var(--heading);
-      letter-spacing: -0.03em;
-      margin-bottom: 0.75rem;
+      letter-spacing: -0.04em;
+      line-height: 1.1;
+      margin-bottom: 1.25rem;
     }
-    .tagline {
-      font-size: 1.25rem;
-      color: #8b949e;
-      max-width: 650px;
-      margin: 0 auto 2rem;
-    }
-    .install-box {
-      background: var(--code-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1.25rem;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      max-width: 640px;
-      margin: 0 auto 1.5rem;
-      font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
-      font-size: 1rem;
-      box-shadow: 0 4px 20px rgba(0,0,0,0.4);
-    }
-    .install-cmd {
-      color: var(--heading);
-      overflow-x: auto;
-      white-space: nowrap;
-      margin-right: 1rem;
-    }
-    .install-cmd span { color: var(--accent); }
-    .copy-btn {
-      background: #21262d;
+
+    .description {
+      font-size: 1.15rem;
       color: var(--text);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.4rem 0.8rem;
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: all 0.2s;
-      flex-shrink: 0;
+      max-width: 620px;
+      line-height: 1.65;
+      margin-bottom: 2.25rem;
     }
-    .copy-btn:hover {
-      background: #30363d;
-      color: #fff;
-    }
-    .copy-btn.copied {
-      background: rgba(63, 185, 80, 0.2);
-      color: var(--green);
-      border-color: var(--green);
-    }
-    .links-bar {
-      display: flex;
-      gap: 1rem;
-      justify-content: center;
-      flex-wrap: wrap;
-      margin-bottom: 3.5rem;
-    }
-    .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.6rem 1.2rem;
-      border-radius: 6px;
-      text-decoration: none;
-      font-size: 0.95rem;
-      font-weight: 500;
-      transition: all 0.2s;
-    }
-    .btn-primary {
-      background: #238636;
-      color: #fff;
-    }
-    .btn-primary:hover { background: #2ea043; }
-    .btn-secondary {
-      background: #21262d;
-      color: var(--heading);
-      border: 1px solid var(--border);
-    }
-    .btn-secondary:hover { background: #30363d; }
-    .grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 1.25rem;
-      margin-bottom: 3rem;
-    }
-    .card {
+
+    /* Install bar */
+    .install-box {
       background: var(--card-bg);
       border: 1px solid var(--border);
       border-radius: 8px;
-      padding: 1.5rem;
+      padding: 0.85rem 1rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      margin-bottom: 3.5rem;
+      transition: border-color 0.2s ease;
     }
-    .card h3 {
-      color: var(--heading);
-      font-size: 1.15rem;
-      margin-bottom: 0.5rem;
+
+    .install-box:hover {
+      border-color: var(--border-hover);
     }
-    .card p {
-      color: #8b949e;
+
+    .install-cmd {
+      font-family: var(--mono);
       font-size: 0.95rem;
+      color: var(--text-bright);
+      overflow-x: auto;
+      white-space: nowrap;
     }
+
+    .prompt-symbol {
+      color: #555b6e;
+      margin-right: 0.5rem;
+      user-select: none;
+    }
+
+    .copy-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.35rem 0.75rem;
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      cursor: pointer;
+      transition: all 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    .copy-btn:hover {
+      color: var(--heading);
+      border-color: var(--border-hover);
+      background: rgba(255, 255, 255, 0.04);
+    }
+
+    .copy-btn.copied {
+      color: #3fb950;
+      border-color: #238636;
+    }
+
+    /* Pillars */
+    .section-title {
+      font-family: var(--mono);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #555b6e;
+      margin-bottom: 1.5rem;
+    }
+
+    .pillars {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 1.75rem;
+      margin-bottom: 5rem;
+    }
+
+    .pillar {
+      border-left: 2px solid var(--border);
+      padding-left: 1.25rem;
+      transition: border-color 0.2s ease;
+    }
+
+    .pillar:hover {
+      border-color: var(--accent);
+    }
+
+    .pillar h3 {
+      font-size: 1.05rem;
+      color: var(--text-bright);
+      font-weight: 600;
+      margin-bottom: 0.35rem;
+    }
+
+    .pillar p {
+      font-size: 0.92rem;
+      color: var(--text);
+      line-height: 1.55;
+    }
+
+    /* Footer */
     footer {
-      text-align: center;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
       padding-top: 2rem;
       border-top: 1px solid var(--border);
-      color: #8b949e;
-      font-size: 0.85rem;
+      font-size: 0.82rem;
+      color: #555b6e;
     }
-    footer a { color: var(--accent); text-decoration: none; }
+
+    footer a {
+      color: var(--text);
+      text-decoration: none;
+      transition: color 0.15s ease;
+    }
+
+    footer a:hover {
+      color: var(--text-bright);
+    }
+
+    @media (max-width: 600px) {
+      body { padding: 2rem 1.25rem; }
+      h1 { font-size: 2.25rem; }
+      nav { margin-bottom: 3.5rem; }
+      footer { flex-direction: column; gap: 0.75rem; text-align: center; }
+    }
   </style>
 </head>
 <body>
   <div class="container">
-    <header>
-      <div class="badge">v0.6.6 Release Available</div>
+    <nav>
+      <a href="/" class="brand">invfs</a>
+      <div class="nav-links">
+        <a href="https://github.com/AsmanovLev/InvariantFS">github</a>
+        <a href="https://github.com/AsmanovLev/InvariantFS/releases">releases</a>
+        <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs">docs</a>
+      </div>
+    </nav>
+
+    <main class="hero">
+      <div class="badge">Linux · Bit-Exact Filesystem</div>
       <h1>InvariantFS</h1>
-      <p class="tagline">
-        Семантическая файловая система с инвариантом побитовой точности, защитой данных decompress-and-compare и поддержкой загрузки Linux rootfs.
+      <p class="description">
+        Semantic, content-addressed filesystem engineered for verified storage invariants, zero hidden bit rot, and instant dual-device rootfs boots.
       </p>
 
       <div class="install-box">
         <div class="install-cmd">
-          <span>curl</span> -fsSL https://invfs.ru/sh | sh
+          <span class="prompt-symbol">$</span>curl -fsSL https://invfs.ru/sh | sh
         </div>
-        <button class="copy-btn" onclick="copyInstall()">Копировать</button>
+        <button class="copy-btn" id="copy-btn" onclick="copyInstall()">copy</button>
       </div>
 
-      <div class="links-bar">
-        <a class="btn btn-primary" href="https://github.com/AsmanovLev/InvariantFS">GitHub Репозиторий</a>
-        <a class="btn btn-secondary" href="https://github.com/AsmanovLev/InvariantFS/releases">Релизы</a>
-        <a class="btn btn-secondary" href="https://github.com/AsmanovLev/InvariantFS/blob/main/docs/INSTALL-MATRIX.md">Матрица установки</a>
+      <div class="section-title">Core Principles</div>
+      <div class="pillars">
+        <div class="pillar">
+          <h3>Bit-Exactness Invariant</h3>
+          <p>Every stored block undergoes an immediate decompress-and-compare verification roundtrip before publish. Silent bit corruption is mathematically rejected.</p>
+        </div>
+        <div class="pillar">
+          <h3>Semantic Deduplication</h3>
+          <p>Multi-level recipe trees (CHLD) with container awareness (ISO, WIM, TAR, ZIP) eliminate duplicate payloads across independent workloads.</p>
+        </div>
+        <div class="pillar">
+          <h3>Native Linux Rootfs Boot</h3>
+          <p>Runs as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.</p>
+        </div>
+        <div class="pillar">
+          <h3>Dual-Tier Storage</h3>
+          <p>Ultra-low latency NVMe/SSD raw write path paired with durable mechanical shadow backing and offline reference-counting sweep.</p>
+        </div>
       </div>
-    </header>
-
-    <div class="grid">
-      <div class="card">
-        <h3>🛡️ Bit-Exactness Invariant</h3>
-        <p>Каждое сжатие верифицируется циклом разжатия и побайтового сравнения перед фиксацией. Никаких скрытых повреждений данных.</p>
-      </div>
-      <div class="card">
-        <h3>🚀 Native Distro Packaging</h3>
-        <p>Автоматическая установка нативных пакетов для Arch Linux (.pkg.tar.zst), Debian/Ubuntu (.deb), Fedora/RHEL (.rpm), Gentoo и Void Linux.</p>
-      </div>
-      <div class="card">
-        <h3>🐧 Rootfs Boot Support</h3>
-        <p>Полная интеграция с mkinitcpio, dracut и initramfs-tools. Возможность загрузить систему с InvariantFS в качестве корня (/dev/sda).</p>
-      </div>
-      <div class="card">
-        <h3>📦 Content-Addressed De-dupe</h3>
-        <p>Многоуровневые деревья рецептов CHLD, потоковые контейнеры (ISO9660, WIM, TAR, ZIP) и авто-дедупликация идентичных блоков.</p>
-      </div>
-    </div>
+    </main>
 
     <footer>
-      <p>InvariantFS — Open Source проект под лицензией GPL-2.0. Автор: <a href="https://github.com/AsmanovLev">Лев Асманов</a>.</p>
+      <span>Open Source under GPL-2.0</span>
+      <span>Created by <a href="https://github.com/AsmanovLev">Lev Asmanov</a></span>
     </footer>
   </div>
 
   <script>
     function copyInstall() {
-      const text = 'curl -fsSL https://invfs.ru/sh | sh';
-      navigator.clipboard.writeText(text).then(() => {
-        const btn = document.querySelector('.copy-btn');
-        btn.textContent = 'Скопировано!';
+      navigator.clipboard.writeText('curl -fsSL https://invfs.ru/sh | sh').then(() => {
+        const btn = document.getElementById('copy-btn');
+        btn.textContent = 'copied';
         btn.classList.add('copied');
         setTimeout(() => {
-          btn.textContent = 'Копировать';
+          btn.textContent = 'copy';
           btn.classList.remove('copied');
-        }, 2000);
+        }, 1500);
       });
     }
   </script>
