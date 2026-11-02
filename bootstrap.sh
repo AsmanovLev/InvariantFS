@@ -67,10 +67,10 @@ DOWNLOAD_ONLY=0
 CHECK_ONLY=0
 PUBKEY=${INVFS_PUBKEY:-}
 RUN=0
-WITH_SYSTEMD=1
-WITH_DRACUT=1
-WITH_MKINITCPIO=0
-WITH_INITRAMFS_TOOLS=0
+WITH_SYSTEMD=auto
+WITH_DRACUT=auto
+WITH_MKINITCPIO=auto
+WITH_INITRAMFS_TOOLS=auto
 ARCH_OVERRIDE=${INVFS_ARCH:-}
 
 # ---- logging ---------------------------------------------------------------
@@ -99,9 +99,13 @@ while [ $# -gt 0 ]; do
         --pubkey) PUBKEY=${2:?--pubkey needs an argument}; shift 2;;
         --pubkey=*) PUBKEY=${1#*=}; shift;;
         --run) RUN=1; shift;;
+        --with-systemd) WITH_SYSTEMD=1; shift;;
         --no-systemd) WITH_SYSTEMD=0; shift;;
+        --with-dracut) WITH_DRACUT=1; shift;;
         --no-dracut) WITH_DRACUT=0; shift;;
+        --with-mkinitcpio) WITH_MKINITCPIO=1; shift;;
         --no-mkinitcpio) WITH_MKINITCPIO=0; shift;;
+        --with-initramfs-tools) WITH_INITRAMFS_TOOLS=1; shift;;
         --no-initramfs-tools) WITH_INITRAMFS_TOOLS=0; shift;;
         --dry-run) DRY_RUN=1; shift;;
         --uninstall) UNINSTALL=1; shift;;
@@ -128,6 +132,36 @@ PREFIX=${PREFIX%/}
 MANIFEST=${INVFS_MANIFEST:-$DESTDIR$PREFIX/lib/invfs/installed.manifest}
 CACHE=${INVFS_CACHE_DIR:-${XDG_CACHE_HOME:-$HOME/.cache}/invfs}
 STAGE=${INVFS_STAGE_DIR:-${TMPDIR:-/tmp}/invfs-bootstrap.$$}
+
+# Auto-detect integration frameworks if set to auto
+if [ "$WITH_MKINITCPIO" = auto ]; then
+    if command -v mkinitcpio >/dev/null 2>&1 || [ -d "$DESTDIR/usr/lib/initcpio" ] || [ -d "$DESTDIR$PREFIX/lib/initcpio" ]; then
+        WITH_MKINITCPIO=1
+    else
+        WITH_MKINITCPIO=0
+    fi
+fi
+if [ "$WITH_DRACUT" = auto ]; then
+    if command -v dracut >/dev/null 2>&1 || [ -d "$DESTDIR/usr/lib/dracut" ] || [ -d "$DESTDIR$PREFIX/lib/dracut" ]; then
+        WITH_DRACUT=1
+    else
+        WITH_DRACUT=0
+    fi
+fi
+if [ "$WITH_INITRAMFS_TOOLS" = auto ]; then
+    if command -v update-initramfs >/dev/null 2>&1 || [ -d "$DESTDIR/usr/share/initramfs-tools" ]; then
+        WITH_INITRAMFS_TOOLS=1
+    else
+        WITH_INITRAMFS_TOOLS=0
+    fi
+fi
+if [ "$WITH_SYSTEMD" = auto ]; then
+    if [ -d "$DESTDIR/usr/lib/systemd/system" ] || [ -d "$DESTDIR/lib/systemd/system" ] || command -v systemctl >/dev/null 2>&1; then
+        WITH_SYSTEMD=1
+    else
+        WITH_SYSTEMD=0
+    fi
+fi
 
 # ---- helpers ---------------------------------------------------------------
 sha256_of() {  # $1 file -> hex
@@ -456,6 +490,71 @@ run_installer() {  # $1 = app/source root
         n=$(wc -l < "$MANIFEST" | tr -d ' ')
         info "install complete: $n files recorded in $MANIFEST"
     fi
+    ensure_extras "$app"
+}
+
+ensure_extras() {
+    src_dir=${1:-}
+    [ "$CHECK_ONLY" = 1 ] && return 0
+    [ "$DOWNLOAD_ONLY" = 1 ] && return 0
+    [ "$DRY_RUN" = 1 ] && return 0
+
+    # 1. Ensure invf-boot-setup is installed
+    if ! command -v invf-boot-setup >/dev/null 2>&1; then
+        target_dir="$DESTDIR$PREFIX/bin"
+        [ -d "$target_dir" ] || target_dir="$DESTDIR/usr/bin"
+        [ -d "$target_dir" ] || target_dir="$DESTDIR/usr/local/bin"
+        mkdir -p "$target_dir"
+        target_file="$target_dir/invf-boot-setup"
+        info "installing invf-boot-setup into $target_file..."
+        if [ -n "$src_dir" ] && [ -f "$src_dir/tools/sbin/invf-boot-setup" ]; then
+            install -m755 "$src_dir/tools/sbin/invf-boot-setup" "$target_file"
+        elif [ -f "$STAGE/tools/sbin/invf-boot-setup" ]; then
+            install -m755 "$STAGE/tools/sbin/invf-boot-setup" "$target_file"
+        elif [ -f "${INVFS_SOURCE_DIR:-}/tools/sbin/invf-boot-setup" ]; then
+            install -m755 "$INVFS_SOURCE_DIR/tools/sbin/invf-boot-setup" "$target_file"
+        else
+            fetch_quiet "https://invfs.ru/invf-boot-setup" "$target_file" || \
+            fetch "https://raw.githubusercontent.com/$REPO/main/tools/sbin/invf-boot-setup" "$target_file" || true
+            chmod +x "$target_file" 2>/dev/null || true
+        fi
+        if [ -f "$target_file" ]; then
+            if [ -d "$DESTDIR/usr/bin" ] && [ "$target_file" != "$DESTDIR/usr/bin/invf-boot-setup" ]; then
+                ln -sf "$target_file" "$DESTDIR/usr/bin/invf-boot-setup" 2>/dev/null || true
+            fi
+            if [ -d "$DESTDIR/usr/local/bin" ] && [ "$target_file" != "$DESTDIR/usr/local/bin/invf-boot-setup" ]; then
+                ln -sf "$target_file" "$DESTDIR/usr/local/bin/invf-boot-setup" 2>/dev/null || true
+            fi
+            [ -f "$MANIFEST" ] && echo "$target_file" >> "$MANIFEST"
+        fi
+    fi
+
+    # 2. Ensure mkinitcpio hooks if mkinitcpio environment is present
+    if command -v mkinitcpio >/dev/null 2>&1 || [ -d "$DESTDIR/usr/lib/initcpio" ]; then
+        if [ ! -f "$DESTDIR/usr/lib/initcpio/install/invfs" ] || [ ! -f "$DESTDIR/usr/lib/initcpio/hooks/invfs" ]; then
+            info "detected mkinitcpio environment: installing InvariantFS hooks..."
+            mkdir -p "$DESTDIR/usr/lib/initcpio/install" "$DESTDIR/usr/lib/initcpio/hooks"
+            if [ -n "$src_dir" ] && [ -f "$src_dir/packaging/mkinitcpio/invfs_install" ]; then
+                install -m644 "$src_dir/packaging/mkinitcpio/invfs_install" "$DESTDIR/usr/lib/initcpio/install/invfs"
+                install -m644 "$src_dir/packaging/mkinitcpio/invfs_hook" "$DESTDIR/usr/lib/initcpio/hooks/invfs"
+            elif [ -f "$STAGE/packaging/mkinitcpio/invfs_install" ]; then
+                install -m644 "$STAGE/packaging/mkinitcpio/invfs_install" "$DESTDIR/usr/lib/initcpio/install/invfs"
+                install -m644 "$STAGE/packaging/mkinitcpio/invfs_hook" "$DESTDIR/usr/lib/initcpio/hooks/invfs"
+            elif [ -f "${INVFS_SOURCE_DIR:-}/packaging/mkinitcpio/invfs_install" ]; then
+                install -m644 "$INVFS_SOURCE_DIR/packaging/mkinitcpio/invfs_install" "$DESTDIR/usr/lib/initcpio/install/invfs"
+                install -m644 "$INVFS_SOURCE_DIR/packaging/mkinitcpio/invfs_hook" "$DESTDIR/usr/lib/initcpio/hooks/invfs"
+            else
+                fetch_quiet "https://invfs.ru/invfs_install" "$DESTDIR/usr/lib/initcpio/install/invfs" || \
+                fetch "https://raw.githubusercontent.com/$REPO/main/packaging/mkinitcpio/invfs_install" "$DESTDIR/usr/lib/initcpio/install/invfs" || true
+                fetch_quiet "https://invfs.ru/invfs_hook" "$DESTDIR/usr/lib/initcpio/hooks/invfs" || \
+                fetch "https://raw.githubusercontent.com/$REPO/main/packaging/mkinitcpio/invfs_hook" "$DESTDIR/usr/lib/initcpio/hooks/invfs" || true
+            fi
+            if [ -f "$MANIFEST" ]; then
+                echo "$DESTDIR/usr/lib/initcpio/install/invfs" >> "$MANIFEST"
+                echo "$DESTDIR/usr/lib/initcpio/hooks/invfs" >> "$MANIFEST"
+            fi
+        fi
+    fi
 }
 
 do_release() {
@@ -498,10 +597,13 @@ do_release() {
                         info "detected Arch Linux: fetching native package $arch_pkg"
                         fetch "$base/$arch_pkg" "$CACHE/$arch_pkg"
                         fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
-                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
+                        if [ -f "$CACHE/SHA256SUMS" ] && grep -q "[[:space:]]$arch_pkg\$" "$CACHE/SHA256SUMS"; then
+                            verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
+                        fi
                         info "installing via pacman..."
                         pacman -U --noconfirm "$CACHE/$arch_pkg"
                         info "native Arch Linux package installed successfully"
+                        ensure_extras
                         return 0
                     fi
                 fi
@@ -513,10 +615,13 @@ do_release() {
                         info "detected Debian/Ubuntu: fetching native package $deb_pkg"
                         fetch "$base/$deb_pkg" "$CACHE/$deb_pkg"
                         fetch "$base/SHA256SUMS" "$CACHE/SHA256SUMS" || true
-                        [ -f "$CACHE/SHA256SUMS" ] && verify_sha256 "$CACHE/$deb_pkg" "$CACHE/SHA256SUMS" "$deb_pkg"
+                        if [ -f "$CACHE/SHA256SUMS" ] && grep -q "[[:space:]]$deb_pkg\$" "$CACHE/SHA256SUMS"; then
+                            verify_sha256 "$CACHE/$deb_pkg" "$CACHE/SHA256SUMS" "$deb_pkg"
+                        fi
                         info "installing via dpkg..."
                         dpkg -i "$CACHE/$deb_pkg" || apt-get install -f -y
                         info "native Debian/Ubuntu package installed successfully"
+                        ensure_extras
                         return 0
                     fi
                 fi
@@ -731,5 +836,7 @@ if [ "$MODE" = release ]; then
 else
     do_source
 fi
+
+ensure_extras
 
 info "done"
