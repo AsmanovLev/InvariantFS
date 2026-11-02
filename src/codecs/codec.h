@@ -41,6 +41,8 @@
  * only. Fits the 6-bit AST algo field if that ever changes. */
 #define INVFS_ALGO_ZIPR 12
 
+int invfs_register_sibling_tag(const char *tag, int has_digits);
+
 typedef struct invfs_codec {
     uint32_t     algo;           /* INVFS_ALGO_* from invarifs.h */
     const char  *name;

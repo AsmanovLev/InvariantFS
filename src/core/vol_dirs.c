@@ -52,19 +52,10 @@ static int dirent_cmp(const void *a, const void *b)
 /* delta yet (WP-M7).                                                 */
 /* ================================================================== */
 
-static const char *skip_slash(const char *p)
-{
-    if (!p)
-        return "";
-    while (*p == '/')
-        p++;
-    return p;
-}
-
 /* Split "a/b/c" into parent "a/b" and leaf "c" (leading/trailing slashes
  * ignored). parent may be empty (the root). 0 = ok, -1 = malformed. */
-static int split_path(const char *name, char *parent, size_t pcap,
-                         char *leaf, size_t lcap)
+int invfs_split_path(const char *name, char *parent, size_t pcap,
+                     char *leaf, size_t lcap)
 {
     const char *p = skip_slash(name);
     size_t n = strlen(p), k, pl, ll;
@@ -90,6 +81,7 @@ static int split_path(const char *name, char *parent, size_t pcap,
     parent[pl] = 0;
     return 0;
 }
+#define split_path invfs_split_path
 
 /* Symlink hops during lookup are bounded like the kernel's MAXSYMLINKS. */
 #define VOL_LOOKUP_MAX_HOPS 40
@@ -901,8 +893,9 @@ int vol_unlink(invfs_volume *v, const char *name)
         /* Cascade delete container/transcode siblings if main file is
          * unlinked. Still inside the hold: this is a nested vol_unlink
          * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
-         * so it nests correctly instead of unlocking early. */
-        if (strchr(name, '!') == NULL)
+         * so it nests correctly instead of unlocking early.
+         * Only regular files with non-zero size can own siblings. */
+        if (in.type == INVFS_ITYP_REG && in.size > 0 && strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
         if (!v->lazy_reclaim)
             vol_pba_ref_release(v);
@@ -1224,6 +1217,13 @@ int vol_walk_strict(invfs_volume *v, vol_walk_cb cb, void *ctx)
     if (!v)
         return -1;
     return walk_dir(v, "", cb, ctx, 0, 1);
+}
+
+int vol_walk_strict_dir(invfs_volume *v, const char *dir, vol_walk_cb cb, void *ctx)
+{
+    if (!v)
+        return -1;
+    return walk_dir(v, dir ? dir : "", cb, ctx, 0, 1);
 }
 
 

@@ -240,6 +240,7 @@ int  vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                     size_t len, void *buf);
 int  vol_delete_file(invfs_volume *v, const char *name);
 int  vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name);
+int  invfs_register_sibling_tag(const char *tag, int has_digits);
 /* unlink a file AND its "name!recipe"/"!partN"/"!coverN"/"!jxl"/"!nbli"
  * siblings (WP620 adds the NBLI pixel-blob sibling) */
 int  vol_unlink(invfs_volume *v, const char *name);
@@ -467,6 +468,7 @@ int vol_walk(invfs_volume *v, vol_walk_cb cb, void *ctx);
  * but a walk that builds a reference count cannot, because the reference it
  * drops is a block a live recipe still names. */
 int vol_walk_strict(invfs_volume *v, vol_walk_cb cb, void *ctx);
+int vol_walk_strict_dir(invfs_volume *v, const char *dir, vol_walk_cb cb, void *ctx);
 
 /* ---- WP-M18: live-set iteration for sweep driver ---------------------
  * Walk the base B-tree inode range, consult the delta overlay for each

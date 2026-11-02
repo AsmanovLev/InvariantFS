@@ -130,6 +130,8 @@ int ast_owns_siblings(const invfs_ast_hdr *ah,
                       const invfs_ast_block_entry *ents, size_t nents)
 {
     uint32_t algo;
+    const invfs_codec *pc;
+    const invfs_pack_def *pd;
 
     if (!ah)
         return 1;
@@ -140,27 +142,16 @@ int ast_owns_siblings(const invfs_ast_hdr *ah,
     if (!ents || nents == 0)
         return 1;
     algo = ents[0].algo;
-    switch (algo) {
-    case INVFS_ALGO_TARR:
-    case INVFS_ALGO_GZR:
-    case INVFS_ALGO_PNGR:
-    case INVFS_ALGO_NBLI:   /* WP620: the "name!nbli" sibling */
-    case INVFS_ALGO_FLACR:
-    case INVFS_ALGO_EXER:
-        return 1;
-    }
-    /* WP16a: a container codecpack's recipe owns "!mbrNNNN" siblings. An
-     * algo this build cannot resolve (the pack is not loaded right now)
-     * gets the conservative answer: the scan costs one namespace walk and
-     * can only find what is there -- the codec-pack case (raw_image et al)
-     * simply has no siblings to find. */
-    {
-        const invfs_codec *pc = invfs_codec_by_algo(algo);
-        const invfs_pack_def *pd;
-        if (!pc) return 1;
-        pd = invfs_codec_pack_def(pc);
-        if (pd && pd->is_container) return 1;
-    }
+
+    /* Codec registry driven: any container codec or pack owns siblings.
+     * An algo this build cannot resolve (the pack is not loaded right now)
+     * gets the conservative answer: 1. */
+    pc = invfs_codec_by_algo(algo);
+    if (!pc) return 1;
+    if (pc->caps & INVFS_CODEC_CAP_CONTAINER) return 1;
+    pd = invfs_codec_pack_def(pc);
+    if (pd && pd->is_container) return 1;
+
     return 0;
 }
 
@@ -279,29 +270,66 @@ int sib_suffix_is_internal(const char *suf, size_t n)
     }
 }
 
-/* one '!'-separated segment; the shapes and their minting sites are listed
- * above this file's own header comment and must be updated with them */
+typedef struct {
+    char tag[32];
+    uint8_t len;
+    uint8_t has_digits;
+} invfs_sibling_tag;
+
+#define MAX_SIBLING_TAGS 64
+
+static invfs_sibling_tag g_sib_tags[MAX_SIBLING_TAGS] = {
+    /* Generic core filesystem tags */
+    { "recipe", 6, 0 },
+    { "mbrmap", 6, 0 },
+    { "mbrt",   4, 0 },
+    { "part",   4, 1 },
+    /* Builtin transcode/container tags (can also be registered via invfs_register_sibling_tag) */
+    { "jxl",    3, 0 },
+    { "nbli",   4, 0 },
+    { "cover",  5, 1 },
+    { "exr",    3, 1 },
+};
+static size_t g_num_sib_tags = 8;
+
+int invfs_register_sibling_tag(const char *tag, int has_digits)
+{
+    size_t i, tl;
+    if (!tag || !*tag) return -1;
+    tl = strlen(tag);
+    if (tl >= 32) return -1;
+    for (i = 0; i < g_num_sib_tags; i++) {
+        if (g_sib_tags[i].len == tl && memcmp(g_sib_tags[i].tag, tag, tl) == 0 &&
+            g_sib_tags[i].has_digits == (has_digits ? 1 : 0))
+            return 0;
+    }
+    if (g_num_sib_tags >= MAX_SIBLING_TAGS)
+        return -1;
+    memcpy(g_sib_tags[g_num_sib_tags].tag, tag, tl + 1);
+    g_sib_tags[g_num_sib_tags].len = (uint8_t)tl;
+    g_sib_tags[g_num_sib_tags].has_digits = (uint8_t)(has_digits ? 1 : 0);
+    g_num_sib_tags++;
+    return 0;
+}
+
+/* one '!'-separated segment; checked against registered tags + standard mbrNNNN */
 static int sib_segment_is_internal_shape(const char *suf, size_t n)
 {
-    size_t i = 0;
+    size_t t, i;
 
-    /* fixed tags */
-    if (n == 6 && (!memcmp(suf, "recipe", 6) || !memcmp(suf, "mbrmap", 6)))
-        return 1;
-    if (n == 4 && !memcmp(suf, "mbrt", 4)) return 1;
-    if (n == 3 && !memcmp(suf, "jxl", 3))   return 1;
-    if (n == 4 && !memcmp(suf, "nbli", 4))  return 1;   /* WP620 */
-
-    /* <tag><digits>: cover/cover0/cover12, part0, exr0 ... */
-    {
-        static const char *dtag[] = { "cover", "part", "exr" };
-        size_t t;
-        for (t = 0; t < sizeof dtag / sizeof dtag[0]; t++) {
-            size_t tl = strlen(dtag[t]);
-            if (n <= tl || memcmp(suf, dtag[t], tl) != 0) continue;
-            for (i = tl; i < n; i++)
-                if (suf[i] < '0' || suf[i] > '9') break;
-            if (i == n) return 1;
+    /* Check all registered sibling tags (generic + codec-registered) */
+    for (t = 0; t < g_num_sib_tags; t++) {
+        size_t tl = g_sib_tags[t].len;
+        if (!g_sib_tags[t].has_digits) {
+            if (n == tl && memcmp(suf, g_sib_tags[t].tag, tl) == 0)
+                return 1;
+        } else {
+            /* <tag><digits>: e.g. part0, cover0, exr0, custom0 */
+            if (n > tl && memcmp(suf, g_sib_tags[t].tag, tl) == 0) {
+                for (i = tl; i < n; i++)
+                    if (suf[i] < '0' || suf[i] > '9') break;
+                if (i == n) return 1;
+            }
         }
     }
 
@@ -471,13 +499,66 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
     vol_walk_t w;
     size_t i;
     int rc, n;
+    const char *norm;
+    char parent[600], leaf[INVFS_MAX_NAME + 1];
+    invfs_dirent *ents = NULL;
+    int cap = 256, n_ents;
+    int has_cand = 0;
+    size_t llen;
+
+    if (!v || !name || !*name)
+        return 0;
+
+    norm = skip_slash(name);
+    if (!*norm)
+        return 0;
+
+    if (invfs_split_path(norm, parent, sizeof parent, leaf, sizeof leaf) != 0)
+        return 0;
+
+    llen = strlen(leaf);
+
+    /* Fast in-memory check of the parent directory: if no dirent in parent
+     * starts with "<leaf>!", this file cannot possibly own any siblings.
+     * This avoids expensive recursive namespace walks during rm -rf of
+     * ordinary files. */
+    ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
+    if (ents) {
+        for (;;) {
+            n_ents = vol_path_list_dir(v, parent, ents, cap);
+            if (n_ents < 0) {
+                has_cand = 1;
+                break;
+            }
+            if (n_ents < cap)
+                break;
+            cap *= 2;
+            {
+                void *ne = realloc(ents, (size_t)cap * sizeof *ents);
+                if (!ne) { has_cand = 1; break; }
+                ents = (invfs_dirent *)ne;
+            }
+        }
+        if (!has_cand) {
+            for (i = 0; i < (size_t)n_ents; i++) {
+                if (strncmp(ents[i].name, leaf, llen) == 0 &&
+                    ents[i].name[llen] == '!') {
+                    has_cand = 1;
+                    break;
+                }
+            }
+        }
+        free(ents);
+        if (!has_cand)
+            return 0;
+    }
 
     memset(&c, 0, sizeof c);
     c.v = v;
-    c.name = name;
-    c.nlen = strlen(name);
+    c.name = norm;
+    c.nlen = strlen(norm);
 
-    rc = vol_walk_strict(v, del_siblings_cb, &c);
+    rc = vol_walk_strict_dir(v, parent, del_siblings_cb, &c);
 
     /* WP-delete-siblings-short-walk-leaves-orphans: the RECEIPT, the same
      * mechanism and no second one (src/core/vol_walk.h). found == n on

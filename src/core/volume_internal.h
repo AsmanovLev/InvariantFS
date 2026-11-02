@@ -2022,6 +2022,18 @@ int record_owns_siblings(const uint8_t *rec, uint32_t rl);
 int ast_owns_siblings(const invfs_ast_hdr *ah,
                       const invfs_ast_block_entry *ents, size_t nents);
 
+int invfs_split_path(const char *name, char *parent, size_t pcap,
+                     char *leaf, size_t lcap);
+
+static inline const char *skip_slash(const char *p)
+{
+    if (!p)
+        return "";
+    while (*p == '/')
+        p++;
+    return p;
+}
+
 /* layer-2 stripes per owner record: one AST entry per parity block */
 uint64_t seal2_shard_stripes(uint32_t m2);
 void seal_view_free(seal_view *sv);

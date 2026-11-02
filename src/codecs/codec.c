@@ -525,6 +525,22 @@ static int pack_parse_lines(FILE *f, struct pack_manifest *m)
             m->generation = (unsigned)strtoul(val, NULL, 0);
         } else if (strcmp(s, "requires") == 0) {
             str_copy(m->requires, sizeof m->requires, val);
+        } else if (strcmp(s, "sibling_tags") == 0) {
+            /* dynamic sibling tags declared by container/codec packs */
+            char copy[256], *tok, *save = NULL;
+            str_copy(copy, sizeof copy, val);
+            tok = strtok_r(copy, ", \t", &save);
+            while (tok) {
+                int has_digits = (strchr(tok, '#') != NULL || strchr(tok, '%') != NULL);
+                char clean[32];
+                size_t cl = 0;
+                while (*tok && *tok != '#' && *tok != '%' && cl < sizeof(clean) - 1)
+                    clean[cl++] = *tok++;
+                clean[cl] = 0;
+                if (cl > 0)
+                    invfs_register_sibling_tag(clean, has_digits);
+                tok = strtok_r(NULL, ", \t", &save);
+            }
         } else if (strcmp(s, "blob_ext") == 0 || strcmp(s, "raw_ext") == 0) {
             /* WP619: suffixes are cosmetic staging names, but a '/' or
              * '..' in one would escape the scratch dir -- accept only
@@ -1398,7 +1414,7 @@ static const invfs_codec registry[] = {
      * loaded the sweep defers PNGs RAW and unstamped under photo_codec=nbli
      * instead of letting them fall to the generic floor. */
     { INVFS_ALGO_NBLI, "nbli",
-      INVFS_CODEC_CAP_EXTERNAL | INVFS_CODEC_CAP_PACKONLY, 0, 1,
+      INVFS_CODEC_CAP_EXTERNAL | INVFS_CODEC_CAP_PACKONLY | INVFS_CODEC_CAP_CONTAINER, 0, 1,
       sniff_pngr, probe_nbli, NULL, NULL },
     { INVFS_ALGO_PPMD, "ppmd",
       INVFS_CODEC_CAP_BATCHED, 68ull << 20, 0,
