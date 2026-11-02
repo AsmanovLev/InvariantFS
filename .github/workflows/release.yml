@@ -44,6 +44,7 @@ jobs:
 
   deb:
     runs-on: ubuntu-22.04
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,7 +125,7 @@ jobs:
           path: rpmbuild/RPMS/
 
   publish:
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && always() && !cancelled() && needs.tarball.result == 'success' && needs.arch.result == 'success'
     needs: [tarball, deb, arch, rpm]
     runs-on: ubuntu-22.04
     permissions:
@@ -142,6 +143,7 @@ jobs:
           name: dist-tarball
           path: assets
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: dist-deb
           path: assets
@@ -150,6 +152,7 @@ jobs:
           name: dist-arch
           path: assets
       - uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: dist-rpm
           path: assets
@@ -207,6 +210,7 @@ jobs:
 
   repin:
     needs: [publish]
+    if: always() && !cancelled() && needs.publish.result == 'success'
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4

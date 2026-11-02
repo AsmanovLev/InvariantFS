@@ -1,3 +1,9 @@
+invfs (0.6.11-1) unstable; urgency=medium
+
+  * Release v0.6.11
+
+  -- InvariantFS Developers <invfs@localhost>  Mon, 02 Nov 2026 12:07:59 +0700
+
 invfs (0.6.10-1) unstable; urgency=medium
 
   * Release v0.6.10

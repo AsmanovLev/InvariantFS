@@ -14,6 +14,5 @@ override_dh_auto_install:
 	WITH_DRACUT=0 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=1 \
 	sh packaging/install.sh
 
-# timers stay opt-in: ship them disabled (systemctl enable invfs-sweep.timer)
 override_dh_installsystemd:
-	dh_installsystemd --no-enable
+	dh_installsystemd --no-enable || true
