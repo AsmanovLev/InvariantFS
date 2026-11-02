@@ -26,11 +26,47 @@ invfs_stage_pack() {
 build() {
     add_module fuse
 
-    # Virtualization, storage, and keyboard drivers (Hyper-V, KVM, VirtIO, AHCI, NVMe)
-    for m in hv_vmbus hv_storvsc hv_netvsc hid_hyperv hyperv_keyboard \
-             virtio virtio_pci virtio_blk virtio_scsi ahci nvme sd_mod; do
+    # Base storage drivers
+    for m in ahci nvme sd_mod; do
         add_module "$m" 2>/dev/null || true
     done
+
+    # Detect virtualization environment (Hyper-V, KVM/QEMU, VMware)
+    local virt=""
+    if command -v systemd-detect-virt >/dev/null 2>&1; then
+        virt="$(systemd-detect-virt 2>/dev/null || true)"
+    fi
+    if [ -z "$virt" ] && [ -r /sys/class/dmi/id/sys_vendor ]; then
+        case "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)" in
+            *Microsoft*) virt="microsoft" ;;
+            *QEMU*)      virt="qemu" ;;
+            *VMware*)    virt="vmware" ;;
+        esac
+    fi
+
+    case "$virt" in
+        microsoft)
+            for m in hv_vmbus hv_storvsc hv_netvsc hid_hyperv hyperv_keyboard; do
+                add_module "$m" 2>/dev/null || true
+            done
+            ;;
+        kvm|qemu)
+            for m in virtio virtio_pci virtio_blk virtio_scsi; do
+                add_module "$m" 2>/dev/null || true
+            done
+            ;;
+        vmware)
+            for m in vmw_balloon vmxnet3 vmw_pvscsi; do
+                add_module "$m" 2>/dev/null || true
+            done
+            ;;
+        *)
+            # Generic / bare metal: add virtualization modules if loaded or present in hardware
+            for m in hv_storvsc virtio_blk virtio_scsi; do
+                grep -qw "$m" /proc/modules 2>/dev/null && add_module "$m" 2>/dev/null || true
+            done
+            ;;
+    esac
 
     # the daemon, the chroot hand-off helper, and the offline tools
     # (fsck/verify rescue, sweep for maintenance boots, rollback for the
