@@ -7,20 +7,24 @@
   <meta name="description" content="A semantic, content-addressed Linux filesystem with bit-exact verification and native rootfs boot.">
   <style>
     :root {
-      --bg: #090a0f;
-      --card-bg: #11131a;
-      --border: #1e2230;
-      --border-hover: #2e3447;
-      --text: #8e95a5;
-      --text-bright: #e6e8ee;
-      --heading: #ffffff;
-      --accent: #58a6ff;
-      --accent-muted: #1f3554;
-      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
-      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      --bg: #e8e6e1;
+      --surface: #f2f0ec;
+      --surface-subtle: #dedcd7;
+      --border: #1a1a1a;
+      --border-light: #707070;
+      --text: #1a1a1a;
+      --text-muted: #4a4a46;
+      --accent: #204060;
+      --mono: ui-monospace, "SF Mono", "Cascadia Code", "Liberation Mono", Menlo, Consolas, monospace;
+      --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
     }
 
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      border-radius: 0 !important; /* E-Ink strict sharp edges */
+    }
 
     body {
       background: var(--bg);
@@ -28,45 +32,54 @@
       font-family: var(--sans);
       line-height: 1.6;
       -webkit-font-smoothing: antialiased;
-      padding: 3rem 1.5rem;
+      padding: 3.5rem 1.5rem;
     }
 
     .container {
-      max-width: 760px;
+      max-width: 740px;
       margin: 0 auto;
     }
 
-    /* Navigation */
+    /* Top navigation */
     nav {
       display: flex;
       justify-content: space-between;
       align-items: center;
-      margin-bottom: 5rem;
+      border-bottom: 2px solid var(--border);
+      padding-bottom: 1rem;
+      margin-bottom: 4rem;
     }
 
     .brand {
       font-family: var(--mono);
-      font-size: 1.05rem;
+      font-size: 1.15rem;
       font-weight: 700;
-      color: var(--heading);
-      letter-spacing: -0.02em;
+      letter-spacing: -0.03em;
+      color: var(--text);
       text-decoration: none;
     }
 
     .nav-links {
       display: flex;
-      gap: 1.5rem;
+      gap: 1.25rem;
+      flex-wrap: wrap;
     }
 
     .nav-links a {
+      font-family: var(--mono);
+      font-size: 0.88rem;
       color: var(--text);
       text-decoration: none;
-      font-size: 0.9rem;
-      transition: color 0.15s ease;
+      border-bottom: 1px solid transparent;
+      transition: border-color 0.1s;
     }
 
     .nav-links a:hover {
-      color: var(--text-bright);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-links a.tg {
+      font-weight: 700;
     }
 
     /* Hero */
@@ -74,130 +87,165 @@
       margin-bottom: 4rem;
     }
 
-    .badge {
+    .status-tag {
       display: inline-block;
       font-family: var(--mono);
       font-size: 0.75rem;
       text-transform: uppercase;
       letter-spacing: 0.08em;
-      color: var(--accent);
-      background: var(--accent-muted);
-      padding: 0.2rem 0.6rem;
-      border-radius: 4px;
-      margin-bottom: 1.25rem;
+      padding: 0.2rem 0.5rem;
+      background: var(--border);
+      color: var(--bg);
+      margin-bottom: 1.5rem;
     }
 
     h1 {
-      font-size: 3rem;
-      font-weight: 700;
-      color: var(--heading);
-      letter-spacing: -0.04em;
-      line-height: 1.1;
+      font-size: 3.2rem;
+      font-weight: 800;
+      letter-spacing: -0.05em;
+      line-height: 1.05;
       margin-bottom: 1.25rem;
     }
 
-    .description {
+    .lead {
       font-size: 1.15rem;
-      color: var(--text);
+      color: var(--text-muted);
       max-width: 620px;
-      line-height: 1.65;
-      margin-bottom: 2.25rem;
+      line-height: 1.6;
+      margin-bottom: 2.5rem;
     }
 
-    /* Install bar */
-    .install-box {
-      background: var(--card-bg);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 0.85rem 1rem;
+    /* Terminal installer box */
+    .install-bar {
       display: flex;
       align-items: center;
       justify-content: space-between;
       gap: 1rem;
-      margin-bottom: 3.5rem;
-      transition: border-color 0.2s ease;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 0.9rem 1.1rem;
+      margin-bottom: 4.5rem;
+      box-shadow: 2px 2px 0 var(--border);
     }
 
-    .install-box:hover {
-      border-color: var(--border-hover);
-    }
-
-    .install-cmd {
+    .cmd-text {
       font-family: var(--mono);
       font-size: 0.95rem;
-      color: var(--text-bright);
+      color: var(--text);
       overflow-x: auto;
       white-space: nowrap;
     }
 
-    .prompt-symbol {
-      color: #555b6e;
+    .prompt {
+      color: var(--border-light);
       margin-right: 0.5rem;
       user-select: none;
     }
 
     .copy-btn {
-      background: transparent;
+      background: var(--bg);
       color: var(--text);
       border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 0.35rem 0.75rem;
+      padding: 0.4rem 0.85rem;
       font-family: var(--mono);
       font-size: 0.8rem;
+      font-weight: 600;
       cursor: pointer;
-      transition: all 0.15s ease;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
       flex-shrink: 0;
+      transition: background 0.1s, color 0.1s;
     }
 
     .copy-btn:hover {
-      color: var(--heading);
-      border-color: var(--border-hover);
-      background: rgba(255, 255, 255, 0.04);
+      background: var(--border);
+      color: var(--bg);
     }
 
     .copy-btn.copied {
-      color: #3fb950;
-      border-color: #238636;
+      background: var(--border);
+      color: var(--bg);
     }
 
-    /* Pillars */
-    .section-title {
+    /* Section layout */
+    .section-label {
       font-family: var(--mono);
       font-size: 0.8rem;
       text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: #555b6e;
+      letter-spacing: 0.1em;
+      color: var(--text-muted);
       margin-bottom: 1.5rem;
+      border-bottom: 1px dashed var(--border-light);
+      padding-bottom: 0.35rem;
     }
 
-    .pillars {
+    .features {
       display: grid;
       grid-template-columns: 1fr;
-      gap: 1.75rem;
+      gap: 2rem;
       margin-bottom: 5rem;
     }
 
-    .pillar {
-      border-left: 2px solid var(--border);
+    .feature-item {
       padding-left: 1.25rem;
-      transition: border-color 0.2s ease;
+      border-left: 2px solid var(--border);
     }
 
-    .pillar:hover {
-      border-color: var(--accent);
-    }
-
-    .pillar h3 {
+    .feature-item h3 {
+      font-family: var(--mono);
       font-size: 1.05rem;
-      color: var(--text-bright);
-      font-weight: 600;
-      margin-bottom: 0.35rem;
+      font-weight: 700;
+      margin-bottom: 0.4rem;
+      letter-spacing: -0.02em;
     }
 
-    .pillar p {
-      font-size: 0.92rem;
-      color: var(--text);
+    .feature-item p {
+      font-size: 0.94rem;
+      color: var(--text-muted);
       line-height: 1.55;
+    }
+
+    /* Quick Community Box */
+    .community-box {
+      border: 1px solid var(--border);
+      background: var(--surface);
+      padding: 1.5rem;
+      margin-bottom: 5rem;
+      box-shadow: 2px 2px 0 var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 1.5rem;
+      flex-wrap: wrap;
+    }
+
+    .community-text h4 {
+      font-family: var(--mono);
+      font-size: 1rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .community-text p {
+      font-size: 0.88rem;
+      color: var(--text-muted);
+    }
+
+    .tg-button {
+      display: inline-block;
+      font-family: var(--mono);
+      font-size: 0.85rem;
+      font-weight: 700;
+      text-decoration: none;
+      background: var(--border);
+      color: var(--bg);
+      border: 1px solid var(--border);
+      padding: 0.55rem 1.1rem;
+      transition: background 0.1s, color 0.1s;
+    }
+
+    .tg-button:hover {
+      background: transparent;
+      color: var(--border);
     }
 
     /* Footer */
@@ -205,26 +253,30 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding-top: 2rem;
-      border-top: 1px solid var(--border);
+      border-top: 1px solid var(--border-light);
+      padding-top: 1.75rem;
+      font-family: var(--mono);
       font-size: 0.82rem;
-      color: #555b6e;
+      color: var(--text-muted);
     }
 
     footer a {
       color: var(--text);
       text-decoration: none;
-      transition: color 0.15s ease;
+      border-bottom: 1px dotted var(--text);
     }
 
     footer a:hover {
-      color: var(--text-bright);
+      border-bottom-style: solid;
     }
 
     @media (max-width: 600px) {
       body { padding: 2rem 1.25rem; }
-      h1 { font-size: 2.25rem; }
-      nav { margin-bottom: 3.5rem; }
+      h1 { font-size: 2.4rem; }
+      nav { margin-bottom: 3rem; }
+      .install-bar { flex-direction: column; align-items: stretch; }
+      .copy-btn { text-align: center; }
+      .community-box { flex-direction: column; align-items: flex-start; }
       footer { flex-direction: column; gap: 0.75rem; text-align: center; }
     }
   </style>
@@ -234,6 +286,7 @@
     <nav>
       <a href="/" class="brand">invfs</a>
       <div class="nav-links">
+        <a href="https://t.me/InvariantFS" class="tg">telegram</a>
         <a href="https://github.com/AsmanovLev/InvariantFS">github</a>
         <a href="https://github.com/AsmanovLev/InvariantFS/releases">releases</a>
         <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs">docs</a>
@@ -241,42 +294,50 @@
     </nav>
 
     <main class="hero">
-      <div class="badge">Linux · Bit-Exact Filesystem</div>
+      <div class="status-tag">Linux Rootfs · Bit-Exact</div>
       <h1>InvariantFS</h1>
-      <p class="description">
-        Semantic, content-addressed filesystem engineered for verified storage invariants, zero hidden bit rot, and instant dual-device rootfs boots.
+      <p class="lead">
+        Semantic, content-addressed filesystem engineered for verified storage invariants, zero silent corruption, and instant dual-device rootfs boots.
       </p>
 
-      <div class="install-box">
-        <div class="install-cmd">
-          <span class="prompt-symbol">$</span>curl -fsSL https://invfs.ru/sh | sh
+      <div class="install-bar">
+        <div class="cmd-text">
+          <span class="prompt">$</span>curl -fsSL https://invfs.ru/sh | sh
         </div>
         <button class="copy-btn" id="copy-btn" onclick="copyInstall()">copy</button>
       </div>
 
-      <div class="section-title">Core Principles</div>
-      <div class="pillars">
-        <div class="pillar">
-          <h3>Bit-Exactness Invariant</h3>
-          <p>Every stored block undergoes an immediate decompress-and-compare verification roundtrip before publish. Silent bit corruption is mathematically rejected.</p>
+      <div class="section-label">System Architecture</div>
+      <div class="features">
+        <div class="feature-item">
+          <h3>01 / Bit-Exact Invariant</h3>
+          <p>Every stored block undergoes an immediate decompress-and-compare verification roundtrip before commit. Corrupted payloads cannot be published.</p>
         </div>
-        <div class="pillar">
-          <h3>Semantic Deduplication</h3>
-          <p>Multi-level recipe trees (CHLD) with container awareness (ISO, WIM, TAR, ZIP) eliminate duplicate payloads across independent workloads.</p>
+        <div class="feature-item">
+          <h3>02 / Semantic Deduplication</h3>
+          <p>Multi-level recipe trees (CHLD) and container unpacking (ISO, WIM, TAR, ZIP) eliminate duplicate payloads across independent workloads.</p>
         </div>
-        <div class="pillar">
-          <h3>Native Linux Rootfs Boot</h3>
-          <p>Runs as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.</p>
+        <div class="feature-item">
+          <h3>03 / Dual-Tier Storage & Sweep</h3>
+          <p>Fast SSD raw zone handles live synchronous writes, backed by immutable HDD shadow storage with offline reference-counting compaction (sweep).</p>
         </div>
-        <div class="pillar">
-          <h3>Dual-Tier Storage</h3>
-          <p>Ultra-low latency NVMe/SSD raw write path paired with durable mechanical shadow backing and offline reference-counting sweep.</p>
+        <div class="feature-item">
+          <h3>04 / Native Rootfs Boot</h3>
+          <p>Runs directly as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.</p>
         </div>
+      </div>
+
+      <div class="community-box">
+        <div class="community-text">
+          <h4>Join the Discussion</h4>
+          <p>Development updates, deployment notes, and architecture discussions.</p>
+        </div>
+        <a href="https://t.me/InvariantFS" class="tg-button">t.me/InvariantFS &rarr;</a>
       </div>
     </main>
 
     <footer>
-      <span>Open Source under GPL-2.0</span>
+      <span>GPL-2.0 Open Source</span>
       <span>Created by <a href="https://github.com/AsmanovLev">Lev Asmanov</a></span>
     </footer>
   </div>
@@ -285,10 +346,10 @@
     function copyInstall() {
       navigator.clipboard.writeText('curl -fsSL https://invfs.ru/sh | sh').then(() => {
         const btn = document.getElementById('copy-btn');
-        btn.textContent = 'copied';
+        btn.textContent = 'COPIED';
         btn.classList.add('copied');
         setTimeout(() => {
-          btn.textContent = 'copy';
+          btn.textContent = 'COPY';
           btn.classList.remove('copied');
         }, 1500);
       });
