@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -76,7 +76,6 @@
       font-weight: 900;
       letter-spacing: -0.05em;
       line-height: 1;
-      text-transform: uppercase;
       color: var(--text);
       user-select: none;
     }
@@ -361,7 +360,7 @@
       <nav class="nav-controls">
         <a href="https://t.me/InvariantFS" class="nav-link bold" target="_blank" rel="noopener">telegram</a>
         <a href="https://github.com/AsmanovLev/InvariantFS" class="nav-link" target="_blank" rel="noopener">github</a>
-        <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs" class="nav-link" target="_blank" rel="noopener" data-i18n="nav_docs">доки</a>
+        <a href="https://github.com/AsmanovLev/InvariantFS/tree/main/docs" class="nav-link" target="_blank" rel="noopener" data-i18n="nav_docs">docs</a>
         <button class="btn-toggle" id="lang-btn" onclick="toggleLang()">EN</button>
         <button class="btn-toggle" id="theme-btn" onclick="toggleTheme()">DARK</button>
       </nav>
@@ -428,8 +427,8 @@
       <!-- Telegram Banner -->
       <div class="banner">
         <div class="banner-text">
-          <h3 data-i18n="tg_title">Канал разработки и сообщество</h3>
-          <p data-i18n="tg_desc">Логи разработки, архитектурные решения, бенчмарки и обсуждение проекта.</p>
+          <h3 data-i18n="tg_title">Чат сообщества и разработки</h3>
+          <p data-i18n="tg_desc">Чат разработчиков, обсуждения архитектуры, идеи и обратная связь.</p>
         </div>
         <a href="https://t.me/InvariantFS" class="tg-cta" target="_blank" rel="noopener">t.me/InvariantFS &rarr;</a>
       </div>
@@ -445,7 +444,7 @@
   <script>
     const I18N = {
       ru: {
-        nav_docs: "доки",
+        nav_docs: "docs",
         lang_btn: "EN",
         hero_desc: "Семантическая файловая система с контентной адресацией, гарантированным побитовым инвариантом (decompress-and-compare) и поддержкой загрузки Linux rootfs на реальном железе.",
         copy_label: "копировать",
@@ -459,8 +458,8 @@
         c3_body: "Горячий SSD RAW-слой обслуживает синхронные записи без задержек на зеркалирование, а фоновый sweep выполняет сборку мусора и уплотнение в неизменяемый HDD Shadow.",
         c4_title: "Загрузка Linux Rootfs",
         c4_body: "Прямая работа в качестве корня (PID 1) на физическом стенде с интеграцией в mkinitcpio, dracut и initramfs для Arch Linux, Gentoo, Debian и Void.",
-        tg_title: "Канал разработки и сообщество",
-        tg_desc: "Логи разработки, архитектурные решения, бенчмарки и обсуждение проекта.",
+        tg_title: "Чат сообщества и разработки",
+        tg_desc: "Чат разработчиков, обсуждения архитектуры, идеи и обратная связь.",
         author_by: "Автор:"
       },
       en: {
@@ -478,13 +477,13 @@
         c3_body: "Fast SSD raw zone handles live synchronous writes, backed by immutable HDD shadow storage with offline reference-counting compaction (sweep).",
         c4_title: "Native Rootfs Boot",
         c4_body: "Runs directly as PID 1 root mount with first-class support for Arch Linux, Debian/Ubuntu, Gentoo, and Void via custom initramfs hooks.",
-        tg_title: "Development Channel",
-        tg_desc: "Engineering updates, architectural decisions, benchmarks, and project discussions.",
+        tg_title: "Community & Development Chat",
+        tg_desc: "Engineering chat, architectural discussions, ideas, and project feedback.",
         author_by: "Created by"
       }
     };
 
-    let currentLang = localStorage.getItem("invfs:lang") || "ru";
+    let currentLang = localStorage.getItem("invfs:lang") || "en";
     let currentTheme = localStorage.getItem("invfs:theme") || "paper";
 
     function applyLang(lang) {
