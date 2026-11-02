@@ -493,6 +493,26 @@ static int del_siblings_cb(void *ctx_, const char *path, uint64_t ino,
  * guess. That costs the purge on an otherwise healthy volume -- which is the
  * trade, and it is why the refusal is printed on stderr rather than left to
  * the latch alone. */
+typedef struct {
+    const char *leaf;
+    size_t llen;
+    int found;
+} sib_fast_scan_ctx;
+
+static int sib_fast_scan_cb(void *ctx_, const char *dname, size_t dnlen, uint64_t dino)
+{
+    sib_fast_scan_ctx *sc = (sib_fast_scan_ctx *)ctx_;
+    (void)dino;
+    if (dnlen > sc->llen &&
+        dname[0] == sc->leaf[0] &&
+        dname[sc->llen] == '!' &&
+        memcmp(dname, sc->leaf, sc->llen) == 0) {
+        sc->found = 1;
+        return 1; /* Match found: stop scan immediately */
+    }
+    return 0;
+}
+
 int vol_delete_siblings(invfs_volume *v, const char *name)
 {
     del_siblings_ctx c;
@@ -501,10 +521,9 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
     int rc, n;
     const char *norm;
     char parent[600], leaf[INVFS_MAX_NAME + 1];
-    invfs_dirent *ents = NULL;
-    int cap = 256, n_ents;
     int has_cand = 0;
     size_t llen;
+    uint64_t pino = 0;
 
     if (!v || !name || !*name)
         return 0;
@@ -520,35 +539,29 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
 
     /* Fast in-memory check of the parent directory: if no dirent in parent
      * starts with "<leaf>!", this file cannot possibly own any siblings.
-     * This avoids expensive recursive namespace walks during rm -rf of
-     * ordinary files. */
-    ents = (invfs_dirent *)malloc((size_t)cap * sizeof *ents);
-    if (ents) {
-        for (;;) {
-            n_ents = vol_path_list_dir(v, parent, ents, cap);
-            if (n_ents < 0) {
-                has_cand = 1;
-                break;
-            }
-            if (n_ents < cap)
-                break;
-            cap *= 2;
-            {
-                void *ne = realloc(ents, (size_t)cap * sizeof *ents);
-                if (!ne) { has_cand = 1; break; }
-                ents = (invfs_dirent *)ne;
-            }
+     * We scan dirents directly with vol_dirent_scan without allocating
+     * arrays or running qsort, avoiding O(N^2) overhead on large directories. */
+    if (skip_slash(parent)[0] == 0) {
+        pino = INVFS_ROOT_INO;
+    } else {
+        int plrc = vol_path_lookup(v, parent, &pino);
+        if (plrc < 0)
+            has_cand = 1;
+        else if (plrc == 0)
+            return 0;
+    }
+
+    if (pino != 0 && !has_cand) {
+        sib_fast_scan_ctx sc;
+        sc.leaf = leaf;
+        sc.llen = llen;
+        sc.found = 0;
+        int s_rc = vol_dirent_scan(v, pino, sib_fast_scan_cb, &sc);
+        if (s_rc < 0) {
+            has_cand = 1; /* fail closed on error */
+        } else {
+            has_cand = sc.found;
         }
-        if (!has_cand) {
-            for (i = 0; i < (size_t)n_ents; i++) {
-                if (strncmp(ents[i].name, leaf, llen) == 0 &&
-                    ents[i].name[llen] == '!') {
-                    has_cand = 1;
-                    break;
-                }
-            }
-        }
-        free(ents);
         if (!has_cand)
             return 0;
     }
