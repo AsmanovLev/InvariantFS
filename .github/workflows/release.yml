@@ -18,7 +18,27 @@ env:
   TAG: ${{ github.ref_type == 'tag' && github.ref_name || 'v0.6.9' }}
 
 jobs:
+  test-gate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config             libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+      - name: build
+        run: make -j"$(nproc)"
+      - name: repo hygiene
+        run: bash tools/check-repo-hygiene.sh
+      - name: unit tests
+        run: make -j4 test TESTENV='INVFS_TEST_DEBUG=1'
+
   tarball:
+    needs: [test-gate]
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -43,6 +63,7 @@ jobs:
             dist/SHA256SUMS
 
   deb:
+    needs: [test-gate]
     runs-on: ubuntu-22.04
     continue-on-error: true
     steps:
@@ -59,7 +80,7 @@ jobs:
       - name: debuild
         run: |
           ln -s packaging/debian debian
-          dpkg-buildpackage -us -uc -b
+          dpkg-buildpackage -us -uc -b --no-sign
           mkdir -p debs && mv ../*.deb ../*.buildinfo ../*.changes debs/
       - uses: actions/upload-artifact@v4
         with:
@@ -67,7 +88,7 @@ jobs:
           path: debs/
 
   arch:
-    needs: tarball
+    needs: [test-gate, tarball]
     runs-on: ubuntu-22.04
     container: archlinux:latest
     steps:
@@ -101,6 +122,7 @@ jobs:
             pkg/TARBALL.sha256
 
   rpm:
+    needs: [test-gate]
     runs-on: ubuntu-22.04
     container: fedora:latest
     steps:
@@ -125,8 +147,8 @@ jobs:
           path: rpmbuild/RPMS/
 
   publish:
-    if: github.event_name == 'push' && always() && !cancelled() && needs.tarball.result == 'success' && needs.arch.result == 'success'
-    needs: [tarball, deb, arch, rpm]
+    if: github.event_name == 'push' && always() && !cancelled() && needs.test-gate.result == 'success' && needs.tarball.result == 'success' && needs.arch.result == 'success'
+    needs: [test-gate, tarball, deb, arch, rpm]
     runs-on: ubuntu-22.04
     permissions:
       contents: write

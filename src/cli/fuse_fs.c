@@ -720,6 +720,26 @@ static void table_sync_one_locked(const char *name)
         table_mark_stale();   /* found, but not stat-able: same "keep, and ask again later" */
 }
 
+static void sync_parents_locked(const char *name)
+{
+    char tmp[600];
+    size_t n = strlen(name);
+    if (n >= sizeof tmp) return;
+    memcpy(tmp, name, n + 1);
+    for (size_t i = 0; i < n; i++) {
+        if (tmp[i] == '/') {
+            tmp[i] = 0;
+            if (tmp[0]) {
+                char anc[600];
+                snprintf(anc, sizeof anc, "%s/", tmp);
+                table_sync_one_locked(tmp);
+                table_sync_one_locked(anc);
+            }
+            tmp[i] = '/';
+        }
+    }
+}
+
 
 /* Race-safe lookup (audit H1): g_entries is freed and rebuilt by every
  * flush/create/unlink/sweep, so callers must never hold the pointer across
@@ -822,7 +842,13 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
         grc = g_vol ? vol_get_meta_rc(g_vol, ino, m) : -EIO;
         pthread_mutex_unlock(&g_io_lock);
         if (grc == -EIO) return -1;
-        if (grc == -ENOENT) meta_defaults(name, size, m);
+        if (grc == -ENOENT) {
+            /* Inode is gone from the engine: evict stale snapshot entry */
+            pthread_mutex_lock(&g_io_lock);
+            table_remove_name(name);
+            pthread_mutex_unlock(&g_io_lock);
+            return 0;
+        }
         snprintf(ename, ecapsz, "%s", name);
         return 1;
     }
@@ -1763,6 +1789,7 @@ static int invf_mkdir(const char *path, mode_t mode)
     }
     pthread_mutex_lock(&g_io_lock);
     vol_ensure_path(g_vol, path + 1);
+    sync_parents_locked(path + 1);
     uint64_t d = vol_mkdir(g_vol, path + 1);
     int acldeny = 0;
     if (d) {
@@ -1843,8 +1870,10 @@ static int invf_mkdir(const char *path, mode_t mode)
                     fprintf(stderr, "invf: mkdir defACL inherit FAILED %s\n", anchor);
             }
         }
-        if (d)
+        if (d) {
             table_sync_one_locked(anchor);
+            table_sync_one_locked(path + 1);
+        }
     }
     pthread_mutex_unlock(&g_io_lock);
     if (acldeny)
@@ -1870,6 +1899,7 @@ static int invf_rmdir(const char *path)
         char anc[300];
         snprintf(anc, sizeof anc, "%s/", path + 1);
         table_remove_name(anc);
+        table_remove_name(path + 1);
     }
     pthread_mutex_unlock(&g_io_lock);
     return rc == 0 ? 0 : (rc == -2 ? -ENOTEMPTY : -ENOENT);
@@ -4010,6 +4040,10 @@ static int invf_unlink(const char *path)
         }
     }
     pthread_mutex_lock(&g_io_lock);
+    if (g_vol && vol_path_is_dir(g_vol, path + 1)) {
+        pthread_mutex_unlock(&g_io_lock);
+        return -EISDIR;
+    }
     rc = vol_unlink(g_vol, path + 1);
     if (rc == 0) {
         table_remove_name(path + 1);   /* no flush: tombstone+bitmap are

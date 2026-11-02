@@ -46,17 +46,17 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1697:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:1995:SKIP
-src/cli/fuse_fs.c:2333:SKIP
-src/cli/fuse_fs.c:3042:SKIP
-src/cli/fuse_fs.c:3263:SKIP
-src/cli/fuse_fs.c:3318:SKIP
-src/cli/fuse_fs.c:3579:SKIP
-src/cli/fuse_fs.c:3784:SKIP
-src/cli/fuse_fs.c:3871:SKIP
-src/cli/fuse_fs.c:3906:SKIP
-src/cli/fuse_fs.c:3943:SKIP
+src/cli/fuse_fs.c:1723:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2025:SKIP
+src/cli/fuse_fs.c:2363:SKIP
+src/cli/fuse_fs.c:3072:SKIP
+src/cli/fuse_fs.c:3293:SKIP
+src/cli/fuse_fs.c:3348:SKIP
+src/cli/fuse_fs.c:3609:SKIP
+src/cli/fuse_fs.c:3814:SKIP
+src/cli/fuse_fs.c:3901:SKIP
+src/cli/fuse_fs.c:3936:SKIP
+src/cli/fuse_fs.c:3973:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row
@@ -144,10 +144,10 @@ src/core/vol_sweep.c:624:ACTS
 src/core/vol_sweep.c:657:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
-src/core/volume.c:961:SKIP   # reserve scan: direct .ivpack file lookup
-src/core/volume.c:982:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1449:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1450:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:968:SKIP   # reserve scan: direct .ivpack file lookup
+src/core/volume.c:989:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1463:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1464:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

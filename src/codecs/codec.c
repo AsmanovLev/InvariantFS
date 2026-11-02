@@ -27,6 +27,14 @@
 #include "ppmd_codec.h"
 #include "zstd.h"
 
+/* Weak fallback for standalone unit harnesses that do not link vol_records.o */
+__attribute__((weak)) int invfs_register_sibling_tag(const char *tag, int has_digits)
+{
+    (void)tag;
+    (void)has_digits;
+    return 0;
+}
+
 /* ---------------- builtin codecs ---------------- */
 
 static int none_encode(const uint8_t *in, size_t inlen,
