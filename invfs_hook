@@ -82,32 +82,58 @@ invfs_probe_uuid() {
 invfs_mount_handler() {
     local mp="$1"
     local dev="${root#invfs:}"
-    local raw_uuid dev1 invfs_init
+    local raw_uuid dev1 invfs_init resolved
 
     modprobe fuse 2>/dev/null
 
     # root device: invfs.raw_uuid pins it; else root= / root=invfs:<dev>
     raw_uuid="$(invfs_getarg invfs.raw_uuid)"
     if [ -n "$raw_uuid" ]; then
-        dev="$(invfs_probe_uuid "$raw_uuid")" \
-            || invfs_die "no InvariantFS device with uuid $raw_uuid"
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            found_dev="$(invfs_probe_uuid "$raw_uuid")" || true
+            [ -n "$found_dev" ] && { dev="$found_dev"; break; }
+            sleep 0.5
+        done
+        [ -n "$dev" ] || invfs_die "no InvariantFS device with uuid $raw_uuid"
     elif [ -n "$dev" ]; then
-        dev="$(resolve_device "$dev")" \
-            || invfs_die "cannot resolve root device '$dev'"
+        for _ in 1 2 3 4 5 6 7 8 9 10; do
+            resolved="$(resolve_device "$dev" 2>/dev/null || true)"
+            if [ -n "$resolved" ] && [ -b "$resolved" ]; then
+                dev="$resolved"
+                break
+            elif [ -b "$dev" ]; then
+                break
+            fi
+            sleep 0.5
+        done
+        [ -b "$dev" ] || invfs_die "cannot resolve root device '$dev'"
     else
-        invfs_die "root device not set (need root=<dev> or root=invfs:<dev>)"
+        invfs_die "root device not set (need root=<dev>, root=UUID=<uuid> or invfs.raw_uuid=<hex>)"
     fi
 
     # second device: invfs.dev1=<dev> wins, else invfs.dev1_uuid=<hex>
     dev1="$(invfs_getarg invfs.dev1)"
     if [ -n "$dev1" ]; then
-        dev1="$(resolve_device "$dev1")" \
-            || invfs_die "cannot resolve dev1 device '$dev1'"
+        for _ in 1 2 3 4 5; do
+            resolved="$(resolve_device "$dev1" 2>/dev/null || true)"
+            if [ -n "$resolved" ] && [ -b "$resolved" ]; then
+                dev1="$resolved"
+                break
+            elif [ -b "$dev1" ]; then
+                break
+            fi
+            sleep 0.5
+        done
+        [ -b "$dev1" ] || invfs_die "cannot resolve dev1 device '$dev1'"
     else
         dev1="$(invfs_getarg invfs.dev1_uuid)"
         if [ -n "$dev1" ]; then
-            dev1="$(invfs_probe_uuid "$dev1")" \
-                || invfs_die "no InvariantFS device with uuid $dev1"
+            for _ in 1 2 3 4 5; do
+                found_dev="$(invfs_probe_uuid "$dev1")" || true
+                [ -n "$found_dev" ] && { dev1="$found_dev"; break; }
+                sleep 0.5
+            done
+            [ -n "$dev1" ] || invfs_die "no InvariantFS device with uuid $dev1"
         fi
     fi
     if [ -n "$dev1" ]; then
