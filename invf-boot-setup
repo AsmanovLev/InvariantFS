@@ -1,0 +1,238 @@
+#!/bin/sh
+# invf-boot-setup: automated UEFI bootloader setup for InvariantFS rootfs.
+#
+# Generates a standalone GRUB EFI binary and grub.cfg on the ESP partition,
+# bypassing grub-install / grub-probe which fail on FUSE root filesystems.
+#
+# Supports:
+#   - Single-device root (root=/dev/sda2 rootfstype=invfs)
+#   - Dual-device mirror (root=/dev/sda2 rootfstype=invfs invfs.dev1=/dev/sdb2)
+#   - Auto-detection of ESP partition and UUID
+#   - Auto-registration with efibootmgr if available
+set -eu
+
+PROG="invf-boot-setup"
+
+die() {
+    echo "$PROG: error: $*" >&2
+    exit 1
+}
+
+info() {
+    echo "$PROG: $*" >&2
+}
+
+usage() {
+    cat <<EOF
+Usage: $PROG [OPTIONS]
+
+Configure UEFI bootloader for an InvariantFS root filesystem.
+
+Options:
+  --esp DIR        Path to mounted ESP partition (default: auto-detect /boot, /boot/efi, /efi)
+  --root DEV       Root block device (default: auto-detect from /)
+  --dev1 DEV       Second (shadow/mirror) device if dual-device (default: auto-detect)
+  --cmdline OPTS   Extra kernel command line arguments (e.g. "quiet loglevel=3")
+  --dry-run        Print actions without writing files
+  -h, --help       Show this help message
+EOF
+}
+
+ESP_DIR=""
+ROOT_DEV=""
+DEV1_DEV=""
+EXTRA_CMDLINE=""
+DRY_RUN=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --esp)       ESP_DIR="$2"; shift 2 ;;
+        --root)      ROOT_DEV="$2"; shift 2 ;;
+        --dev1)      DEV1_DEV="$2"; shift 2 ;;
+        --cmdline)   EXTRA_CMDLINE="$2"; shift 2 ;;
+        --dry-run)   DRY_RUN=1; shift ;;
+        -h|--help)   usage; exit 0 ;;
+        *) die "unknown option: $1" ;;
+    esac
+done
+
+[ "$(id -u)" = 0 ] || die "must be run as root"
+
+# 1. Detect Root Device
+if [ -z "$ROOT_DEV" ]; then
+    root_src=$(findmnt -n -o SOURCE / 2>/dev/null || true)
+    case "$root_src" in
+        *invfs\[*dev1=*\]*)
+            # dual-device mount: invfs[/dev/sda2,dev1=/dev/sdb2]
+            inner="${root_src#*invfs\[}"
+            inner="${inner%%\]*}"
+            ROOT_DEV="${inner%%,*}"
+            if [ -z "$DEV1_DEV" ]; then
+                dev1_part="${inner#*dev1=}"
+                DEV1_DEV="${dev1_part%%,*}"
+            fi
+            ;;
+        *invfs\[*\]*)
+            # single-device mount: invfs[/dev/sda2]
+            inner="${root_src#*invfs\[}"
+            ROOT_DEV="${inner%%\]*}"
+            ;;
+        /dev/*)
+            ROOT_DEV="$root_src"
+            ;;
+        *)
+            # Try to resolve from mountinfo
+            line=$(grep ' - fuse ' /proc/self/mountinfo 2>/dev/null | grep ' / ' | head -1 || true)
+            if [ -n "$line" ]; then
+                raw=$(echo "$line" | awk '{print $NF}')
+                case "$raw" in
+                    *invfs\[*\]*)
+                        inner="${raw#*invfs\[}"
+                        ROOT_DEV="${inner%%\]*}"
+                        ;;
+                esac
+            fi
+            ;;
+    esac
+fi
+
+[ -n "$ROOT_DEV" ] || die "could not auto-detect root device; specify with --root <device>"
+info "detected root device: $ROOT_DEV"
+
+# 2. Detect Dual-Device dev1 if not set
+if [ -z "$DEV1_DEV" ] && [ -n "$ROOT_DEV" ] && command -v invf-stats >/dev/null 2>&1; then
+    stats_out=$(invf-stats "$ROOT_DEV" 2>/dev/null || true)
+    if echo "$stats_out" | grep -qi "mirror"; then
+        # check if dev1 uuid or dev is listed
+        maybe_dev1=$(echo "$stats_out" | awk -F: '/shadow device|dev1/ {gsub(/^[ \t]+|[ \t]+$/, "", $2); print $2}' | head -1 || true)
+        [ -n "$maybe_dev1" ] && [ -b "$maybe_dev1" ] && DEV1_DEV="$maybe_dev1"
+    fi
+fi
+
+if [ -n "$DEV1_DEV" ]; then
+    info "dual-device setup: second device $DEV1_DEV (INVFS_DEV1)"
+else
+    info "single-device setup"
+fi
+
+# 3. Detect ESP partition
+if [ -z "$ESP_DIR" ]; then
+    for candidate in /boot /boot/efi /efi /boot/EFI; do
+        if [ -d "$candidate" ]; then
+            fstype=$(findmnt -n -o FSTYPE "$candidate" 2>/dev/null || true)
+            if [ "$fstype" = "vfat" ]; then
+                ESP_DIR="$candidate"
+                break
+            fi
+        fi
+    done
+fi
+
+[ -n "$ESP_DIR" ] || die "could not find mounted ESP (vfat) partition; mount it or specify --esp <dir>"
+[ -d "$ESP_DIR" ] || die "ESP directory not found: $ESP_DIR"
+
+fstype=$(findmnt -n -o FSTYPE "$ESP_DIR" 2>/dev/null || true)
+[ "$fstype" = "vfat" ] || die "ESP at $ESP_DIR is not vfat (found: ${fstype:-unknown})"
+
+esp_uuid=$(findmnt -n -o UUID "$ESP_DIR" 2>/dev/null || true)
+if [ -z "$esp_uuid" ]; then
+    esp_src=$(findmnt -n -o SOURCE "$ESP_DIR" 2>/dev/null || true)
+    if [ -n "$esp_src" ] && command -v blkid >/dev/null 2>&1; then
+        esp_uuid=$(blkid -s UUID -o value "$esp_src" 2>/dev/null || true)
+    fi
+fi
+
+[ -n "$esp_uuid" ] || die "could not determine UUID of ESP partition at $ESP_DIR"
+info "detected ESP: $ESP_DIR (UUID: $esp_uuid)"
+
+# 4. Check for grub-mkimage
+command -v grub-mkimage >/dev/null 2>&1 || die "grub-mkimage not found; please install grub (pacman -S grub / apt install grub-efi-amd64-bin)"
+
+# 5. Build Standalone GRUB EFI Binary
+efi_boot_dir="$ESP_DIR/EFI/BOOT"
+efi_grub_dir="$ESP_DIR/EFI/invfs"
+grub_cfg_dir="$ESP_DIR/boot/grub"
+
+info "generating GRUB EFI binary for x86_64-efi..."
+if [ "$DRY_RUN" = 0 ]; then
+    mkdir -p "$efi_boot_dir" "$efi_grub_dir" "$grub_cfg_dir"
+
+    grub-mkimage -O x86_64-efi \
+        -o "$efi_boot_dir/BOOTX64.EFI" \
+        -p /boot/grub \
+        fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv
+
+    cp "$efi_boot_dir/BOOTX64.EFI" "$efi_boot_dir/grubx64.efi"
+    cp "$efi_boot_dir/BOOTX64.EFI" "$efi_grub_dir/grubx64.efi"
+fi
+
+# 6. Build Kernel Command Line
+kcmd="root=$ROOT_DEV rootfstype=invfs rw"
+[ -n "$DEV1_DEV" ] && kcmd="$kcmd invfs.dev1=$DEV1_DEV"
+[ -n "$EXTRA_CMDLINE" ] && kcmd="$kcmd $EXTRA_CMDLINE"
+
+# 7. Write grub.cfg
+info "writing grub.cfg (cmdline: $kcmd)..."
+cfg_content="set default=0
+set timeout=3
+set gfxpayload=keep
+
+menuentry \"Arch Linux (InvariantFS)\" {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $esp_uuid
+    if [ -f /vmlinuz-linux ]; then
+        linux /vmlinuz-linux $kcmd
+        initrd /initramfs-linux.img
+    elif [ -f /boot/vmlinuz-linux ]; then
+        linux /boot/vmlinuz-linux $kcmd
+        initrd /boot/initramfs-linux.img
+    elif [ -f /vmlinuz ]; then
+        linux /vmlinuz $kcmd
+        initrd /initramfs.img
+    else
+        linux /boot/vmlinuz $kcmd
+        initrd /boot/initramfs.img
+    fi
+}
+
+menuentry \"Arch Linux (InvariantFS, fallback initramfs)\" {
+    insmod part_gpt
+    insmod fat
+    search --no-floppy --fs-uuid --set=root $esp_uuid
+    if [ -f /vmlinuz-linux ]; then
+        linux /vmlinuz-linux $kcmd
+        initrd /initramfs-linux-fallback.img
+    else
+        linux /boot/vmlinuz-linux $kcmd
+        initrd /boot/initramfs-linux-fallback.img
+    fi
+}
+"
+
+if [ "$DRY_RUN" = 0 ]; then
+    printf '%s\n' "$cfg_content" > "$grub_cfg_dir/grub.cfg"
+    printf '%s\n' "$cfg_content" > "$efi_boot_dir/grub.cfg"
+fi
+
+# 8. Register UEFI boot entry if efibootmgr is available
+if command -v efibootmgr >/dev/null 2>&1 && [ "$DRY_RUN" = 0 ]; then
+    esp_src=$(findmnt -n -o SOURCE "$ESP_DIR" 2>/dev/null || true)
+    if [ -n "$esp_src" ]; then
+        # extract parent disk and partition number: e.g. /dev/sda1 -> /dev/sda and 1
+        esp_disk=$(echo "$esp_src" | sed -E 's/p?[0-9]+$//')
+        esp_part=$(echo "$esp_src" | grep -oE '[0-9]+$' || echo "1")
+        if [ -b "$esp_disk" ] && [ -n "$esp_part" ]; then
+            info "registering UEFI boot entry with efibootmgr on $esp_disk part $esp_part..."
+            efibootmgr --create --disk "$esp_disk" --part "$esp_part" \
+                --label "InvariantFS" \
+                --loader '\EFI\BOOT\BOOTX64.EFI' \
+                --quiet 2>/dev/null || true
+        fi
+    fi
+fi
+
+info "bootloader setup complete!"
+info "EFI executable: $efi_boot_dir/BOOTX64.EFI"
+info "GRUB config:    $grub_cfg_dir/grub.cfg"
+exit 0
