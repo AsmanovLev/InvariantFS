@@ -13,6 +13,7 @@ usr/bin/invf*
 usr/sbin/fsck.invfs
 usr/sbin/mkfs.invfs
 usr/sbin/mount.invfs
+usr/sbin/invf-boot-setup
 usr/lib/invfs/codecpacks
 usr/share/man/man1
 usr/share/man/man7

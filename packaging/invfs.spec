@@ -10,7 +10,7 @@
 %{!?_unitdir: %global _unitdir /usr/lib/systemd/system}
 
 Name:           invfs
-Version:        0.6.8
+Version:        0.6.9
 Release:        1%{?dist}
 Summary:        Semantic content-addressed filesystem with a bit-exactness invariant
 
@@ -72,6 +72,7 @@ DESTDIR=%{buildroot} PREFIX=%{_prefix} \
 /usr/sbin/fsck.invfs
 /usr/sbin/mkfs.invfs
 /usr/sbin/mount.invfs
+/usr/sbin/invf-boot-setup
 /usr/lib/invfs/codecpacks/
 %{_mandir}/man7/invarifs.7*
 %{_mandir}/man1/invf-*.1*

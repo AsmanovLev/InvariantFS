@@ -1,3 +1,9 @@
+invfs (0.6.9-1) unstable; urgency=medium
+
+  * Release v0.6.9
+
+ -- InvariantFS Developers <invfs@localhost>  Mon, 02 Nov 2026 11:39:36 +0700
+
 invfs (0.6.8-1) unstable; urgency=medium
 
   * core: eliminate O(N^2) unlink bottleneck by scoping sibling cascade to parent directory with fast in-memory candidate filter (speeds up rm -rf from 2-4 files/s to 10000+ files/s).
