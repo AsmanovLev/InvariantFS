@@ -601,7 +601,7 @@ do_release() {
                             verify_sha256 "$CACHE/$arch_pkg" "$CACHE/SHA256SUMS" "$arch_pkg"
                         fi
                         info "installing via pacman..."
-                        pacman -U --noconfirm "$CACHE/$arch_pkg"
+                        pacman -U --noconfirm --overwrite "*" "$CACHE/$arch_pkg"
                         info "native Arch Linux package installed successfully"
                         ensure_extras
                         return 0
