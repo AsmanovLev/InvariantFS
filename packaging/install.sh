@@ -108,10 +108,12 @@ for s in "$ROOT"/tools/sbin/*; do
     record "$DESTDIR$SBINDIR/${s##*/}"
 done
 
-# Ensure invf-boot-setup is reachable in BINDIR as well
+# Ensure invf-boot-setup is reachable in BINDIR as well (on non-merged-usr layouts)
 if [ -f "$DESTDIR$SBINDIR/invf-boot-setup" ] && [ "$BINDIR" != "$SBINDIR" ]; then
-    ln -sf "$SBINDIR/invf-boot-setup" "$DESTDIR$BINDIR/invf-boot-setup"
-    record "$DESTDIR$BINDIR/invf-boot-setup"
+    if ! [ -L /usr/sbin ] && ! [ -L /sbin ] && ! [ /usr/sbin -ef /usr/bin 2>/dev/null ]; then
+        ln -sf "$SBINDIR/invf-boot-setup" "$DESTDIR$BINDIR/invf-boot-setup"
+        record "$DESTDIR$BINDIR/invf-boot-setup"
+    fi
 fi
 
 # ---- codecpacks ------------------------------------------------------------

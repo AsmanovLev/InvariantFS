@@ -90,6 +90,7 @@ src_install() {
 	local -x WITH_MKINITCPIO=0
 	local -x WITH_INITRAMFS_TOOLS=0
 	sh packaging/install.sh || die "packaging/install.sh failed"
+	rm -f "${ED}/usr/bin/invf-boot-setup"
 
 	# Timers stay opt-in: Gentoo's systemd convention is to ship them
 	# disabled and let the admin run `systemctl enable --now invfs-sweep.timer`.
