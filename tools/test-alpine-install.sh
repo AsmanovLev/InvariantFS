@@ -1,0 +1,147 @@
+#!/bin/bash
+# test-alpine-install.sh — Alpine Linux minirootfs install onto InvariantFS.
+#
+# Stages 1-5 (offline volume test, NO QEMU boot):
+#   1. Download/verify Alpine minirootfs tarball
+#   2. Unpack on ordinary filesystem (never tar through FUSE)
+#   3. Provision with tools/configure-alpine.sh (inittab, OpenRC, interfaces, shadow)
+#   4. Format single-device volume, import with invf-import, verify object counts,
+#      invf-fsck clean, bit-exact invf-cat reads
+#   5. Format dual-device volume (INVFS_DEV1), import, verify metadata mirror + fsck
+#
+# Run from repo root:
+#   bash tools/test-alpine-install.sh
+set -euo pipefail
+
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+B="$REPO/bin"
+WORK="${INVFS_ALPINE_WORK:-/var/tmp/invfs-alpine-test}"
+URL="${INVFS_ALPINE_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/x86_64}"
+ROOTFS="${INVFS_ALPINE_ROOTFS:-alpine-minirootfs-3.21.0-x86_64.tar.gz}"
+TARBALL="${INVFS_ALPINE_TARBALL:-$WORK/$ROOTFS}"
+STAGE="$WORK/stage"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+note() { echo "== $* =="; }
+
+for t in invf-mkfs invf-import invf-ls invf-fsck invf-cat; do
+    [ -x "$B/$t" ] || fail "missing $B/$t (run make first)"
+done
+command -v tar >/dev/null || fail "tar not found"
+
+mkdir -p "$WORK"
+rm -rf "$STAGE"; mkdir -p "$STAGE"
+
+note "stage 1: Alpine minirootfs tarball"
+if [ ! -s "$TARBALL" ]; then
+    echo "downloading $URL/$ROOTFS"
+    if command -v curl >/dev/null; then
+        curl -fL --retry 3 -o "$TARBALL.part" "$URL/$ROOTFS" \
+            || fail "download failed (offline?)"
+        curl -fL --retry 3 -o "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+    elif command -v wget >/dev/null; then
+        wget -O "$TARBALL.part" "$URL/$ROOTFS" || fail "download failed (offline?)"
+        wget -O "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+    else
+        fail "no curl/wget and no cached tarball at $TARBALL"
+    fi
+    mv "$TARBALL.part" "$TARBALL"
+fi
+echo "tarball: $TARBALL ($(stat -c %s "$TARBALL") bytes)"
+
+if [ -f "$TARBALL.sha256" ]; then
+    ( cd "$WORK" && sha256sum -c "$ROOTFS.sha256" ) || fail "checksum mismatch"
+    note "checksum verified against upstream sha256"
+fi
+
+note "stage 2: extract on an ordinary fs (not FUSE)"
+tar -xzpf "$TARBALL" -C "$STAGE" 2>/dev/null || tar -xzf "$TARBALL" -C "$STAGE"
+for f in etc/inittab bin/busybox etc/issue; do
+    [ -e "$STAGE/$f" ] || fail "Alpine tree missing $f"
+done
+
+note "stage 3: provision (inittab autologin, fstab, network, runlevels)"
+"$REPO/tools/configure-alpine.sh" "$STAGE" || fail "configure-alpine.sh failed"
+grep -q 'ttyS0' "$STAGE/etc/inittab" || fail "ttyS0 missing in inittab"
+grep -q 'alpine-invfs' "$STAGE/etc/hostname" || fail "hostname not configured"
+
+EXPECT=$(find "$STAGE" -mindepth 1 | wc -l)
+echo "staged objects: $EXPECT"
+
+# Regular files for bit-exact comparison
+BITEXACT="etc/inittab etc/hostname etc/fstab etc/network/interfaces etc/shadow etc/os-release bin/busybox"
+
+check_volume() {
+    local label="$1" img="$2"
+    local listed lsout="$WORK/ls-$label.txt" objs dirs
+    "$B/invf-ls" "$img" > "$lsout" 2>/dev/null || fail "$label: invf-ls failed"
+
+    listed=$(grep -cE '^[[:space:]]*[0-9]+ bytes  inode [0-9]+  ' "$lsout" || true)
+    objs=$(tail -1 "$lsout" | awk '{print $1}')
+    dirs=$(grep -cE '/$' "$lsout" || true)
+    [ -n "$listed" ] || fail "$label: invf-ls produced no entry lines"
+    [ "$listed" = "$EXPECT" ] \
+        || fail "$label: listed $listed entries != staged $EXPECT (dirs=$dirs, invf-ls tally=$objs)"
+    echo "$label: invf-ls listed $listed entries (== staged $EXPECT)"
+
+    # bit-exact reads
+    local f out ok=1
+    for f in $BITEXACT; do
+        [ -f "$STAGE/$f" ] || continue
+        out="$WORK/out-$(echo "$f" | tr / _)"
+        if ! "$B/invf-cat" "$img" "$f" "$out" >/dev/null 2>&1; then
+            echo "  cat failed: $f"; ok=0; continue
+        fi
+        if cmp -s "$STAGE/$f" "$out"; then
+            echo "  OK $f"
+        else
+            echo "  MISMATCH $f"; ok=0
+        fi
+    done
+    [ "$ok" = 1 ] || fail "$label: bit-exact reads"
+
+    # fsck verification
+    "$B/invf-fsck" "$img" > "$WORK/fsck-$label.log" 2>&1 || {
+        cat "$WORK/fsck-$label.log"
+        fail "$label: fsck failed"
+    }
+    grep -q '^OK$' "$WORK/fsck-$label.log" || {
+        cat "$WORK/fsck-$label.log"
+        fail "$label: fsck reported corruption"
+    }
+    echo "$label: fsck -> OK"
+}
+
+note "stage 4: single-device volume"
+SINGLE="$WORK/root-single.img"
+rm -f "$SINGLE"
+"$B/invf-mkfs" "$SINGLE" 4 | tee "$WORK/mkfs-single.log"
+"$B/invf-import" "$SINGLE" "$STAGE" 2>&1 | tee "$WORK/import-single.log"
+grep -q '0 skipped' "$WORK/import-single.log" || fail "single: import skipped files"
+check_volume single "$SINGLE"
+
+note "stage 5: two-device volume (INVFS_DEV1)"
+MD_RAW="$WORK/root-multi.img"
+MD_SH="$WORK/shadow.img"
+rm -f "$MD_RAW" "$MD_SH"
+"$B/invf-mkfs" "$MD_RAW" 4 "$MD_SH" 6 | tee "$WORK/mkfs-multi.log"
+grep -q 'devices:.*2' "$WORK/mkfs-multi.log" || fail "two-device mkfs did not report 2 devices"
+METAHI=$(sed -n 's/.*metadata zone: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs-multi.log")
+[ -n "$METAHI" ] || fail "could not parse metadata geometry"
+
+export INVFS_DEV1="$MD_SH"
+"$B/invf-import" "$MD_RAW" "$STAGE" 2>&1 | tee "$WORK/import-multi.log"
+grep -q '0 skipped' "$WORK/import-multi.log" || fail "multi: import skipped files"
+check_volume multi "$MD_RAW"
+
+cmp <(head -c $(( (METAHI + 1) * 4096 )) "$MD_RAW") \
+    <(head -c $(( (METAHI + 1) * 4096 )) "$MD_SH") \
+    || fail "metadata mirror differs between dev0 and dev1"
+echo "multi: metadata span ($((METAHI + 1)) blocks) byte-identical on both devices"
+
+if [ "${INVFS_ALPINE_KEEP:-0}" = 1 ]; then
+    echo "kept work dir: $WORK"
+else
+    rm -rf "$WORK"
+fi
+echo "test-alpine-install: PASS"
