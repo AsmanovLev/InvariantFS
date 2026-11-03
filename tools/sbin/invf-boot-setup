@@ -139,11 +139,18 @@ fi
 [ -d "$ESP_DIR" ] || die "ESP directory not found: $ESP_DIR"
 
 fstype=$(findmnt -n -o FSTYPE "$ESP_DIR" 2>/dev/null || true)
+if [ -z "$fstype" ]; then
+    raw_fstype=$(stat -f -c %T "$ESP_DIR" 2>/dev/null || true)
+    case "$raw_fstype" in
+        *msdos*|*fat*) fstype="vfat" ;;
+    esac
+fi
 [ "$fstype" = "vfat" ] || die "ESP at $ESP_DIR is not vfat (found: ${fstype:-unknown})"
 
 esp_uuid=$(findmnt -n -o UUID "$ESP_DIR" 2>/dev/null || true)
 if [ -z "$esp_uuid" ]; then
     esp_src=$(findmnt -n -o SOURCE "$ESP_DIR" 2>/dev/null || true)
+    [ -z "$esp_src" ] && esp_src=$(df "$ESP_DIR" 2>/dev/null | awk 'NR==2 {print $1}')
     if [ -n "$esp_src" ] && command -v blkid >/dev/null 2>&1; then
         esp_uuid=$(blkid -s UUID -o value "$esp_src" 2>/dev/null || true)
     fi

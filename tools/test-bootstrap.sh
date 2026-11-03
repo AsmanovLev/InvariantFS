@@ -59,7 +59,7 @@ DESTDIR="$DEST" sh "$BOOT" --file "$ART" --prefix /usr/local --yes \
 [ -x "$DEST/usr/local/bin/invf-mkfs" ] && ok "invf-mkfs installed" || bad "invf-mkfs missing"
 [ -x "$DEST/usr/local/bin/invf-fuse" ] && ok "invf-fuse installed" || bad "invf-fuse missing"
 [ -f "$DEST/usr/local/lib/invfs/installed.manifest" ] && ok "manifest written" || bad "manifest missing"
-[ -f "$DEST/usr/local/share/man/man8/invf-mkfs.8" ] && ok "man page installed" || bad "man page missing"
+{ [ -f "$DEST/usr/local/share/man/man8/invf-mkfs.8" ] || [ -f "$DEST/usr/local/share/man/man8/invf-mkfs.8.gz" ]; } && ok "man page installed" || bad "man page missing"
 [ ! -d "$DEST/usr/local/lib/systemd" ] && ok "systemd skipped via --no-systemd" || bad "systemd not skipped"
 [ ! -d "$DEST/usr/local/lib/dracut" ] && ok "dracut skipped via --no-dracut" || bad "dracut not skipped"
 if [ -f "$DEST/usr/local/lib/invfs/installed.manifest" ]; then

@@ -42,9 +42,14 @@ fetch() { # fetch <url> <dest>
     elif command -v wget >/dev/null 2>&1; then
         wget -q -O "$2" "$1"
     elif command -v xbps-fetch >/dev/null 2>&1; then
+        if [ "$2" = "/dev/null" ]; then
+            ( cd /tmp && xbps-fetch "$1" >/dev/null 2>&1 ) || return 1
+            rm -f "/tmp/$(basename "$1")"
+            return 0
+        fi
         ( cd "$(dirname "$2")" && xbps-fetch "$1" ) || return 1
         [ "$(dirname "$2")/$(basename "$1")" = "$2" ] \
-            || mv "$(dirname "$2")/$(basename "$1")" "$2"
+            || mv -f "$(dirname "$2")/$(basename "$1")" "$2"
     else
         python3 -c 'import sys,urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$1" "$2"
     fi
@@ -63,6 +68,12 @@ mount -t sysfs sysfs /sys 2>/dev/null || true
 [ -e /dev/fuse ] || modprobe fuse 2>/dev/null || true
 [ -e /dev/fuse ] || { say "no /dev/fuse (modprobe fuse failed)"; exit 1; }
 say "proc/sys mounted, /dev/fuse present"
+
+# Update host xbps and tools if repo is reachable
+say "updating live xbps and utilities..."
+xbps-install -S 2>&1 | tail -2 || true
+xbps-install -uy xbps 2>&1 | tail -2 || true
+xbps-install -Sy zstd dosfstools 2>&1 | tail -2 || true
 
 # ---- phase 1: identify and partition target disk ----
 VOL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^invfsvol=//p' | head -1)"
@@ -119,12 +130,13 @@ cp /var/db/xbps/keys/*.plist /mnt/var/db/xbps/keys/ || exit 1
 printf 'repository=https://repo-default.voidlinux.org/current\n' \
     > /mnt/etc/xbps.d/00-repository-main.conf
 
-say "updating xbps index and installing base-system grub-x86_64-efi into /mnt..."
-xbps-install -r /mnt -Sy base-system grub-x86_64-efi || exit 1
+say "updating xbps index and installing base-system grub grub-x86_64-efi into /mnt..."
+XBPS_ARCH=x86_64 xbps-install -r /mnt -Sy base-system grub grub-x86_64-efi || exit 1
 say "base system installed on /mnt"
 
 # ---- phase 5: in-chroot provisioning ----
 say "binding dev/proc/sys into /mnt..."
+cp -f /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null || true
 mount --rbind /dev /mnt/dev 2>/dev/null || true
 mount --rbind /proc /mnt/proc 2>/dev/null || true
 mount --rbind /sys /mnt/sys 2>/dev/null || true

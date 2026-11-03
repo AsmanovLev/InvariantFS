@@ -145,7 +145,11 @@ sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-gentoo" "$WORK/initramfs-gentoo.im
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
 ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
+ART_GZ="${ART%.tar.zst}.tar.gz"
 cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/iso-guest-gentoo-setup.sh" "$SERVEDIR/"
+zstd -dc "$ART" | gzip -9 > "$SERVEDIR/$(basename "$ART_GZ")"
+( cd "$SERVEDIR" && sha256sum "$(basename "$ART_GZ")" >> SHA256SUMS )
+
 cat > "$SERVEDIR/sh" <<'SH_EOF'
 #!/bin/sh
 set -eu
@@ -156,15 +160,24 @@ cd "$TMP"
 if command -v curl >/dev/null 2>&1; then
     curl -fsSL -o bootstrap.sh "$SRV/bootstrap.sh"
     curl -fsSL -o SHA256SUMS "$SRV/SHA256SUMS"
-    ART=$(awk '{print $2}' SHA256SUMS | head -1)
-    curl -fsSL -o "$ART" "$SRV/$ART"
 elif command -v wget >/dev/null 2>&1; then
     wget -q -O bootstrap.sh "$SRV/bootstrap.sh"
     wget -q -O SHA256SUMS "$SRV/SHA256SUMS"
-    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+fi
+
+if command -v zstd >/dev/null 2>&1; then
+    ART=$(grep '\.tar\.zst$' SHA256SUMS | awk '{print $2}' | head -1)
+else
+    ART=$(grep '\.tar\.gz$' SHA256SUMS | awk '{print $2}' | head -1)
+fi
+[ -n "$ART" ] || ART=$(awk '{print $2}' SHA256SUMS | head -1)
+
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o "$ART" "$SRV/$ART"
+elif command -v wget >/dev/null 2>&1; then
     wget -q -O "$ART" "$SRV/$ART"
 fi
-sha256sum -c SHA256SUMS
+grep "[[:space:]*]$ART\$" SHA256SUMS | sha256sum -c -
 sh bootstrap.sh --file "$ART" --yes --prefix /usr
 SH_EOF
 chmod 755 "$SERVEDIR/sh"

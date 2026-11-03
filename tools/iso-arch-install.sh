@@ -83,7 +83,7 @@ elif command -v wget >/dev/null 2>&1; then
     ART=$(awk '{print $2}' SHA256SUMS | head -1)
     wget -q -O "$ART" "$SRV/$ART"
 fi
-sha256sum -c SHA256SUMS
+grep "[[:space:]*]$ART\$" SHA256SUMS | sha256sum -c -
 sh bootstrap.sh --file "$ART" --yes --prefix /usr
 SH_EOF
 chmod 755 "$SERVEDIR/sh"

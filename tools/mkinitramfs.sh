@@ -165,17 +165,29 @@ done
 
 # ---- shared libraries (dynamic tools only) --------------------------------
 : > lib64/libs.manifest
+mkdir -p lib lib64 usr/lib usr/lib64
 for b in $DYNAMIC_TOOLS; do
     for so in $(ldd_paths "usr/local/bin/$b"); do
-        cp -L "$so" "lib64/$(basename "$so")"
-        echo "$b $(basename "$so")" >> lib64/libs.manifest
+        bn="$(basename "$so")"
+        cp -L "$so" "lib64/$bn"
+        cp -L "$so" "lib/$bn"
+        cp -L "$so" "usr/lib/$bn"
+        cp -L "$so" "usr/lib64/$bn"
+        echo "$b $bn" >> lib64/libs.manifest
     done
 done
 # The loader itself is never a "=> /path" line on some glibc builds; make sure
 # it is present whenever anything is dynamic.
 if [ -n "$DYNAMIC_TOOLS" ]; then
-    for ldso in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2; do
-        if [ -e "$ldso" ]; then cp -L "$ldso" lib64/ 2>/dev/null; break; fi
+    for ldso in /lib64/ld-linux-x86-64.so.2 /lib/ld-linux-x86-64.so.2 /usr/lib64/ld-linux-x86-64.so.2 /usr/lib/ld-linux-x86-64.so.2; do
+        if [ -e "$ldso" ]; then
+            bn="$(basename "$ldso")"
+            cp -L "$ldso" "lib64/$bn"
+            cp -L "$ldso" "lib/$bn"
+            cp -L "$ldso" "usr/lib/$bn"
+            cp -L "$ldso" "usr/lib64/$bn"
+            break
+        fi
     done
 fi
 
