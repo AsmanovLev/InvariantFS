@@ -1,0 +1,30 @@
+# png codecpack: lossless byte-exact PNG recompression (raw_image family).
+#
+# Helper: bin/png2jxl with embedded pngr JUMBF envelope (preflate).
+# Stores pixel-lossless JXL Modular representation + original ancillary
+# chunks and preflate delta inside the JUMBF container for 100% bit-exact
+# reconstruction (sha256 identical).
+
+name = png
+algo = 45
+codec_id = 45
+pack_version = 1
+version = 1
+min_read = 1
+generation = 1
+family = raw_image
+category = primary
+provides = raw_image
+replaces =
+conflicts =
+priority = 100
+caps = wholefile|external
+dec_mem = 0
+sniff.magic = 89504E470D0A1A0A
+sniff.ext = png
+raw_ext = .png
+blob_ext = .jxl
+encode = bin/png2jxl encode {in} {out}
+decode = bin/png2jxl decode {in} {out}
+estimate = bin/png2jxl estimate {in}
+requires = png2jxl

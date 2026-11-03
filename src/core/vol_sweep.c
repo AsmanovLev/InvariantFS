@@ -649,6 +649,25 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
      * volume. JPEGs never arrive here (separate branch below: NBLI has no
      * JPEG-bitstream-reconstruction mode). */
     if (full_len >= 33 && memcmp(full, "\x89PNG\r\n\x1a\n", 8) == 0) {
+        /* Precedence: any loaded pack that sniffs this file owns it -- the
+         * builtin falls through to the pack loop below, whether the pack
+         * claims algo PNGR or another algo over the same magic (such as
+         * png2jxl). Placeholders don't count: NULL encode/decode means no
+         * pack is loaded, and the builtin lane must run. */
+        size_t pcn = 0, pci;
+        const invfs_codec *pall = invfs_codec_all(&pcn);
+        int pack_claims = 0;
+        for (pci = 0; pci < pcn; pci++) {
+            const invfs_codec *pc = &pall[pci];
+            if (!(pc->caps & INVFS_CODEC_CAP_EXTERNAL) || !pc->sniff ||
+                !pc->encode || !pc->decode)
+                continue;
+            if (pc->sniff(full, full_len, name) > 0) {
+                pack_claims = 1;
+                break;
+            }
+        }
+        if (!pack_claims) {
         int want_nbli = invfs_photo_codec_nbli();
         uint8_t lane_algo = want_nbli ? INVFS_ALGO_NBLI : INVFS_ALGO_PNGR;
         uint64_t nino;
@@ -709,6 +728,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         if (want_nbli)
             fprintf(stderr, "[sweep] %s: nbli (pack)\n", name);
         return 5;   /* PNG */
+        }
     }
 
     /* JPEG -> JXL lossless (whole-file JPEG bitstream reconstruction,

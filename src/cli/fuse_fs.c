@@ -4456,9 +4456,8 @@ int main(int argc, char *argv[])
                     "\n================================================================================\n"
                     "invf: CRITICAL WARNING: Insufficient system memory detected (%lu MB RAM)!\n"
                     "InvariantFS rootfs requires at least 1024 MB (recommended: >= 2048 MB).\n"
-                    "Low memory in virtual machines (e.g. Hyper-V dynamic ballooning <= 600MB)\n"
-                    "causes severe kernel page-reclaim deadlocks (hung_task 122s+).\n"
-                    "Please increase VM RAM to >= 2048 MB in VM settings.\n"
+                    "Running with insufficient memory causes severe kernel page-reclaim deadlocks (hung_task 122s+).\n"
+                    "If running in a virtual machine, disable dynamic memory ballooning and increase memory size (RAM >= 2048 MB).\n"
                     "================================================================================\n\n",
                     (unsigned long)total_ram_mb);
             } else if (total_ram_mb < 1500) {

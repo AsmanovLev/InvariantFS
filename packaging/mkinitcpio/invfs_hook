@@ -156,7 +156,7 @@ invfs_mount_handler() {
             msg ":: CRITICAL: InvariantFS: INSUFFICIENT SYSTEM MEMORY (${mem_mb} MB)!"
             msg ":: InvariantFS root filesystem requires >= 1024 MB RAM (recommended: >= 2048 MB)."
             msg ":: Running with ${mem_mb} MB causes severe kernel page-reclaim deadlocks (hung_task 122s+)."
-            msg ":: In Hyper-V: open VM Settings -> Memory -> disable 'Dynamic Memory' and set RAM >= 2048 MB."
+            msg ":: If you are running in a virtual machine, disable dynamic memory ballooning and increase memory size (RAM >= 2048 MB)."
             msg ":: ========================================================================"
             if [ "$(invfs_getarg invfs.ignore_mem)" != "1" ]; then
                 invfs_die "insufficient memory (${mem_mb} MB < 768 MB). Increase VM RAM or pass invfs.ignore_mem=1"

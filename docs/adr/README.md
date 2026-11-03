@@ -14,3 +14,4 @@ This directory documents key architectural decisions made in InvariantFS.
 | [ADR-008](ADR-008-fuse-vs-kernel.md) | FUSE Userspace Daemon vs. In-Kernel Filesystem (VFS) | Accepted | 2026-09-24 |
 | [ADR-009](ADR-009-v3-durability-contract.md) | Meta-v3 Durability Contract (fsync, close, per-append barrier) | Accepted | 2026-09-24 |
 | [ADR-010](ADR-010-cross-vm-dedup-via-windowed-recipes.md) | Cross-VM Deduplication via Windowed Recipes (`INVFS_ALGO_WINDOW_SRC`) | Proposed | 2026-09-25 |
+| [ADR-011](ADR-011-preflate-reversible-deflate.md) | Universal Reversible DEFLATE via `invf-preflate` (`!pfd` Sibling Architecture) | Accepted | 2026-11-02 |

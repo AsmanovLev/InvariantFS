@@ -43,6 +43,7 @@ if [ "$_mem_kb" -gt 0 ]; then
     if [ "$_mem_mb" -lt 768 ]; then
         warn "invfs: CRITICAL: INSUFFICIENT SYSTEM MEMORY (${_mem_mb} MB)!"
         warn "invfs: rootfs requires >= 1024 MB (recommended >= 2048 MB)."
+        warn "invfs: if running in a virtual machine, disable dynamic memory ballooning and increase memory size (RAM >= 2048 MB)."
         getargbool 0 invfs.ignore_mem || die "insufficient memory (${_mem_mb} MB < 768 MB). Increase VM RAM or pass invfs.ignore_mem=1"
     fi
 fi
