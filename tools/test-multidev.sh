@@ -57,7 +57,9 @@ D1=wp25md1.img      # capacity device (metadata mirror + canonical shadow)
 E0=wp25me0.img      # small-arena volume for the demotion leg
 E1=wp25me1.img
 S0=wp25ms0.img      # single-device compat smoke
-rm -f "$D0" "$D1" "$E0" "$E1" "$S0" b0save.wp25
+R0=wp25mr0.img      # raw_mirror=0 degraded shadow volume
+R1=wp25mr1.img
+rm -f "$D0" "$D1" "$E0" "$E1" "$S0" "$R0" "$R1" b0save.wp25
 
 export INVFS_DEV1=$D1   # the device-1 locator (wins over the DEVT hint)
 export INVFS_RAW_MIRROR=1
@@ -324,6 +326,34 @@ cmp -s "$WORK/orig/notes.txt" "$WORK/out/back.txt" || fail "reattach read"
 $B/invf-cat "$D0" hot.bin "$WORK/out/hot3.bin" 2>/dev/null
 cmp -s "$WORK/orig/hot.bin" "$WORK/out/hot3.bin" || fail "reattach hot read"
 echo "reattach: RW resumed, writes + reads bit-exact"
+
+echo "== leg 6b: DEGRADED mount without raw zone (raw_mirror=0 default) =="
+# A two-device volume where files are swept to dev1 shadow and raw_mirror=0:
+# when dev0 is absent, there is no RAW zone, but the filesystem still mounts
+# in DEGRADED status, serving the canonical shadow zone from dev1.
+$B/invf-mkfs "$R0" 0.07 "$R1" 0.12 > "$WORK/mkfs-r.log" 2>&1 || fail "mkfs R"
+INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-cp "$R0" "$WORK/orig/notes.txt" notes.txt > /dev/null 2>&1 \
+    || fail "cp notes R"
+INVFS_DEV1="$R1" $B/invf-sweep "$R0" > /dev/null 2>&1 || fail "sweep R"
+INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-cp "$R0" "$WORK/orig/rnd.bin" raw_nomirror.bin > /dev/null 2>&1 \
+    || fail "cp raw_nomirror R"
+# Hide R0: dev0 absent (no RAW zone)
+mv "$R0" "$R0.hidden"
+INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-ls "$R0" > "$WORK/rls.log" 2>&1 || fail "degraded ls R"
+grep -q "DEGRADED" "$WORK/rls.log" || fail "no DEGRADED diagnostic for R"
+# Shadow zone is mounted and reads bit-exact from dev1
+INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-cat "$R0" notes.txt "$WORK/out/r-notes.txt" 2>/dev/null \
+    || fail "degraded cat shadow notes R"
+cmp -s "$WORK/orig/notes.txt" "$WORK/out/r-notes.txt" || fail "degraded shadow notes mismatch R"
+# Raw file has no mirror on dev1: read fails cleanly
+if INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-cat "$R0" raw_nomirror.bin "$WORK/out/r-raw.txt" >/dev/null 2>&1; then
+    fail "degraded raw file without mirror should fail read"
+fi
+# Stats verify that dev0 RAW zone is absent/empty while SHADOW zone is mounted and live
+R_RAW=$(INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-stats "$R0" | sed -n 's/.*RAW *: *\([a-z]*\).*/\1/p')
+[ "$R_RAW" = "empty" ] || fail "expected degraded RAW empty for R, got '$R_RAW'"
+rm -f "$R0.hidden" "$R1"
+echo "degraded (raw_mirror=0): fs mounts in degraded status without raw zone, shadow zone bit-exact"
 
 echo "== leg 7: mirror resync (stale dev0) =="
 # WP99: the DEVT sync_seq is the protocol's own staleness sequence, bumped
