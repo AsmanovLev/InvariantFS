@@ -764,9 +764,9 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
         return 0;
     }
     {
-        if (g_table_stale) table_refresh_if_stale_locked();
         fs_entry *e = find_entry(name);
-        if (!e) { table_refresh_if_stale_locked(); e = find_entry(name); }
+        if (!e) table_refresh_if_stale_locked();
+        if (!e) e = find_entry(name);
         if (e) {
             if (ino_out)   *ino_out   = e->inode_id;
             if (size_out)  *size_out  = e->size;
@@ -3209,7 +3209,7 @@ static int invf_rename(const char *from, const char *to, unsigned int flags)
                 table_remove_name(from + 1);
                 table_sync_one_locked(to + 1);
             } else {
-                table_mark_stale();
+                table_rebuild_locked();
             }
         }
     }
