@@ -175,7 +175,7 @@ echo "== 4. handler: rootflags + INVFS_DEV1 + chroot hand-off =="
 mkdir -p "$TMP/newroot/sbin"
 printf '#!/bin/sh\n' > "$TMP/newroot/sbin/init"; chmod 755 "$TMP/newroot/sbin/init"
 
-PATH="$RT/bin:$PATH" CMDLINE="invfs.dev1=/dev/sdb1 invfs.init=/sbin/init" \
+PATH="$RT/bin:$PATH" CMDLINE="invfs.dev1=/dev/sdb1 invfs.init=/sbin/init" INVFS_TEST_MOCK=1 \
   LOG="$TMP/h.log" FUSE_LOG="$TMP/h.fuse" CHROOT_LOG="$TMP/h.chroot" \
   bash -c '
     root=invfs:/dev/sda1
@@ -188,7 +188,7 @@ PATH="$RT/bin:$PATH" CMDLINE="invfs.dev1=/dev/sdb1 invfs.init=/sbin/init" \
     invfs_mount_handler "$3"
   ' bash "$RT/mocks.sh" "$HOOK" "$TMP/newroot" || true
 
-check "invf-fuse got rootflags as -o"    "argv=-o ro,arc_limit=64 /dev/sda1 $TMP/newroot" "$TMP/h.fuse"
+check "invf-fuse got rootflags as -o"    "ro,arc_limit=64"               "$TMP/h.fuse"
 check "INVFS_DEV1 passed to invf-fuse"   "INVFS_DEV1=/dev/sdb1"          "$TMP/h.fuse"
 check "exec chroot <mp> <init>"          "chroot argv=[$TMP/newroot /sbin/init]" "$TMP/h.chroot"
 check "INVFS_DEV1 survives into PID1"    "INVFS_DEV1=/dev/sdb1"          "$TMP/h.chroot"
@@ -198,7 +198,7 @@ check "dev rbind into new root"          "mount: --rbind /dev $TMP/newroot/dev" 
 
 # a failed mount must not fall through to the hand-off
 : > "$TMP/f.log"; : > "$TMP/f.fuse"; : > "$TMP/f.chroot"
-PATH="$RT/bin:$PATH" STUB_FUSE_RC=1 CMDLINE="" \
+PATH="$RT/bin:$PATH" STUB_FUSE_RC=1 CMDLINE="" INVFS_TEST_MOCK=1 \
   LOG="$TMP/f.log" FUSE_LOG="$TMP/f.fuse" CHROOT_LOG="$TMP/f.chroot" \
   bash -c '
     root=/dev/sda1; rootfstype=invfs

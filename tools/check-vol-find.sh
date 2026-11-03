@@ -136,12 +136,12 @@ src/core/vol_read.c:980:SKIP
 src/core/vol_read.c:997:SKIP
 src/core/vol_read.c:1057:SKIP
 src/core/vol_read.c:1132:SKIP
-src/core/vol_sweep.c:1915:SKIP
+src/core/vol_sweep.c:1935:SKIP
 src/core/vol_sweep.c:280:SKIP
 src/core/vol_sweep.c:585:ACTS
 src/core/vol_sweep.c:604:ACTS
 src/core/vol_sweep.c:624:ACTS
-src/core/vol_sweep.c:657:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_sweep.c:676:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
 src/core/volume.c:968:SKIP   # reserve scan: direct .ivpack file lookup

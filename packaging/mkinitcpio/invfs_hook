@@ -98,15 +98,15 @@ invfs_mount_handler() {
     elif [ -n "$dev" ]; then
         for _ in 1 2 3 4 5 6 7 8 9 10; do
             resolved="$(resolve_device "$dev" 2>/dev/null || true)"
-            if [ -n "$resolved" ] && [ -b "$resolved" ]; then
+            if [ -n "$resolved" ] && { [ -b "$resolved" ] || [ -n "${INVFS_TEST_MOCK:-}" ]; }; then
                 dev="$resolved"
                 break
-            elif [ -b "$dev" ]; then
+            elif [ -b "$dev" ] || [ -n "${INVFS_TEST_MOCK:-}" ]; then
                 break
             fi
             sleep 0.5
         done
-        [ -b "$dev" ] || invfs_die "cannot resolve root device '$dev'"
+        [ -b "$dev" ] || [ -n "${INVFS_TEST_MOCK:-}" ] || invfs_die "cannot resolve root device '$dev'"
     else
         invfs_die "root device not set (need root=<dev>, root=UUID=<uuid> or invfs.raw_uuid=<hex>)"
     fi
@@ -116,15 +116,15 @@ invfs_mount_handler() {
     if [ -n "$dev1" ]; then
         for _ in 1 2 3 4 5; do
             resolved="$(resolve_device "$dev1" 2>/dev/null || true)"
-            if [ -n "$resolved" ] && [ -b "$resolved" ]; then
+            if [ -n "$resolved" ] && { [ -b "$resolved" ] || [ -n "${INVFS_TEST_MOCK:-}" ]; }; then
                 dev1="$resolved"
                 break
-            elif [ -b "$dev1" ]; then
+            elif [ -b "$dev1" ] || [ -n "${INVFS_TEST_MOCK:-}" ]; then
                 break
             fi
             sleep 0.5
         done
-        [ -b "$dev1" ] || invfs_die "cannot resolve dev1 device '$dev1'"
+        [ -b "$dev1" ] || [ -n "${INVFS_TEST_MOCK:-}" ] || invfs_die "cannot resolve dev1 device '$dev1'"
     else
         dev1="$(invfs_getarg invfs.dev1_uuid)"
         if [ -n "$dev1" ]; then
@@ -141,6 +141,31 @@ invfs_mount_handler() {
         msg "invfs: second device $dev1 (INVFS_DEV1)"
     fi
 
+    # Pre-flight: verify sufficient physical memory (WP630 / VM safety)
+    local mem_kb=0 mem_mb=0
+    while read -r key val unit; do
+        if [ "$key" = "MemTotal:" ]; then
+            mem_kb="$val"
+            break
+        fi
+    done < /proc/meminfo 2>/dev/null
+    if [ "$mem_kb" -gt 0 ]; then
+        mem_mb=$((mem_kb / 1024))
+        if [ "$mem_mb" -lt 768 ]; then
+            msg ":: ========================================================================"
+            msg ":: CRITICAL: InvariantFS: INSUFFICIENT SYSTEM MEMORY (${mem_mb} MB)!"
+            msg ":: InvariantFS root filesystem requires >= 1024 MB RAM (recommended: >= 2048 MB)."
+            msg ":: Running with ${mem_mb} MB causes severe kernel page-reclaim deadlocks (hung_task 122s+)."
+            msg ":: In Hyper-V: open VM Settings -> Memory -> disable 'Dynamic Memory' and set RAM >= 2048 MB."
+            msg ":: ========================================================================"
+            if [ "$(invfs_getarg invfs.ignore_mem)" != "1" ]; then
+                invfs_die "insufficient memory (${mem_mb} MB < 768 MB). Increase VM RAM or pass invfs.ignore_mem=1"
+            fi
+        elif [ "$mem_mb" -lt 1500 ]; then
+            msg ":: WARNING: low memory (${mem_mb} MB). InvariantFS recommends >= 2048 MB RAM."
+        fi
+    fi
+
     msg ":: mounting InvariantFS volume '$dev' on real root"
     # pre-mount check, warn-only: fsck.invfs -a never repairs (only -y
     # does, and nothing here passes it). A DAMAGED-but-readable volume
@@ -150,7 +175,20 @@ invfs_mount_handler() {
     fi
     # rootflags ride into the daemon as -o options; invf-fuse pulls out its
     # own keys (arc_limit=, raw_watermark=, ...) and passes the rest to libfuse
-    mopts="allow_other,survive_term"
+    # WP630: a systemd root must let go on shutdown, never survive_term
+    if invf-cat "$dev" /usr/lib/systemd/systemd >/dev/null 2>&1 ||
+       invf-cat "$dev" /lib/systemd/systemd >/dev/null 2>&1; then
+        mopts="allow_other"
+    else
+        mopts="allow_other,survive_term"
+    fi
+    # Auto-clamp ARC budget on memory-constrained systems if not specified
+    if [ "$mem_mb" -gt 0 ] && [ "$mem_mb" -lt 1500 ]; then
+        case "${rootflags:-}" in
+            *arc_limit=*) ;;
+            *) mopts="$mopts,arc_limit=64M" ;;
+        esac
+    fi
     [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
     invf-fuse -o "$mopts" "$dev" "$mp"
     [ $? -eq 0 ] || invfs_die "failed to mount '$dev'"

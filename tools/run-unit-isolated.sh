@@ -154,6 +154,13 @@ if [ "${1:-}" = "--inner" ]; then
       if [ -e /lib64/ld-linux-x86-64.so.2 ]; then le=yes; else le=NO; fi
       echo "$PROG:   loader /lib64/ld-linux-x86-64.so.2 exists=$le" >&2
   fi
+    case "$1" in
+    *tsan*)
+        if command -v setarch >/dev/null 2>&1; then
+            exec setarch "$(uname -m)" -R "$@"
+        fi
+        ;;
+    esac
     exec "$@"
 fi
 

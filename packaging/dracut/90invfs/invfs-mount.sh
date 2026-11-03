@@ -33,6 +33,20 @@ while [ ! -b "$rootdev" ]; do
 done
 
 info "invfs: mounting InvariantFS volume $rootdev on $NEWROOT"
+# Pre-flight: verify sufficient physical memory
+_mem_kb=0
+while read -r _k _v _u; do
+    [ "$_k" = "MemTotal:" ] && { _mem_kb="$_v"; break; }
+done < /proc/meminfo 2>/dev/null
+if [ "$_mem_kb" -gt 0 ]; then
+    _mem_mb=$((_mem_kb / 1024))
+    if [ "$_mem_mb" -lt 768 ]; then
+        warn "invfs: CRITICAL: INSUFFICIENT SYSTEM MEMORY (${_mem_mb} MB)!"
+        warn "invfs: rootfs requires >= 1024 MB (recommended >= 2048 MB)."
+        getargbool 0 invfs.ignore_mem || die "insufficient memory (${_mem_mb} MB < 768 MB). Increase VM RAM or pass invfs.ignore_mem=1"
+    fi
+fi
+
 # pre-mount check, warn-only: fsck.invfs -a never repairs (only -y does).
 # A DAMAGED-but-readable volume still mounts; the verdict stays in the
 # journal instead of silent.
@@ -44,7 +58,19 @@ if command -v fsck.invfs >/dev/null 2>&1; then
         info "invfs: WARNING: pre-mount check of $rootdev reported damage; mounting anyway"
     fi
 fi
-mopts="allow_other,survive_term"
+# WP630: a systemd root must let go on shutdown, never survive_term
+if invf-cat "$rootdev" /usr/lib/systemd/systemd >/dev/null 2>&1 ||
+   invf-cat "$rootdev" /lib/systemd/systemd >/dev/null 2>&1; then
+    mopts="allow_other"
+else
+    mopts="allow_other,survive_term"
+fi
+if [ "$_mem_kb" -gt 0 ] && [ "$_mem_mb" -lt 1500 ]; then
+    case "${rootflags:-}" in
+        *arc_limit=*) ;;
+        *) mopts="$mopts,arc_limit=64M" ;;
+    esac
+fi
 [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
 invf-fuse -o "$mopts" "$rootdev" "$NEWROOT" 2>&1 | vinfo
 

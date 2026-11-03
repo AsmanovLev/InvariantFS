@@ -4445,6 +4445,34 @@ int main(int argc, char *argv[])
     }
     if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
     if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
+#ifdef __linux__
+    {
+        long phys_pages = sysconf(_SC_PHYS_PAGES);
+        long page_sz = sysconf(_SC_PAGE_SIZE);
+        if (phys_pages > 0 && page_sz > 0) {
+            uint64_t total_ram_mb = ((uint64_t)phys_pages * (uint64_t)page_sz) / (1024 * 1024);
+            if (total_ram_mb < 768) {
+                fprintf(stderr,
+                    "\n================================================================================\n"
+                    "invf: CRITICAL WARNING: Insufficient system memory detected (%lu MB RAM)!\n"
+                    "InvariantFS rootfs requires at least 1024 MB (recommended: >= 2048 MB).\n"
+                    "Low memory in virtual machines (e.g. Hyper-V dynamic ballooning <= 600MB)\n"
+                    "causes severe kernel page-reclaim deadlocks (hung_task 122s+).\n"
+                    "Please increase VM RAM to >= 2048 MB in VM settings.\n"
+                    "================================================================================\n\n",
+                    (unsigned long)total_ram_mb);
+            } else if (total_ram_mb < 1500) {
+                fprintf(stderr, "invf: WARNING: low RAM (%lu MB). Recommended >= 2048 MB.\n",
+                        (unsigned long)total_ram_mb);
+            }
+            if (!have_arc && !getenv("INVFS_ARC_BYTES") && total_ram_mb < 1500) {
+                uint64_t clamped = 64ull * 1024 * 1024;
+                fprintf(stderr, "invf: low-memory auto-tune: clamping ARC budget to 64 MB\n");
+                vol_set_arc_budget(g_vol, clamped);
+            }
+        }
+    }
+#endif
     /* WP26 env fallback (CLI sessions that cannot pass -o): the mount
      * option wins when both are given */
     if (!g_raw_watermark) {
