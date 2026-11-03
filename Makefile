@@ -152,7 +152,7 @@ CORE_OBJS_FILE := build/core_objs.txt
 # APPENDED, not prepended: a developer's own PATH keeps priority, so this
 # adds what is missing rather than overriding a deliberate choice. A /sbin
 # that does not exist is harmless in a PATH search.
-override TESTENV := INVFS_LAZY_RECLAIM=0 INVFS_CODECPACKS_SYS=0 PATH="$(PATH):/sbin" $(TESTENV)
+override TESTENV := INVFS_LAZY_RECLAIM=0 INVFS_RAW_MIRROR=1 INVFS_CODECPACKS_SYS=0 PATH="$(PATH):/sbin" $(TESTENV)
 
 # WP104: run every unit-suite command in a private /tmp + /dev/shm (mount
 # namespace, no root required, same shape as run-e2e.sh's ISOLATED mode).

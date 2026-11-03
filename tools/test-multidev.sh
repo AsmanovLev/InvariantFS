@@ -60,6 +60,7 @@ S0=wp25ms0.img      # single-device compat smoke
 rm -f "$D0" "$D1" "$E0" "$E1" "$S0" b0save.wp25
 
 export INVFS_DEV1=$D1   # the device-1 locator (wins over the DEVT hint)
+export INVFS_RAW_MIRROR=1
 
 fail() { echo "FAIL: $*"; exit 1; }
 
