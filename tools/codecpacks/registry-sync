@@ -118,3 +118,7 @@ qcow2        independent  generation,pack_version  QCOW2_DECOMP_GEN
 # resource-header parse, and the fixtures had been written from the same
 # misreading, which is why no sync check could ever have caught it.
 wim          independent  -           -
+
+# --- png: engine-ORIGINATED, byte-exact PNG recompression via png2jxl + preflate.
+png          independent  -           -
+
