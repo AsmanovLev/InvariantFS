@@ -126,7 +126,12 @@ mount()
 	if [ "$fstype" = "invfs" ] && [ -n "$dev" ] && [ -n "$dir" ]; then
 		modprobe fuse 2>/dev/null
 		log_begin_msg "invfs: mounting $dev on $dir"
-		mopts="allow_other,survive_term"
+		if invf-cat "$dev" /usr/lib/systemd/systemd >/dev/null 2>&1 ||
+		   invf-cat "$dev" /lib/systemd/systemd >/dev/null 2>&1; then
+			mopts="allow_other"
+		else
+			mopts="allow_other,survive_term"
+		fi
 		[ -n "${ROOTFLAGS:-}" ] && mopts="$mopts,${ROOTFLAGS}"
 		invf-fuse -o "$mopts" "$dev" "$dir"
 		return

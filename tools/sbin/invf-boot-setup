@@ -191,6 +191,11 @@ else
     kcmd="root=$ROOT_DEV rootfstype=invfs rw"
 fi
 
+case "$kcmd $EXTRA_CMDLINE" in
+    *console=*) ;;
+    *) kcmd="$kcmd console=ttyS0,115200" ;;
+esac
+
 if [ -n "$root_invfs_uuid" ]; then
     kcmd="$kcmd invfs.raw_uuid=$root_invfs_uuid"
     info "using InvariantFS volume UUID: $root_invfs_uuid"
@@ -224,16 +229,65 @@ fi
 [ -n "$EXTRA_CMDLINE" ] && kcmd="$kcmd $EXTRA_CMDLINE"
 
 # 7. Write grub.cfg
-info "writing grub.cfg (cmdline: $kcmd)..."
+distro_name="Linux"
+if [ -r /etc/os-release ]; then
+    distro_name=$(. /etc/os-release 2>/dev/null && echo "${NAME:-Linux}" || echo "Linux")
+fi
+
+detected_kfile=""
+detected_ifile=""
+for k in "$ESP_DIR"/vmlinuz* "$ESP_DIR"/kernel* "$ESP_DIR"/boot/vmlinuz*; do
+    [ -f "$k" ] || continue
+    bn=$(basename "$k")
+    case "$bn" in
+        *fallback*|*rescue*|*.old) continue ;;
+    esac
+    detected_kfile="$bn"
+    break
+done
+
+for i in "$ESP_DIR"/initramfs*.img "$ESP_DIR"/initrd* "$ESP_DIR"/boot/initramfs*.img; do
+    [ -f "$i" ] || continue
+    bn=$(basename "$i")
+    case "$bn" in
+        *fallback*|*rescue*|*.old) continue ;;
+    esac
+    detected_ifile="$bn"
+    break
+done
+
+info "writing grub.cfg for $distro_name (cmdline: $kcmd)..."
 cfg_content="set default=0
 set timeout=3
 set gfxpayload=keep
 
-menuentry \"Arch Linux (InvariantFS)\" {
+menuentry \"$distro_name (InvariantFS)\" {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $esp_uuid
-    if [ -f /vmlinuz-linux ]; then
+"
+
+if [ -n "$detected_kfile" ] && [ -n "$detected_ifile" ]; then
+    cfg_content="$cfg_content    if [ -f /$detected_kfile ]; then
+        linux /$detected_kfile $kcmd
+        initrd /$detected_ifile
+    elif [ -f /boot/$detected_kfile ]; then
+        linux /boot/$detected_kfile $kcmd
+        initrd /boot/$detected_ifile
+    elif [ -f /vmlinuz-linux ]; then
+        linux /vmlinuz-linux $kcmd
+        initrd /initramfs-linux.img
+    elif [ -f /vmlinuz ]; then
+        linux /vmlinuz $kcmd
+        initrd /initramfs.img
+    else
+        linux /boot/vmlinuz $kcmd
+        initrd /boot/initramfs.img
+    fi
+}
+"
+else
+    cfg_content="$cfg_content    if [ -f /vmlinuz-linux ]; then
         linux /vmlinuz-linux $kcmd
         initrd /initramfs-linux.img
     elif [ -f /boot/vmlinuz-linux ]; then
@@ -247,24 +301,33 @@ menuentry \"Arch Linux (InvariantFS)\" {
         initrd /boot/initramfs.img
     fi
 }
+"
+fi
 
-menuentry \"Arch Linux (InvariantFS, fallback initramfs)\" {
+cfg_content="$cfg_content
+menuentry \"$distro_name (InvariantFS, fallback initramfs)\" {
     insmod part_gpt
     insmod fat
     search --no-floppy --fs-uuid --set=root $esp_uuid
     if [ -f /vmlinuz-linux ]; then
         linux /vmlinuz-linux $kcmd
         initrd /initramfs-linux-fallback.img
-    else
+    elif [ -f /boot/vmlinuz-linux ]; then
         linux /boot/vmlinuz-linux $kcmd
         initrd /boot/initramfs-linux-fallback.img
+    else
+        linux /boot/vmlinuz $kcmd
+        initrd /boot/initramfs.img
     fi
 }
 "
 
 if [ "$DRY_RUN" = 0 ]; then
+    mkdir -p "$grub_cfg_dir" "$efi_boot_dir" "$efi_grub_dir" "$ESP_DIR/grub"
     printf '%s\n' "$cfg_content" > "$grub_cfg_dir/grub.cfg"
     printf '%s\n' "$cfg_content" > "$efi_boot_dir/grub.cfg"
+    printf '%s\n' "$cfg_content" > "$efi_grub_dir/grub.cfg"
+    printf '%s\n' "$cfg_content" > "$ESP_DIR/grub/grub.cfg"
 fi
 
 # 8. Register UEFI boot entry if efibootmgr is available

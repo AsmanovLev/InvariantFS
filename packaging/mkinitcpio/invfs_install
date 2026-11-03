@@ -73,6 +73,7 @@ build() {
     # WP21 checkpoint). chroot carries the FUSE-root hand-off because
     # busybox switch_root cannot enter a FUSE mount (see invfs_hook).
     add_binary invf-fuse
+    add_binary invf-cat
     add_binary invf-sweep
     add_binary invf-fsck
     add_binary fsck.invfs

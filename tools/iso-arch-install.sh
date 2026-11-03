@@ -64,7 +64,29 @@ sudo umount "$MNT"
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
 ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
-cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/PKGBUILD" "$REPO/tools/iso-guest-arch-setup.sh" "$REPO/bin/busybox-static" "$SERVEDIR/"
+cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/PKGBUILD" "$REPO/packaging/bootstrap.sh" "$REPO/tools/iso-guest-arch-setup.sh" "$REPO/bin/busybox-static" "$SERVEDIR/"
+cat > "$SERVEDIR/sh" <<'SH_EOF'
+#!/bin/sh
+set -eu
+SRV="${INVFS_SERVER:-http://10.0.2.2:8000}"
+TMP=$(mktemp -d /tmp/invfs-sh.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+cd "$TMP"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o bootstrap.sh "$SRV/bootstrap.sh"
+    curl -fsSL -o SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    curl -fsSL -o "$ART" "$SRV/$ART"
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O bootstrap.sh "$SRV/bootstrap.sh"
+    wget -q -O SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    wget -q -O "$ART" "$SRV/$ART"
+fi
+sha256sum -c SHA256SUMS
+sh bootstrap.sh --file "$ART" --yes --prefix /usr
+SH_EOF
+chmod 755 "$SERVEDIR/sh"
 ABASE=$(basename "$ART" .tar.zst)
 # The guest script must never pin a version: point its artifact
 # references at the tree under test (served copy only).
@@ -124,6 +146,10 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
         note "already verified the image, and the volume is crash-consistent)"
         kill -KILL $QPIDE 2>/dev/null
         wait $QPIDE 2>/dev/null
+    fi
+    if [ -x "$REPO/tools/boot-arch-qemu.sh" ]; then
+        note "verifying post-install UEFI boot via boot-arch-qemu.sh --bootloader"
+        bash "$REPO/tools/boot-arch-qemu.sh" --bootloader "$VOL" || fail "UEFI boot verification failed"
     fi
     exit 0
 else

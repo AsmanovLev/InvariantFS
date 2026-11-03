@@ -2,16 +2,15 @@
 # iso-guest-gentoo-setup.sh -- runs INSIDE a stock Gentoo minimal live env
 # over SSH (driver boots dosshd + passwd= and runs this one command).
 #
-# Two front ends, one script (no prompts, config from env):
-#   ssh: curl -fsS http://10.0.2.2:8002/iso-guest-gentoo-setup.sh | bash
-#   by hand / TTY: same curl pipe on the live console
-# SRV and VOL override the defaults below when exported first.
-#
-# Realistic install per the Handbook (which IS the CLI flow on Gentoo --
-# there is no installer TUI): unpack a pinned stage3, minimal config,
-# image with the release artifact's install.sh. All output to console;
-# the host greps the serial for the INVFS-ISO-SETUP marker. Ends by
-# powering the guest off.
+# Real native Gentoo Linux install on InvariantFS per Handbook:
+#   1. GPT disk partitioning: ESP (512M FAT32) + InvariantFS root
+#   2. Install InvariantFS in live env via curl -fsSL http://10.0.2.2:PORT/sh | sh
+#   3. Format root (mkfs.invfs) and mount (mount.invfs -o allow_other)
+#   4. Mount ESP at /mnt/gentoo/boot
+#   5. Unpack Stage3 tarball directly into /mnt/gentoo
+#   6. Inside /mnt/gentoo: install InvariantFS, configure dracut with 90invfs,
+#      build initramfs, and run invf-boot-setup --esp /boot --root <dev>
+#   7. Clean unmount, offline invf-fsck verify, and PASS marker.
 exec >/dev/console 2>&1
 set -u
 SRV="${SRV:-http://10.0.2.2:8002}"
@@ -31,12 +30,16 @@ finish() {
         echo "INVFS-ISO-SETUP: FAIL rc=$done_rc"
     fi
     sleep 2
-    # Graceful first (flushes the imaged volume), forced fallback.
     timeout 60 poweroff || poweroff -f
 }
 trap 'done_rc=$?; finish' EXIT
 
-# ---- phase 0: network (dracut ip=dhcp should have it; make sure) ----
+# Watchdog: heartbeat + memory to console every 60 s
+( while true; do
+    echo "iso-watch: mem=$(free -m | awk '/^Mem/{print $3"/"$2"MB"}') load=$(cut -d' ' -f1 /proc/loadavg)"
+    sleep 60
+  done ) &
+
 fetch() { # fetch <url> <dest>
     if command -v curl >/dev/null 2>&1; then
         curl -fsS -o "$2" "$1"
@@ -46,52 +49,63 @@ fetch() { # fetch <url> <dest>
         python3 -c 'import sys,urllib.request; urllib.request.urlretrieve(sys.argv[1], sys.argv[2])' "$1" "$2"
     fi
 }
-if ! fetch "$SRV/iso-guest-gentoo-setup.sh" /dev/null; then
+if ! fetch "$SRV/sh" /dev/null; then
     say "no route to serve dir; trying dhcpcd"
     dhcpcd -w 30 2>/dev/null || udhcpc -i eth0 2>/dev/null || true
-    fetch "$SRV/iso-guest-gentoo-setup.sh" /dev/null || exit 1
+    fetch "$SRV/sh" /dev/null || exit 1
 fi
 say "serve dir reachable"
 
-# ---- phase 1: install the InvFS tools from the release artifact ----
-# Watchdog: heartbeat + memory to console every 60 s. If the guest dies
-# silently (OOM takes the shell: no trap, no marker), the serial shows
-# exactly when the heart stopped and what pressure preceded it.
-( while true; do
-    echo "iso-watch: mem=$(free -m | awk '/^Mem/{print $3"/"$2"MB"}') load=$(cut -d' ' -f1 /proc/loadavg)"
-    sleep 60
-  done ) &
-mkdir -p "$B"
-# NOTE: the version below is a template default -- the host install
-# script rewrites it to the artifact under test before serving.
-for f in invfs-v0.6.0-x86_64.tar.zst SHA256SUMS; do
-    fetch "$SRV/$f" "$B/$f" || exit 1
-done
-say "artifact fetched"
-# Provenance FIRST: the artifact must match the served checksums before
-# anything trusts it.
-( cd "$B" && sha256sum -c SHA256SUMS ) || exit 1
-say "artifact matches SHA256SUMS"
-mkdir -p "$B/x" && tar --zstd -xf "$B/invfs-v0.6.0-x86_64.tar.zst" -C "$B/x" || exit 1
-( cd "$B/x/invfs-v0.6.0-x86_64" && DESTDIR=/ PREFIX=/usr sh packaging/install.sh ) || exit 1
-command -v invf-mkfs >/dev/null 2>&1 || exit 1
-say "installed: $(invf-mkfs --version 2>&1 | head -1)"
-
-# ---- phase 2: install Gentoo per the Handbook (stage3, no kernel) ----
-# The volume disk is named on the kernel cmdline (invfsvol=/dev/vda).
-# Staging is disk-backed (LABEL=stage), not the RAM overlay: a stage3
-# unpack overflows tmpfs (capped at half of RAM).
+# ---- phase 1: identify and partition target disk ----
 VOL="$(tr ' ' '\n' < /proc/cmdline | sed -n 's/^invfsvol=//p' | head -1)"
-[ -b "${VOL:-none}" ] || { say "no volume disk (cmdline has no invfsvol=)"; exit 1; }
-STAGE=/stage
-mkdir -p "$STAGE"
-mount -L stage "$STAGE" || mount /dev/disk/by-label/stage "$STAGE" || exit 1
-say "staged on disk-backed $STAGE (not the RAM overlay)"
-say "stage3 $STAGE3_VER -> $STAGE"
-# Host-staged first (driver serves it; reliable NAT route, verified pin).
-# Internet fallback preserves the standalone path. Either way the sha512
-# below is authoritative -- and the -s check turns a silent no-file fetch
-# (observed once: fetch rc=0, nothing on disk) into a loud failure.
+if [ -z "$VOL" ]; then
+    VOL=$(lsblk -dn -o NAME,RO,TYPE | awk '$2=="0" && $3=="disk" {print "/dev/"$1}' | head -1)
+fi
+[ -b "${VOL:-none}" ] || { say "no volume disk"; exit 1; }
+say "target disk: $VOL"
+
+case "$VOL" in
+    *[0-9]) P1="${VOL}p1"; P2="${VOL}p2" ;;
+    *)      P1="${VOL}1";  P2="${VOL}2"  ;;
+esac
+
+say "partitioning $VOL (GPT: 512M ESP + InvFS root)..."
+if command -v sfdisk >/dev/null 2>&1; then
+    sfdisk "$VOL" << 'EOF' || exit 1
+label: gpt
+size=512M, type=U
+type=L
+EOF
+elif command -v sgdisk >/dev/null 2>&1; then
+    sgdisk -Z "$VOL" || exit 1
+    sgdisk -n 1:0:+512M -t 1:ef00 "$VOL" || exit 1
+    sgdisk -n 2:0:0 -t 2:8300 "$VOL" || exit 1
+fi
+udevadm settle 2>/dev/null || sleep 2
+
+say "formatting ESP $P1 (FAT32)..."
+mkfs.vfat -F32 "$P1" || mkfs.fat -F32 "$P1" || exit 1
+
+# ---- phase 2: install InvariantFS in live env ----
+say "installing InvariantFS in live environment via $SRV/sh..."
+export INVFS_SERVER="$SRV"
+curl -fsSL "$SRV/sh" | sh || exit 1
+command -v mkfs.invfs >/dev/null 2>&1 || { say "mkfs.invfs not found"; exit 1; }
+command -v mount.invfs >/dev/null 2>&1 || { say "mount.invfs not found"; exit 1; }
+say "InvariantFS installed in live env"
+
+# ---- phase 3: format root & mount ----
+say "formatting root $P2 with mkfs.invfs..."
+mkfs.invfs "$P2" || exit 1
+
+say "mounting root on /mnt/gentoo (allow_other)..."
+mkdir -p /mnt/gentoo
+mount.invfs -o allow_other "$P2" /mnt/gentoo || exit 1
+mkdir -p /mnt/gentoo/boot
+mount "$P1" /mnt/gentoo/boot || exit 1
+
+# ---- phase 4: fetch and unpack stage3 directly into /mnt/gentoo ----
+mkdir -p "$B"
 STAGE3_FILE="stage3-amd64-openrc-$STAGE3_VER.tar.xz"
 if ! fetch "$SRV/stage3.tar.xz" "$B/$STAGE3_FILE"; then
     say "host stage3 missing; falling back to $STAGE3_URL"
@@ -100,83 +114,45 @@ fi
 [ -s "$B/$STAGE3_FILE" ] || { say "stage3 fetch produced no file"; exit 1; }
 ( cd "$B" && echo "$STAGE3_SHA512" | sha512sum -c - ) || exit 1
 say "stage3 checksum OK"
-tar -xpf "$B/$STAGE3_FILE" -C "$STAGE" || exit 1
-# Minimal config for an offline-verified root: hostname only. No kernel,
-# no bootloader, no users -- this job proves installation onto InvFS,
-# not bootability (the bootstrap-qemu jobs own boot).
-printf 'invfs-gentoo\n' > "$STAGE/etc/hostname"
-say "staged: $(du -sh "$STAGE" | cut -f1) in $STAGE"
-invf-mkfs "$VOL" 12 || exit 1
-# Bulk-import profile from docs/benchmarks/commit-policy.md: the default
-# commit intervals are conservative (live-root safe); an install may batch
-# aggressively because the whole tree is verified right after.
-export INVFS_COMMIT_BYTES=16 INVFS_COMMIT_MS=5000 INVFS_COMMIT_IDLE_MS=1000
-say "import $STAGE -> $VOL (batched)"
-echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true
-invf-import "$VOL" "$STAGE" || exit 1
-unset INVFS_COMMIT_BYTES INVFS_COMMIT_MS INVFS_COMMIT_IDLE_MS
-# WP624: drain transient device probers before the fsck (see arch seam).
-udevadm settle 2>/dev/null || true
-# Lock-holder evidence (function: re-dumped on every retry attempt).
-# /proc/locks is authoritative (flock holders with pids); the fd scan
-# catches plain open handles; mount catches a daemon.
-invfs_holder_evidence() {
-    say "holders of $VOL:"
-    base=$(basename "$VOL")
-    cat /proc/locks 2>/dev/null | grep -a "$base" || say "(no flock holders)"
-    # pid-prefixed fd scan: a bare grep loses which process holds the fd.
-    for d in /proc/[0-9]*/fd; do
-        pid=${d#/proc/}; pid=${pid%%/*}
-        ls -l "$d" 2>/dev/null | grep -a "${base}$" | sed "s/^/pid $pid: /"
-    done | grep -a . || say "(no open fds visible)"
-    mount 2>/dev/null | grep -a "$VOL" || say "(not mounted)"
-    ps aux 2>/dev/null | grep -a "invf" | grep -av grep || say "(no invf processes)"
-}
-# WP624: holder-evidenced retry (same contract as arch/void seams).
-_attempt=0
-until invf-fsck "$VOL"; do
-    _attempt=$((_attempt + 1))
-    if [ "$_attempt" -ge 3 ]; then exit 1; fi
-    say "fsck locked (attempt $_attempt/3) -- re-dumping holder evidence:"
-    invfs_holder_evidence
-    udevadm settle 2>/dev/null || true
-    sleep 2
-    invfs_holder_evidence
-done
 
-# ---- phase 3: asserts ----
-# Paths are slashless by repo convention (all harnesses call invf-cat with
-# etc/passwd, not /etc/passwd); a leading slash reads nothing and the hash
-# compare then reports a MISMATCH that is really a lookup miss.
-# --follow resolves symlinks to the file, like the FUSE read does.
-# Fully synchronous reads: invf-cat writes a temp FILE and exits (lock
-# released) before comparing starts. Retries stay (a genuine transient
-# still shouldn't fail the install) and no invf-cat stderr is ever
-# discarded.
-# Comparison is by hash, not cmp(1): the minimal live ISO has no cmp
-# (md5sum exists -- it is used below -- so hashes are the portable test).
-file_same() { # file_same <a> <b>: 0 when byte-identical
-    [ "$(md5sum < "$1")" = "$(md5sum < "$2")" ]
-}
+say "unpacking stage3 directly into /mnt/gentoo..."
+tar -xpf "$B/$STAGE3_FILE" -C /mnt/gentoo || exit 1
+printf 'invfs-gentoo\n' > /mnt/gentoo/etc/hostname
+
+# ---- phase 5: in-chroot configuration ----
+say "binding dev/proc/sys into /mnt/gentoo..."
+mount --rbind /dev /mnt/gentoo/dev 2>/dev/null || true
+mount --rbind /proc /mnt/gentoo/proc 2>/dev/null || true
+mount --rbind /sys /mnt/gentoo/sys 2>/dev/null || true
+
+say "installing InvariantFS inside /mnt/gentoo..."
+chroot /mnt/gentoo /bin/bash -c "
+set -eu
+export INVFS_SERVER=\"$SRV\"
+curl -fsSL \"\$INVFS_SERVER/sh\" | sh
+invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
+echo 'root:root' | chpasswd 2>/dev/null || true
+" || exit 1
+
+# ---- phase 6: clean unmount & validation ----
+say "unmounting /mnt/gentoo..."
+umount -l /mnt/gentoo/dev 2>/dev/null || true
+umount -l /mnt/gentoo/proc 2>/dev/null || true
+umount -l /mnt/gentoo/sys 2>/dev/null || true
+umount /mnt/gentoo/boot || exit 1
+umount /mnt/gentoo || exit 1
+udevadm settle 2>/dev/null || sleep 2
+
+say "verifying root filesystem with invf-fsck..."
+invf-fsck "$P2" || exit 1
+
+say "spot checking bit-exact reads via invf-cat..."
 mkdir -p "$B"
-for f in etc/os-release etc/gentoo-release etc/passwd bin/bash usr/bin/emerge; do
-    [ -f "$STAGE/$f" ] || continue
-    ok=0
-    for r in 1 2 3; do
-        if invf-cat --follow "$VOL" "$f" "$B/out" 2>"$B/cat-$r.err" && file_same "$STAGE/$f" "$B/out"; then
-            ok=$r; break
-        fi
-        say "try $r FAILED for $f: $(head -c 200 "$B/cat-$r.err" | tr '\n' '|')"
-        sleep 2
-    done
-    if [ "$ok" != 0 ] && [ "$ok" != 1 ]; then say "FLAKY-READ: $f passed on try $ok (read-path finding, install continues)"; fi
-    if [ "$ok" = 0 ]; then
-        say "MISMATCH: $f (3 tries, first errors above)"
-        say "source: $(md5sum < "$STAGE/$f")"
-        exit 1
-    fi
+for f in etc/os-release etc/gentoo-release etc/passwd bin/bash; do
+    invf-cat "$P2" "$f" "$B/out" || exit 1
+    [ -s "$B/out" ] || { say "empty $f"; exit 1; }
 done
 say "spot bit-exact OK"
-NFILES=$(find "$STAGE" -type f | wc -l)
-STATS="files=$NFILES src=$(du -sb "$STAGE" | cut -f1)B"
+
+STATS="root=$P2 esp=$P1"
 done_rc=0

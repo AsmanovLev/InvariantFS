@@ -145,7 +145,29 @@ sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-gentoo" "$WORK/initramfs-gentoo.im
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
 ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
-cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/tools/iso-guest-gentoo-setup.sh" "$SERVEDIR/"
+cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/iso-guest-gentoo-setup.sh" "$SERVEDIR/"
+cat > "$SERVEDIR/sh" <<'SH_EOF'
+#!/bin/sh
+set -eu
+SRV="${INVFS_SERVER:-http://10.0.2.2:8002}"
+TMP=$(mktemp -d /tmp/invfs-sh.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+cd "$TMP"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o bootstrap.sh "$SRV/bootstrap.sh"
+    curl -fsSL -o SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    curl -fsSL -o "$ART" "$SRV/$ART"
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O bootstrap.sh "$SRV/bootstrap.sh"
+    wget -q -O SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    wget -q -O "$ART" "$SRV/$ART"
+fi
+sha256sum -c SHA256SUMS
+sh bootstrap.sh --file "$ART" --yes --prefix /usr
+SH_EOF
+chmod 755 "$SERVEDIR/sh"
 ABASE=$(basename "$ART" .tar.zst)
 # The guest script must never pin a version: point its artifact
 # references at the tree under test (served copy only).
@@ -190,16 +212,6 @@ fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
 
 truncate -s 12G "$VOL"
-# Staging disk: ext4, LABEL=stage (same RAM-overlay reasoning as the
-# void harness: tmpfs caps at half of RAM, a stage3 + cache overflows
-# it; disk-backed staging removes RAM sizing from the equation).
-truncate -s 8G "$STAGEDISK"
-# mkfs lives in sbin/, which is not on every PATH -- resolve it.
-if command -v mkfs.ext4 >/dev/null 2>&1; then MKFS_EXT4=mkfs.ext4
-elif [ -x /sbin/mkfs.ext4 ]; then MKFS_EXT4=/sbin/mkfs.ext4
-elif [ -x /usr/sbin/mkfs.ext4 ]; then MKFS_EXT4=/usr/sbin/mkfs.ext4
-else fail "mkfs.ext4 not found (needs e2fsprogs)"; fi
-"$MKFS_EXT4" -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
 # Serial doubles as evidence AND as the fallback eyes: if SSH never comes
 # up, the serial log is the only diagnosis. Pipe form keeps .out readable
 # while running (file: only flushes at qemu exit).
@@ -228,7 +240,6 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -append "root=live:CDLABEL=$ISO_LABEL rd.live.dir=/ rd.live.squashimg=image.squashfs cdroot dosshd passwd=$GUEST_PW console=ttyS0,115200 ip=dhcp gentooisosearchuuid=$ISO_LABEL invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
-  -drive "file=$STAGEDISK,format=raw,if=virtio" \
   -netdev "user,id=net0,hostfwd=tcp::$SSHPORT-:22" -device virtio-net-pci,netdev=net0 \
   -vga none -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
 QPIDE=$!
@@ -268,6 +279,14 @@ wait $SSHPID 2>/dev/null || true
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     note "volume left at $VOL"
+    for _ in $(seq 1 90); do
+        kill -0 $QPIDE 2>/dev/null || break
+        sleep 2
+    done
+    if kill -0 $QPIDE 2>/dev/null; then
+        kill -KILL $QPIDE 2>/dev/null
+        wait $QPIDE 2>/dev/null
+    fi
     exit 0
 else
     fail "no PASS marker (see $SER $SSHLOG)"

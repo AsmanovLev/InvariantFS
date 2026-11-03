@@ -712,12 +712,19 @@ EOF
 
     mkdir -p "$STAGE"
     info "unpacking $TARBALL"
-    if tar --zstd -tf "$TARBALL" >/dev/null 2>&1; then
-        tar --zstd -xf "$TARBALL" -C "$STAGE"
-    else
-        have zstd || die "tar lacks --zstd and zstd(1) is not installed"
-        zstd -dc "$TARBALL" | tar -xf - -C "$STAGE"
-    fi
+    case "$TARBALL" in
+        *.tar.gz|*.tgz)
+            tar -xzf "$TARBALL" -C "$STAGE"
+            ;;
+        *)
+            if tar --zstd -tf "$TARBALL" >/dev/null 2>&1; then
+                tar --zstd -xf "$TARBALL" -C "$STAGE"
+            else
+                have zstd || die "tar lacks --zstd and zstd(1) is not installed"
+                zstd -dc "$TARBALL" | tar -xf - -C "$STAGE"
+            fi
+            ;;
+    esac
     app=$(find "$STAGE" -maxdepth 1 -mindepth 1 -type d | head -1)
     [ -n "$app" ] || die "artifact did not contain a top-level directory"
     run_installer "$app"

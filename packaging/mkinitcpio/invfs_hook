@@ -201,11 +201,13 @@ invfs_mount_handler() {
     [ -x "$mp$invfs_init" ] \
         || invfs_die "init '$invfs_init' not found under $mp (set invfs.init=)"
 
-    mkdir -p "$mp/proc" "$mp/sys" "$mp/dev"
+    mkdir -p "$mp/proc" "$mp/sys" "$mp/dev" "$mp/run"
     mount --rbind /proc "$mp/proc" 2>/dev/null
     mount --rbind /sys  "$mp/sys"  2>/dev/null
     mount --rbind /dev  "$mp/dev"  2>/dev/null
+    mount -t tmpfs -o mode=0755,nosuid,nodev tmpfs "$mp/run" 2>/dev/null || true
 
+    msg "Chrooting to InvFS root ($invfs_init)..."
     msg "invfs: chroot hand-off -> $invfs_init"
     exec chroot "$mp" "$invfs_init"
 }

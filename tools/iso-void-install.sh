@@ -86,10 +86,35 @@ sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-void" "$WORK/initramfs-void.img"
 note "building the release artifact the guest will install"
 ( cd "$REPO" && make release >/dev/null 2>&1 ) || fail "make release failed"
 ART=$(ls -t "$REPO"/dist/invfs-*-x86_64.tar.zst | head -1)
-cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/tools/iso-guest-void-setup.sh" "$SERVEDIR/"
+cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/iso-guest-void-setup.sh" "$SERVEDIR/"
+cat > "$SERVEDIR/sh" <<'SH_EOF'
+#!/bin/sh
+set -eu
+SRV="${INVFS_SERVER:-http://10.0.2.2:8001}"
+TMP=$(mktemp -d /tmp/invfs-sh.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT
+cd "$TMP"
+if command -v curl >/dev/null 2>&1; then
+    curl -fsSL -o bootstrap.sh "$SRV/bootstrap.sh"
+    curl -fsSL -o SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    curl -fsSL -o "$ART" "$SRV/$ART"
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O bootstrap.sh "$SRV/bootstrap.sh"
+    wget -q -O SHA256SUMS "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    wget -q -O "$ART" "$SRV/$ART"
+elif command -v xbps-fetch >/dev/null 2>&1; then
+    xbps-fetch "$SRV/bootstrap.sh"
+    xbps-fetch "$SRV/SHA256SUMS"
+    ART=$(awk '{print $2}' SHA256SUMS | head -1)
+    xbps-fetch "$SRV/$ART"
+fi
+sha256sum -c SHA256SUMS
+sh bootstrap.sh --file "$ART" --yes --prefix /usr
+SH_EOF
+chmod 755 "$SERVEDIR/sh"
 ABASE=$(basename "$ART" .tar.zst)
-# The guest script must never pin a version: point its artifact
-# references at the tree under test (served copy only).
 sed -i "s/invfs-v[0-9.][0-9.]*-x86_64/$ABASE/g" "$SERVEDIR/iso-guest-void-setup.sh"
 note "serving: $(ls "$SERVEDIR" | tr '\n' ' ')"
 
@@ -100,15 +125,6 @@ fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
 
 truncate -s 8G "$VOL"
-# Staging disk: ext4, LABEL=stage, so the guest mounts it by label
-# (virtio disk order is stable, but labels don't depend on it).
-truncate -s 6G "$STAGEDISK"
-# mkfs lives in sbin/, which is not on every PATH -- resolve it.
-if command -v mkfs.ext4 >/dev/null 2>&1; then MKFS_EXT4=mkfs.ext4
-elif [ -x /sbin/mkfs.ext4 ]; then MKFS_EXT4=/sbin/mkfs.ext4
-elif [ -x /usr/sbin/mkfs.ext4 ]; then MKFS_EXT4=/usr/sbin/mkfs.ext4
-else fail "mkfs.ext4 not found (needs e2fsprogs)"; fi
-"$MKFS_EXT4" -F -q -L stage "$STAGEDISK" || fail "mkfs.ext4 stage failed"
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
@@ -154,7 +170,6 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -append "root=live:CDLABEL=$ISO_LABEL rd.live.image ip=dhcp rd.break=pre-pivot console=ttyS0,115200 voidisosearchuuid=$ISO_LABEL invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
-  -drive "file=$STAGEDISK,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
   -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
 QPIDE=$!
@@ -200,6 +215,14 @@ done
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     note "volume left at $VOL"
+    for _ in $(seq 1 90); do
+        kill -0 $QPIDE 2>/dev/null || break
+        sleep 2
+    done
+    if kill -0 $QPIDE 2>/dev/null; then
+        kill -KILL $QPIDE 2>/dev/null
+        wait $QPIDE 2>/dev/null
+    fi
     exit 0
 else
     fail "no PASS marker (see $SER)"
