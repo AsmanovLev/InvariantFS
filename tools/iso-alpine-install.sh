@@ -138,7 +138,7 @@ QLOG="$WORK/qemu.log"
 note "starting qemu (accel=$ACCEL, stock Alpine kernel+initramfs)"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -kernel "$WORK/vmlinuz-alpine" -initrd "$WORK/initramfs-alpine.img" \
-  -append "alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.21/main console=ttyS0,115200 invfsvol=/dev/vda" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.21/main console=ttyS0,115200 invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
