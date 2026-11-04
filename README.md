@@ -281,6 +281,9 @@ on a global lock.
 * **DKMS Kernel Module** — Implement a DKMS filesystem driver / fast-path acceleration module.
 * **Windows Support** — Port the InvariantFS FUSE engine to Windows (WinFsp / native filesystem driver).
 * **ISO & Integration Test Suite Overhaul** — Rewrite and modernize the distro ISO boot and installation testing suite with native orchestration.
+* **Proper Benchmarking** - Currently researching proper way to do benchmarks due to the unordinary nature of filesystem.
+* **More testing?** - and potential future inclusion to GNU/Linux repositories.
+* **Expansion of .ivpacks** - more supported formats to squeeze even more density.
 
 ## Docs
 
