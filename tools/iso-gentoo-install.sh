@@ -231,7 +231,12 @@ truncate -s 12G "$VOL"
 rm -f "$SPIPE.in" "$SPIPE.out"
 mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
 : > "$SER"
-cat "$SPIPE.out" >>"$SER" &
+
+cat "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+    printf '[guest %s] %s\n' "$(date +%T)" "$line"
+    printf '%s\n' "$line" >> "$SER"
+done &
+READER_PID=$!
 # NOTE: no dummy writer here. Opening .in O_WRONLY blocks until a reader
 # appears, and the only reader is qemu -- which starts below. Opening it
 # here deadlocks the driver forever (nothing ever launches qemu). The
@@ -239,7 +244,7 @@ cat "$SPIPE.out" >>"$SER" &
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
-cleanup() { kill $SRVPID 2>/dev/null; }
+cleanup() { kill $SRVPID $READER_PID 2>/dev/null; }
 trap cleanup EXIT
 sleep 1
 
@@ -263,18 +268,25 @@ QPIDE=$!
 exec 9>"$SPIPE.in"
 # The trap must kill qemu too: on FAIL the driver exits while the guest
 # (a live shell) would otherwise idle forever, holding locks.
-cleanup() { kill $QPIDE $SRVPID 2>/dev/null; exec 9>&- 2>/dev/null; }
+cleanup() {
+    [ -n "$QPIDE" ] && kill -KILL $QPIDE 2>/dev/null || true
+    kill -KILL $SRVPID $READER_PID 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+}
 note "qemu pid $QPIDE; waiting for SSH (up to 30 min)"
 ssh_up() {
     sshpass -p "$GUEST_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=10 -o BatchMode=no -p "$SSHPORT" root@localhost "echo SSHUP" 2>/dev/null | grep -q SSHUP
 }
-N=$(( 30 * 6 ))
+N=$(( 30 * 60 ))
+START_SEC=$(date +%s)
 up=0
-for _ in $(seq 1 "$N"); do
-    sleep 10
-    kill -0 $QPIDE 2>/dev/null || { note "qemu exited early"; break; }
+while true; do
+    kill -0 "$QPIDE" 2>/dev/null || { note "qemu exited early"; break; }
     if ssh_up; then up=1; break; fi
+    NOW_SEC=$(date +%s)
+    if [ $((NOW_SEC - START_SEC)) -ge "$N" ]; then break; fi
+    sleep 2
 done
 [ "$up" = 1 ] || fail "SSH never came up (see $SER)"
 note "SSH up; running guest (up to $TIMEOUT_MIN min)"
@@ -282,11 +294,16 @@ sshpass -p "$GUEST_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/de
     -o ServerAliveInterval=60 -p "$SSHPORT" root@localhost \
     "curl -fsS http://10.0.2.2:$PORT/iso-guest-gentoo-setup.sh | bash" >"$SSHLOG" 2>&1 &
 SSHPID=$!
-M=$(( TIMEOUT_MIN * 6 ))
-for _ in $(seq 1 "$M"); do
-    sleep 10
-    grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null && break
-    kill -0 $QPIDE 2>/dev/null || { note "qemu exited early"; break; }
+TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
+START_SEC=$(date +%s)
+while true; do
+    if grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null; then break; fi
+    if ! kill -0 "$QPIDE" 2>/dev/null; then note "qemu exited early"; break; fi
+    NOW_SEC=$(date +%s)
+    if [ $((NOW_SEC - START_SEC)) -ge "$TIMEOUT_SEC" ]; then
+        fail "timeout waiting for guest setup marker"
+    fi
+    sleep 1
 done
 wait $SSHPID 2>/dev/null || true
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2

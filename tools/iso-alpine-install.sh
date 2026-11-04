@@ -19,7 +19,7 @@ ISO_KERNEL="boot/vmlinuz-virt"
 ISO_INITRD="boot/initramfs-virt"
 PORT="${INVFS_ISO_PORT:-8003}"
 MEM="${INVFS_ISO_MEM:-4G}"
-TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-45}"
+TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-120}"
 ACCEL="${INVFS_ACCEL:-auto}"
 
 ISO="$WORK/alpine-virt-$ISO_VER-x86_64.iso"

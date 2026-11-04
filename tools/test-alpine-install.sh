@@ -89,7 +89,7 @@ check_volume() {
     for f in $BITEXACT; do
         [ -f "$STAGE/$f" ] || continue
         out="$WORK/out-$(echo "$f" | tr / _)"
-        if ! "$B/invf-cat" "$img" "$f" "$out" >/dev/null 2>&1; then
+        if ! "$B/invf-cat" --follow "$img" "$f" "$out" >/dev/null 2>&1; then
             echo "  cat failed: $f"; ok=0; continue
         fi
         if cmp -s "$STAGE/$f" "$out"; then

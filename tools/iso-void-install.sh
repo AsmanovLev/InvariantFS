@@ -152,15 +152,24 @@ sleep 1
 # it before qemu starts deadlocks the driver).
 mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
 : > "$SER"
-cat "$SPIPE.out" >>"$SER" &
+
+cat "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+    printf '[guest %s] %s\n' "$(date +%T)" "$line"
+    printf '%s\n' "$line" >> "$SER"
+done &
+READER_PID=$!
+
 serial_send() { printf '%s\n' "$1" >&9; }
-serial_wait() { # serial_wait <pattern> <timeout-10s-units> ; 0 on match
-    local pat=$1 n=$2 i
-    for i in $(seq 1 "$n"); do
-        sleep 10
-        grep -aq "$pat" "$SER" 2>/dev/null && return 0
+serial_wait() { # serial_wait <pattern> <timeout-sec> ; 0 on match
+    local pat="$1" timeout="$2"
+    local start=$(date +%s)
+    while true; do
+        if grep -q -a "$pat" "$SER" 2>/dev/null; then return 0; fi
+        if [ -n "${QPIDE:-}" ] && ! kill -0 "$QPIDE" 2>/dev/null; then return 2; fi
+        local now=$(date +%s)
+        if [ $((now - start)) -ge "$timeout" ]; then return 1; fi
+        sleep 0.5
     done
-    return 1
 }
 # serial_run <tag> <command>: send one command line, then an RC echo, and
 # wait for the shell's OWN expansion (RC=0 <tag>). Matching our echoed
@@ -170,7 +179,7 @@ serial_run() {
     local tag=$1; shift
     serial_send "$*"
     serial_send "echo \"RC=\$? $tag\""
-    serial_wait "RC=0 $tag" 12
+    serial_wait "RC=0 $tag" 120
 }
 
 note "starting qemu (accel=$ACCEL, stock ISO kernel+initramfs, rd.break hook)"
@@ -188,12 +197,16 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
 QPIDE=$!
 # The trap must kill qemu too: on FAIL the driver exits while the guest
 # (a live dracut shell) would otherwise idle forever, holding locks.
-cleanup() { kill $QPIDE $SRVPID 2>/dev/null; exec 9>&- 2>/dev/null; }
+cleanup() {
+    [ -n "$QPIDE" ] && kill -KILL $QPIDE 2>/dev/null || true
+    kill -KILL $SRVPID $READER_PID 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+}
 # Writer only now that qemu has both pipe ends open (see comment above).
 exec 9>"$SPIPE.in"
 note "qemu pid $QPIDE; waiting for dracut break (up to $TIMEOUT_MIN min)"
-N=$(( TIMEOUT_MIN * 6 ))
-serial_wait "$BREAK_BANNER" "$N" || fail "dracut break prompt never appeared (see $SER)"
+TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
+serial_wait "$BREAK_BANNER" "$TIMEOUT_SEC" || fail "dracut break prompt never appeared (see $SER)"
 note "break shell up; bringing up guest net, then running guest"
 # dracut's ip=dhcp leaves eth0 DOWN (measured: interface present, no
 # address, no resolv.conf), so DHCP explicitly. dhclient ships in the
@@ -220,10 +233,15 @@ serial_send "chroot /sysroot /bin/bash -c 'cd /tmp && xbps-fetch http://10.0.2.2
 # echo-markers and the final PASS, never for a shell prompt (prompt text
 # also matches our own echo, so matching it proves nothing).
 note "guest launched; waiting for marker (up to $TIMEOUT_MIN min)"
-for _ in $(seq 1 "$N"); do
-    sleep 10
-    grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null && break
-    kill -0 $QPIDE 2>/dev/null || { note "qemu exited early"; break; }
+START_SEC=$(date +%s)
+while true; do
+    if grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null; then break; fi
+    if ! kill -0 "$QPIDE" 2>/dev/null; then note "qemu exited early"; break; fi
+    NOW_SEC=$(date +%s)
+    if [ $((NOW_SEC - START_SEC)) -ge "$TIMEOUT_SEC" ]; then
+        fail "timeout waiting for guest setup marker"
+    fi
+    sleep 1
 done
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then

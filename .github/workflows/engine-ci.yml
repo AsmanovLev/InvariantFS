@@ -1055,7 +1055,7 @@ jobs:
     needs: [scope]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true'
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
         with:

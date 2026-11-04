@@ -28,6 +28,7 @@ ACCEL="${INVFS_ACCEL:-auto}"
 ISO="$WORK/archlinux-$ISO_VER-x86_64.iso"
 VOL="$WORK/vol.img"
 SER="$WORK/serial.log"
+SPIPE="$WORK/serial.pipe"
 SLOG="$WORK/serve.log"
 SERVEDIR="$WORK/serve"
 MNT="$WORK/iso-mnt"
@@ -45,6 +46,7 @@ P=$(ps -eo pid,args | grep "[a]rchisosearchuuid" | awk '{print $1}' || true)
 [ -n "$P" ] && { kill -KILL $P 2>/dev/null; note "killed stray qemu: $P"; }
 Q=$(ps -eo pid,args | grep "[i]nvfs-serve.sh" | awk '{print $1}' || true)
 [ -n "$Q" ] && { kill -KILL $Q 2>/dev/null; note "killed stray server: $Q"; }
+rm -f "$SPIPE.in" "$SPIPE.out"
 sleep 1
 
 if [ ! -f "$ISO" ]; then
@@ -108,7 +110,23 @@ truncate -s 8G "$VOL"
 note "starting server on :$PORT"
 bash "$REPO/tools/invfs-serve.sh" "$SERVEDIR" "$PORT" >"$SLOG" 2>&1 &
 SRVPID=$!
-cleanup() { kill $SRVPID 2>/dev/null; }
+
+# Bidirectional serial pipe with real-time streaming reader
+mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
+: > "$SER"
+
+cat "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+    printf '[guest %s] %s\n' "$(date +%T)" "$line"
+    printf '%s\n' "$line" >> "$SER"
+done &
+READER_PID=$!
+
+QPIDE=""
+cleanup() {
+    [ -n "$QPIDE" ] && kill -KILL $QPIDE 2>/dev/null || true
+    kill -KILL $SRVPID $READER_PID 2>/dev/null || true
+    exec 9>&- 2>/dev/null || true
+}
 trap cleanup EXIT
 sleep 1
 note "starting qemu (accel=$ACCEL, stock ISO, script= hook)"
@@ -120,14 +138,21 @@ qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
   -object rng-random,filename=/dev/urandom,id=rng0 \
   -device virtio-rng-pci,rng=rng0 \
-  -serial "file:$SER" -display none -no-reboot &
+  -serial "pipe:$SPIPE" -display none -no-reboot &
 QPIDE=$!
+exec 9>"$SPIPE.in"
+
 note "qemu pid $QPIDE; waiting for marker (up to $TIMEOUT_MIN min)"
-N=$(( TIMEOUT_MIN * 6 ))
-for _ in $(seq 1 "$N"); do
-  sleep 10
-  grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null && break
-  kill -0 $QPIDE 2>/dev/null || { note "qemu exited early"; break; }
+TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
+START_SEC=$(date +%s)
+while true; do
+    if grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null; then break; fi
+    if ! kill -0 "$QPIDE" 2>/dev/null; then note "qemu exited early"; break; fi
+    NOW_SEC=$(date +%s)
+    if [ $((NOW_SEC - START_SEC)) -ge "$TIMEOUT_SEC" ]; then
+        fail "timeout waiting for guest setup marker"
+    fi
+    sleep 1
 done
 grep -a "INVFS-ISO-SETUP:" "$SER" 2>/dev/null | tail -2
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
