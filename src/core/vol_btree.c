@@ -505,11 +505,12 @@ static int bt_split3_point(int level, const bt_ent *e, int n, int *cut)
 /* ------------------------------------------------------------------ */
 
 static __thread uint8_t bt_tls_val[BT_VAL_MAX + 1u];
+static __thread bt_ent  bt_tls_ent[BT_MAX_ENTRIES];
 
 int btree_search(invfs_volume *v, invfs_blkptr root,
                  bt_key key, bt_val *val_out, int *found)
 {
-    bt_ent e[BT_MAX_ENTRIES];
+    bt_ent *e = bt_tls_ent;
     uint8_t buf[INVFS_BLOCK_SIZE];
     invfs_blkptr cur;
     int depth = 0;

@@ -24,6 +24,8 @@ finish() {
         echo "INVFS-ISO-SETUP: PASS $STATS"
     else
         echo "INVFS-ISO-SETUP: FAIL rc=$done_rc"
+        say "dmesg output:"
+        dmesg -T | tail -n 50 2>/dev/null || true
     fi
     sleep 2
     timeout 60 poweroff || poweroff -f
@@ -140,25 +142,27 @@ else
 fi
 mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
+mkdir -p /mnt/dev /mnt/proc /mnt/sys
+mount --rbind /dev /mnt/dev 2>/dev/null || true
+mount --rbind /proc /mnt/proc 2>/dev/null || true
+mount --rbind /sys /mnt/sys 2>/dev/null || true
 
 # ---- phase 4: install Alpine base-system into /mnt ----
 say "bootstrapping Alpine packages into /mnt via apk..."
 mkdir -p /mnt/etc/apk
+cp -a /etc/apk/keys /mnt/etc/apk/ 2>/dev/null || true
 cat > /mnt/etc/apk/repositories <<'EOF'
 https://dl-cdn.alpinelinux.org/alpine/v3.21/main
 https://dl-cdn.alpinelinux.org/alpine/v3.21/community
 EOF
 
-apk add --root /mnt --initdb --repositories-file /mnt/etc/apk/repositories \
-    alpine-base linux-virt openrc util-linux grub grub-efi gcompat || exit 1
+apk add --root /mnt --initdb --repositories-file /mnt/etc/apk/repositories --keys-dir /etc/apk/keys \
+    alpine-base linux-virt openrc util-linux grub grub-efi gcompat fuse3 zstd zlib || exit 1
 say "base system installed on /mnt"
 
 # ---- phase 5: in-chroot provisioning ----
 say "configuring in-chroot environment..."
 cp -f /etc/resolv.conf /mnt/etc/resolv.conf 2>/dev/null || true
-mount --rbind /dev /mnt/dev 2>/dev/null || true
-mount --rbind /proc /mnt/proc 2>/dev/null || true
-mount --rbind /sys /mnt/sys 2>/dev/null || true
 
 chroot /mnt /bin/sh -c "
 set -eu
@@ -203,7 +207,7 @@ invf-fsck "$P2" || exit 1
 say "spot checking bit-exact reads via invf-cat..."
 mkdir -p "$B"
 for f in etc/os-release etc/inittab etc/hostname; do
-    invf-cat "$P2" "$f" "$B/out" || exit 1
+    invf-cat --follow "$P2" "$f" "$B/out" || exit 1
     [ -s "$B/out" ] || { say "empty $f"; exit 1; }
 done
 say "spot bit-exact OK"

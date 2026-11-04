@@ -39,6 +39,7 @@ SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $
 vpath %.c $(SRCDIRS)
 
 CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
+           -include core/glibc_compat.h \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
            -DINVFS_VERSION_STRING=\"$(VERSION)\" \
@@ -62,7 +63,7 @@ CORE    := volume vol_cpack helper_exec ivpack_loader tool_scratch vol_plugin_cl
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
             vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
-            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro ed25519 \
+            arc crc32c lz4 flacx tarx pngx blkio miniz blake3 blake3_dispatch blake3_portable ppmd8 ppmd8enc ppmd8dec ppmd_codec codec bcj_x86 rs deflate_repro ed25519 glibc_compat \
             deflate_backend_system deflate_backend_stock
 CORE_O  := $(addprefix $(OBJ)/,$(addsuffix .o,$(CORE))) $(STOCK_ZLIB_O)
 
@@ -375,6 +376,7 @@ $(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
 CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z iso9660 wim
 PACKDIR      = tools/codecpacks/$(1).codecpack
 PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+                 -I$(SRC) -include core/glibc_compat.h \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
 # qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
 PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
@@ -419,7 +421,7 @@ plugin-so: $(PLUGIN_SO) $(JXLEST_SO)
 # for itself with a hand-written `cc -std=c11 -O2 -Wall -Wextra -Werror` line.
 # Built here too, from the same manifest `libs`, so a pack's link needs are
 # declared once and the harnesses can ask for them (`print-libs-%`).
-HELPER_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
+HELPER_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -I$(SRC) -include core/glibc_compat.h
 HELPER_CFLAGS_qcow2 := $(HELPER_CFLAGS) -I$(SRC)/codecs -I$(SRC)/zlib -DZ_PREFIX
 define HELPER_RULE
 $(call PACKDIR,$(1))/bin/$(1): $(call PACKDIR,$(1))/$(1).c $(call PACKDIR,$(1))/manifest $(PLUGIN_EXTRA_$(1))
@@ -1812,6 +1814,7 @@ release: unflag all helpers
 	      $(RELEASE_DIR)/packaging/debian/install
 	cp -a tools/codecpacks $(RELEASE_DIR)/tools/codecpacks
 	cp -a tools/sbin $(RELEASE_DIR)/tools/sbin
+	find $(RELEASE_DIR)/tools/sbin $(RELEASE_DIR)/packaging -type f -exec sed -i 's/\r$$//' {} + 2>/dev/null || true
 	printf '%s\n' '$(RELEASE_VERSION)' > $(RELEASE_DIR)/VERSION
 # owner/mtime pinned so a rebuild of the same tree is byte-identical.
 # zstd runs single-threaded on purpose: multi-threaded output depends on

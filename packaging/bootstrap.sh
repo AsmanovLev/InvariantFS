@@ -826,6 +826,7 @@ if [ "$MODE" = auto ]; then
     if [ -n "$FILE" ]; then
         case "$FILE" in
             *.tar.zst) MODE=release;;
+            invfs-*-*.tar.gz|invfs-*-*.tgz) MODE=release;;
             *)         MODE=source;;
         esac
     elif release_assets_exist; then
