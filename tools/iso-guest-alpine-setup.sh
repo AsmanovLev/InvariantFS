@@ -65,8 +65,14 @@ esac
 
 # Install necessary partitioning & glibc compatibility packages in live Alpine
 say "updating live apk and installing prerequisites (gcompat, dosfstools, sfdisk)..."
-apk update >/dev/null 2>&1 || true
-apk add sfdisk util-linux dosfstools e2fsprogs gcompat curl zstd >/dev/null 2>&1 || true
+# In stock Alpine live ISO, repositories may need community for some packages
+grep -q community /etc/apk/repositories 2>/dev/null || {
+    sed -i 's/main/community/' /etc/apk/repositories 2>/dev/null || true
+    echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" >> /etc/apk/repositories
+    echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories
+}
+apk update || true
+apk add sfdisk util-linux dosfstools e2fsprogs gcompat curl zstd || true
 
 say "partitioning $VOL (GPT: 512M ESP + InvFS root)..."
 if command -v sfdisk >/dev/null 2>&1; then
@@ -76,31 +82,62 @@ size=512M, type=U
 type=L
 EOF
 else
-    printf 'g\nn\n1\n\n+512M\nt\n1\nn\n2\n\n\nw\n' | fdisk "$VOL" || true
+    # Busybox fdisk does not support GPT 'g', use sfdisk from util-linux/sfdisk
+    apk add sfdisk 2>/dev/null || true
+    if command -v sfdisk >/dev/null 2>&1; then
+        sfdisk "$VOL" << 'EOF' || exit 1
+label: gpt
+size=512M, type=U
+type=L
+EOF
+    else
+        # Fallback to DOS MBR for busybox fdisk
+        printf 'o\nn\np\n1\n\n+512M\nt\nef\nn\np\n2\n\n\nw\n' | fdisk "$VOL" || true
+    fi
 fi
+mdev -s 2>/dev/null || true
 udevadm settle 2>/dev/null || sleep 2
 
 say "formatting ESP $P1 (FAT32)..."
-mkfs.vfat -F32 "$P1" || mkfs.fat -F32 "$P1" || exit 1
+if command -v mkfs.vfat >/dev/null 2>&1; then
+    mkfs.vfat -F32 "$P1" || exit 1
+elif command -v mkfs.fat >/dev/null 2>&1; then
+    mkfs.fat -F32 "$P1" || exit 1
+else
+    apk add dosfstools 2>/dev/null || true
+    mkfs.vfat -F32 "$P1" || exit 1
+fi
 
 # ---- phase 2: install InvariantFS in live env ----
 say "installing InvariantFS in live env via $SRV/sh..."
+# Install fuse3 and runtime libraries so InvariantFS runs under Alpine (gcompat)
+apk add fuse3 zstd zlib >/dev/null 2>&1 || true
 export INVFS_SERVER="$SRV"
 mkdir -p /tmp/invfs-sh
 cd /tmp/invfs-sh
 wget -q -O sh "$SRV/sh" || curl -fsSL -o sh "$SRV/sh"
 sh ./sh || exit 1
-command -v mkfs.invfs >/dev/null 2>&1 || { say "mkfs.invfs not found"; exit 1; }
-command -v mount.invfs >/dev/null 2>&1 || { say "mount.invfs not found"; exit 1; }
+export PATH="/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+hash -r 2>/dev/null || true
+command -v mkfs.invfs >/dev/null 2>&1 || command -v /usr/sbin/mkfs.invfs >/dev/null 2>&1 || { say "mkfs.invfs not found (PATH=$PATH)"; exit 1; }
+command -v mount.invfs >/dev/null 2>&1 || command -v /usr/sbin/mount.invfs >/dev/null 2>&1 || { say "mount.invfs not found (PATH=$PATH)"; exit 1; }
 say "InvariantFS installed in live env"
 
 # ---- phase 3: format root & mount ----
 say "formatting root $P2 with mkfs.invfs..."
-mkfs.invfs "$P2" || exit 1
+if command -v mkfs.invfs >/dev/null 2>&1; then
+    mkfs.invfs "$P2" || exit 1
+else
+    /usr/sbin/mkfs.invfs "$P2" || exit 1
+fi
 
 say "mounting root on /mnt (allow_other)..."
 mkdir -p /mnt
-mount.invfs -o allow_other "$P2" /mnt || exit 1
+if command -v mount.invfs >/dev/null 2>&1; then
+    mount.invfs -o allow_other "$P2" /mnt || exit 1
+else
+    /usr/sbin/mount.invfs -o allow_other "$P2" /mnt || exit 1
+fi
 mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
 

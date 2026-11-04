@@ -118,11 +118,9 @@ SRVPID=$!
 mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
 : > "$SER"
 
-# Real-time streaming reader
-cat "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
-    printf '[guest %s] %s\n' "$(date +%T)" "$line"
-    printf '%s\n' "$line" >> "$SER"
-done &
+# Real-time streaming reader (tee guarantees unbuffered character output to $SER
+# even when the prompt has no trailing newline)
+tee "$SER" < "$SPIPE.out" &
 READER_PID=$!
 
 QPIDE=""
@@ -138,7 +136,7 @@ QLOG="$WORK/qemu.log"
 note "starting qemu (accel=$ACCEL, stock Alpine kernel+initramfs)"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -kernel "$WORK/vmlinuz-alpine" -initrd "$WORK/initramfs-alpine.img" \
-  -append "modules=loop,squashfs,sd-mod,usb-storage alpine_repo=https://dl-cdn.alpinelinux.org/alpine/v3.21/main console=ttyS0,115200 invfsvol=/dev/vda" \
+  -append "modules=loop,squashfs,sd-mod,usb-storage quiet console=ttyS0,115200 invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
@@ -147,7 +145,7 @@ QPIDE=$!
 
 exec 9>"$SPIPE.in"
 
-serial_send() { printf '%s\n' "$1" >&9; }
+serial_send() { printf '%s\r\n' "$1" >&9; }
 serial_wait() {
     local pat="$1" timeout="$2"
     local start=$(date +%s)
@@ -166,11 +164,22 @@ note "waiting for Alpine boot / login prompt..."
 TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
 serial_wait "login:" "$TIMEOUT_SEC" || fail "login prompt never appeared (see $SER)"
 note "login prompt detected; sending root login"
+sleep 1
 serial_send "root"
 
+# Trigger 2: Wait for root shell prompt (#)
+note "waiting for root shell prompt..."
+serial_wait "#" 30 || {
+    note "retrying root login..."
+    serial_send "root"
+    serial_wait "#" 30 || fail "shell prompt never appeared after login (see $SER)"
+}
+
 sleep 1
-# Trigger 2: Launch guest setup script
-note "root shell ready; launching iso-guest-alpine-setup.sh"
+# Trigger 3: Launch guest setup script (bring up network interface, then udhcpc)
+note "root shell ready; bringing up network and launching iso-guest-alpine-setup.sh"
+serial_send "ip link set eth0 up && udhcpc -i eth0"
+sleep 4
 serial_send "wget -q -O - http://10.0.2.2:$PORT/iso-guest-alpine-setup.sh | sh"
 
 # Trigger 3: Stream progress and wait for setup marker
