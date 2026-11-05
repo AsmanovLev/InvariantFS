@@ -188,10 +188,26 @@ serial_wait "INVFS-ISO-SETUP:" "$TIMEOUT_SEC" || fail "guest setup timed out or 
 
 if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     note "Alpine ISO install: PASS"
-    for _ in $(seq 1 30); do
+    note "waiting for installer QEMU to cleanly terminate..."
+    for _ in $(seq 1 60); do
         kill -0 "$QPIDE" 2>/dev/null || break
         sleep 1
     done
+    if kill -0 "$QPIDE" 2>/dev/null; then
+        note "installer QEMU still alive; killing"
+        kill -KILL "$QPIDE" 2>/dev/null || true
+        wait "$QPIDE" 2>/dev/null || true
+    fi
+
+    # Post-install boot verification
+    note "verifying post-install UEFI boot via boot-alpine-qemu.sh --bootloader"
+    INVFS_ALPINE_WORK="$WORK/boot-test" \
+    INVFS_ALPINE_LOGDIR="$WORK/boot-logs" \
+    INVFS_ACCEL="$ACCEL" \
+    INVFS_CPU="$CPU" \
+        bash "$REPO/tools/boot-alpine-qemu.sh" --bootloader "$VOL" || fail "post-install UEFI boot verification failed"
+
+    note "Alpine post-install UEFI boot verification: PASS"
     exit 0
 else
     fail "Alpine ISO install: FAIL (see $SER)"

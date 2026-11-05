@@ -11,6 +11,11 @@
 #   5. issue `poweroff` over SSH, assert runit stage 3 and that QEMU exits
 #   6. offline: bit-exact `invf-cat` of representative files, then fsck CLEAN
 #
+# Supports three modes:
+#   tools/boot-void-qemu.sh [--single]           # direct kernel/initrd, single disk
+#   tools/boot-void-qemu.sh --multi              # direct kernel/initrd, two disks (mirror)
+#   tools/boot-void-qemu.sh --bootloader <disk>  # OVMF UEFI boot of GPT disk
+#
 # The volume is imported fresh; the boot path is NOT preceded by `invf-fsck -f`
 # (see docs/VOID-INSTALL.md "Known issue: invf-fsck -f before first boot").
 # Set INVFS_VOID_FSCK_F=1 to reproduce that caveat probe explicitly.
@@ -19,7 +24,7 @@
 #   INVFS_E2E_AGENT=wp64-void-clean bash tools/run-e2e.sh tools/boot-void-qemu.sh
 #
 # Env overrides:
-#   INVFS_VOID_MODE=single|multi  volume shape          (default single)
+#   INVFS_VOID_MODE=single|multi|bootloader  volume shape (default single)
 #   INVFS_VOID_WORK=<dir>         scratch dir           (default /var/tmp/invfs-wp64-boot)
 #   INVFS_VOID_LOGDIR=<dir>       logs, kept on cleanup (default /var/tmp/invfs-wp64-logs)
 #   INVFS_VOID_TARBALL=<file>     cached Void rootfs tar.xz (else search/download)
@@ -31,6 +36,8 @@
 #   INVFS_VOID_BOOT_TIMEOUT=<s>   per-stage boot timeout (default 300)
 #   INVFS_VOID_FSCK_F=1           run `invf-fsck -f` before boot (caveat probe)
 #   INVFS_VOID_KEEP=1             keep volume images instead of deleting them
+#   INVFS_VOID_OVMF=<file>        OVMF firmware path    (auto-detected if unset)
+#   INVFS_VOID_DISK=<file>        disk image for --bootloader
 set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
@@ -48,8 +55,44 @@ INITRD="${INVFS_VOID_INITRD:-$REPO/vm/initramfs.cpio.gz}"
 BOOT_TIMEOUT="${INVFS_VOID_BOOT_TIMEOUT:-300}"
 FSCK_F="${INVFS_VOID_FSCK_F:-0}"
 KEEP="${INVFS_VOID_KEEP:-0}"
+OVMF="${INVFS_VOID_OVMF:-${ARCH_OVMF:-}}"
+DISK_IMG="${INVFS_VOID_DISK:-}"
+BOOTLOADER=0
 
-case "$MODE" in single|multi) ;; *) echo "bad INVFS_VOID_MODE: $MODE" >&2; exit 2;; esac
+if [ "$#" -gt 0 ]; then
+    case "$1" in
+        --single) MODE=single; shift ;;
+        --multi)  MODE=multi; shift ;;
+        --bootloader)
+            MODE=bootloader
+            BOOTLOADER=1
+            DISK_IMG="${2:-}"
+            shift 2 2>/dev/null || true
+            ;;
+        -h|--help)
+            echo "usage: $0 [--single | --multi | --bootloader <disk.img>]"
+            exit 0
+            ;;
+        *)
+            if [ -f "$1" ]; then
+                MODE=bootloader
+                BOOTLOADER=1
+                DISK_IMG="$1"
+                shift
+            else
+                echo "usage: $0 [--single | --multi | --bootloader <disk.img>]" >&2
+                exit 2
+            fi
+            ;;
+    esac
+fi
+
+[ "$MODE" = "bootloader" ] && BOOTLOADER=1
+
+case "$MODE" in
+    single|multi|bootloader) ;;
+    *) echo "bad INVFS_VOID_MODE: $MODE" >&2; exit 2 ;;
+esac
 
 IMG="$WORK/root-$MODE.img"
 SHADOW="$WORK/shadow-$MODE.img"
@@ -62,19 +105,31 @@ note() { echo "== $* =="; }
 for t in invf-mkfs invf-import invf-cat invf-ls invf-fsck; do
     [ -x "$B/$t" ] || fail "missing $B/$t (run make first)"
 done
-[ -s "$KERNEL" ] || fail "kernel not found: $KERNEL"
-[ -s "$INITRD" ] || fail "initramfs not found: $INITRD (run tools/mkinitramfs.sh)"
+
+if [ "$BOOTLOADER" = 1 ]; then
+    [ -n "$DISK_IMG" ] || fail "--bootloader requires a disk image argument"
+    [ -f "$DISK_IMG" ] || fail "disk image not found: $DISK_IMG"
+
+    if [ -z "$OVMF" ]; then
+        for p in /usr/share/OVMF/OVMF_CODE.fd \
+                 /usr/share/OVMF/OVMF_CODE_4M.fd \
+                 /usr/share/edk2/ovmf/OVMF_CODE.fd \
+                 /usr/share/edk2/OVMF_CODE.fd \
+                 /usr/share/qemu/OVMF_CODE.fd \
+                 /usr/share/qemu/edk2-x86_64-code.fd \
+                 /usr/share/edk2/x64/OVMF_CODE.4m.fd \
+                 /usr/share/edk2-ovmf/x64/OVMF_CODE.fd; do
+            [ -r "$p" ] && { OVMF="$p"; break; }
+        done
+    fi
+    [ -n "$OVMF" ] || fail "OVMF firmware not found (set INVFS_VOID_OVMF or install ovmf)"
+else
+    [ -s "$KERNEL" ] || fail "kernel not found: $KERNEL"
+    [ -s "$INITRD" ] || fail "initramfs not found: $INITRD (run tools/mkinitramfs.sh)"
+fi
+
 # The host kernel is not always readable by the user running this.
-#
-# GitHub runners ship /boot/vmlinuz-<ver> root-only, so qemu fails with
-#     could not open kernel file '/boot/vmlinuz-...': Permission denied
-# and the harness reports "did not reach runit stage 2 within 300s" -- which
-# reads as a boot failure and is not one: qemu never started. The guest never
-# got a kernel.
-#
 # Copy the kernel somewhere readable rather than requiring it to already be.
-# `install -m 0444` keeps this to one step and never leaves a group- or
-# other-writable copy behind.
 readable_kernel() {
     [ -n "$1" ] && [ -r "$1" ] && { printf '%s\n' "$1"; return 0; }
     [ -r "$1" ] || {
@@ -89,21 +144,10 @@ readable_kernel() {
 }
 
 command -v qemu-system-x86_64 >/dev/null || fail "qemu-system-x86_64 not found"
-[ -e /dev/kvm ] || fail "/dev/kvm not available"
 command -v sshpass >/dev/null || fail "sshpass not found (needed for scripted SSH)"
 
 # sshpass drives the password prompt through a PSEUDO-TERMINAL, so it needs
-# /dev/pts on the machine RUNNING the harness. A runner without devpts mounted
-# gives, from the ssh probe:
-#
-#     Failed to get a pseudo terminal: No such device
-#
-# and the guest is then reported as "SSH not reachable within 300s" -- which
-# reads as a boot failure and is not one. The serial log shows the guest
-# perfectly healthy: runit stage 2, autologin, udevd starting.
-#
-# Refuse here, naming the cause, instead of waiting 300s to report the
-# consequence.
+# /dev/pts on the machine RUNNING the harness.
 if [ ! -e /dev/ptmx ] || ! mountpoint -q /dev/pts 2>/dev/null; then
     if sudo mountpoint -q /dev/pts 2>/dev/null || sudo mount -t devpts devpts /dev/pts 2>/dev/null; then
         note "mounted /dev/pts (sshpass needs a pty; it was not available)"
@@ -116,64 +160,62 @@ fi
 
 mkdir -p "$WORK" "$LOGDIR"
 
-# --------------------------------------------------------------------------
-# Stage the Void tree and provision it (once)
-# --------------------------------------------------------------------------
-if [ ! -d "$STAGE/etc" ]; then
-    if [ -z "$TARBALL" ]; then
-        for c in "$WORK/$ROOTFS" "/var/tmp/invfs-wp64-test/$ROOTFS"; do
-            [ -s "$c" ] && { TARBALL="$c"; break; }
-        done
+if [ "$BOOTLOADER" = 0 ]; then
+    # --------------------------------------------------------------------------
+    # Stage the Void tree and provision it (once)
+    # --------------------------------------------------------------------------
+    if [ ! -d "$STAGE/etc" ]; then
+        if [ -z "$TARBALL" ]; then
+            for c in "$WORK/$ROOTFS" "/var/tmp/invfs-wp64-test/$ROOTFS"; do
+                [ -s "$c" ] && { TARBALL="$c"; break; }
+            done
+        fi
+        if [ -z "$TARBALL" ] || [ ! -s "$TARBALL" ]; then
+            TARBALL="$WORK/$ROOTFS"
+            note "downloading $URL/$ROOTFS"
+            curl -fL --retry 3 -o "$TARBALL.part" "$URL/$ROOTFS" \
+                || fail "download failed (offline?)"
+            mv "$TARBALL.part" "$TARBALL"
+        fi
+        note "extracting $TARBALL"
+        rm -rf "$STAGE"; mkdir -p "$STAGE"
+        tar xJpf "$TARBALL" -C "$STAGE" 2>/dev/null || tar xJf "$TARBALL" -C "$STAGE"
+        [ -e "$STAGE/sbin/init" ] || [ -e "$STAGE/usr/bin/init" ] || fail "no runit init"
+        note "provisioning with tools/configure-void.sh"
+        "$REPO/tools/configure-void.sh" "$STAGE" || fail "configure-void.sh"
+    else
+        note "reusing staged tree: $STAGE"
     fi
-    if [ -z "$TARBALL" ] || [ ! -s "$TARBALL" ]; then
-        TARBALL="$WORK/$ROOTFS"
-        note "downloading $URL/$ROOTFS"
-        curl -fL --retry 3 -o "$TARBALL.part" "$URL/$ROOTFS" \
-            || fail "download failed (offline?)"
-        mv "$TARBALL.part" "$TARBALL"
+    [ -L "$STAGE/etc/runit/runsvdir/default/sshd" ] || fail "staged tree not provisioned (sshd)"
+
+    # --------------------------------------------------------------------------
+    # Fresh volume + offline import (single device, or two with INVFS_DEV1)
+    # --------------------------------------------------------------------------
+    note "mkfs + import ($MODE)"
+    rm -f "$IMG" "$SHADOW"
+    if [ "$MODE" = multi ]; then
+        INVFS_META_FRAC=16 "$B/invf-mkfs" "$IMG" 15 "$SHADOW" 20 | tee "$LOGDIR/mkfs-$MODE.log"
+        DEV1_ENV=(env "INVFS_DEV1=$SHADOW")
+    else
+        INVFS_META_FRAC=16 "$B/invf-mkfs" "$IMG" 15 | tee "$LOGDIR/mkfs-$MODE.log"
+        DEV1_ENV=()
     fi
-    note "extracting $TARBALL"
-    rm -rf "$STAGE"; mkdir -p "$STAGE"
-    tar xJpf "$TARBALL" -C "$STAGE" 2>/dev/null || tar xJf "$TARBALL" -C "$STAGE"
-    [ -e "$STAGE/sbin/init" ] || [ -e "$STAGE/usr/bin/init" ] || fail "no runit init"
-    note "provisioning with tools/configure-void.sh"
-    "$REPO/tools/configure-void.sh" "$STAGE" || fail "configure-void.sh"
-else
-    note "reusing staged tree: $STAGE"
-fi
-[ -L "$STAGE/etc/runit/runsvdir/default/sshd" ] || fail "staged tree not provisioned (sshd)"
+    "${DEV1_ENV[@]}" "$B/invf-import" "$IMG" "$STAGE" 2>&1 | tee "$LOGDIR/import-$MODE.log"
+    grep -q '0 skipped' "$LOGDIR/import-$MODE.log" || fail "import skipped files"
 
-# --------------------------------------------------------------------------
-# Fresh volume + offline import (single device, or two with INVFS_DEV1)
-# --------------------------------------------------------------------------
-note "mkfs + import ($MODE)"
-rm -f "$IMG" "$SHADOW"
-if [ "$MODE" = multi ]; then
-    INVFS_META_FRAC=16 "$B/invf-mkfs" "$IMG" 15 "$SHADOW" 20 | tee "$LOGDIR/mkfs-$MODE.log"
-    DEV1_ENV=(env "INVFS_DEV1=$SHADOW")
-else
-    INVFS_META_FRAC=16 "$B/invf-mkfs" "$IMG" 15 | tee "$LOGDIR/mkfs-$MODE.log"
-    DEV1_ENV=()
-fi
-"${DEV1_ENV[@]}" "$B/invf-import" "$IMG" "$STAGE" 2>&1 | tee "$LOGDIR/import-$MODE.log"
-grep -q '0 skipped' "$LOGDIR/import-$MODE.log" || fail "import skipped files"
-
-if [ "$FSCK_F" = 1 ]; then
-    note "INVFS_VOID_FSCK_F=1: running invf-fsck -f BEFORE boot (caveat probe)"
-    "${DEV1_ENV[@]}" "$B/invf-fsck" -f "$IMG" > "$LOGDIR/fsck-f-before-boot-$MODE.log" 2>&1 || true
-    grep -qE '^(REPAIRED|OK)$' "$LOGDIR/fsck-f-before-boot-$MODE.log" \
-        || { cat "$LOGDIR/fsck-f-before-boot-$MODE.log"; fail "fsck -f produced no verdict"; }
-    echo "fsck -f before boot: $(tail -1 "$LOGDIR/fsck-f-before-boot-$MODE.log")"
+    if [ "$FSCK_F" = 1 ]; then
+        note "INVFS_VOID_FSCK_F=1: running invf-fsck -f BEFORE boot (caveat probe)"
+        "${DEV1_ENV[@]}" "$B/invf-fsck" -f "$IMG" > "$LOGDIR/fsck-f-before-boot-$MODE.log" 2>&1 || true
+        grep -qE '^(REPAIRED|OK)$' "$LOGDIR/fsck-f-before-boot-$MODE.log" \
+            || { cat "$LOGDIR/fsck-f-before-boot-$MODE.log"; fail "fsck -f produced no verdict"; }
+        echo "fsck -f before boot: $(tail -1 "$LOGDIR/fsck-f-before-boot-$MODE.log")"
+    fi
 fi
 
 # --------------------------------------------------------------------------
 # Boot under QEMU
 # --------------------------------------------------------------------------
-# WP223: adaptive accel. A host with /dev/kvm that cannot OPEN it (a
-# container without the device, or without the kvm group) otherwise dies with
-# "failed to initialize kvm", which reads like a QEMU fault rather than a host
-# capability one. Same reasoning as the qcow2/qemu-img gate in the unit tier,
-# and the same reasoning as tools/boot-debian-qemu.sh.
+# WP223: adaptive accel.
 ACCEL="${INVFS_ACCEL:-auto}"
 if [ "$ACCEL" = auto ]; then
     if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; else
@@ -181,31 +223,44 @@ if [ "$ACCEL" = auto ]; then
     fi
 fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
-QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
-       -kernel "$KERNEL" -initrd "$INITRD"
-       -append 'console=ttyS0,115200'
-       -drive "file=$IMG,format=raw,if=virtio")
-[ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
-QOPTS+=(-netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
-        -device virtio-net-pci,netdev=net0
-        # virtio-rng: guests without it stall saving the RNG seed at shutdown
-        # (entropy-starved VM hung a CI void boot after stage 3 with 60s left).
-        -object rng-random,filename=/dev/urandom,id=rng0
-        -device virtio-rng-pci,rng=rng0
-        -display none -serial "file:$SERIAL" -monitor none -no-reboot)
+
+if [ "$BOOTLOADER" = 1 ]; then
+    note "booting via OVMF+GRUB from disk: $DISK_IMG (accel=$ACCEL, memory=${MEM}MB, port=$PORT)"
+    QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
+           -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
+           -drive "id=root,file=$DISK_IMG,format=raw,if=virtio"
+           -append "console=ttyS0,115200"
+           -netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
+           -device virtio-net-pci,netdev=net0
+           -object rng-random,filename=/dev/urandom,id=rng0
+           -device virtio-rng-pci,rng=rng0
+           -display none -serial "file:$SERIAL" -monitor none -no-reboot)
+else
+    QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
+           -kernel "$KERNEL" -initrd "$INITRD"
+           -append 'console=ttyS0,115200'
+           -drive "file=$IMG,format=raw,if=virtio")
+    [ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
+    QOPTS+=(-netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
+            -device virtio-net-pci,netdev=net0
+            -object rng-random,filename=/dev/urandom,id=rng0
+            -device virtio-rng-pci,rng=rng0
+            -display none -serial "file:$SERIAL" -monitor none -no-reboot)
+
+    KERNEL="$(readable_kernel "$KERNEL")" || exit 1
+    for _i in "${!QOPTS[@]}"; do
+        [ "${QOPTS[$_i]}" = "-kernel" ] && QOPTS[$((_i+1))]="$KERNEL"
+    done
+fi
 
 note "booting ($MODE): qemu-system-x86_64 ${QOPTS[*]}"
 rm -f "$SERIAL"
-KERNEL="$(readable_kernel "$KERNEL")" || exit 1
-for _i in "${!QOPTS[@]}"; do
-    [ "${QOPTS[$_i]}" = "-kernel" ] && QOPTS[$((_i+1))]="$KERNEL"
-done
 qemu-system-x86_64 "${QOPTS[@]}" &
 QPID=$!
 cleanup() {
     [ "${QPID:-0}" != 0 ] && kill "$QPID" 2>/dev/null || true
     wait "$QPID" 2>/dev/null || true
-    if [ "$KEEP" != 1 ]; then rm -f "$IMG" "$SHADOW"; fi
+    if [ "$BOOTLOADER" = 0 ] && [ "$KEEP" != 1 ]; then rm -f "$IMG" "$SHADOW"; fi
 }
 trap cleanup EXIT
 
@@ -246,9 +301,7 @@ echo "stage 2 + autologin OK"
 
 note "waiting for sshd (hostfwd tcp::$PORT -> :22)"
 # WP628: the banner wait has its own knob (default = BOOT_TIMEOUT, so
-# unset behavior is byte-for-byte unchanged). Split because on TCG the
-# boot markers pass while sshd's banner lags minutes behind (two CI
-# reds: guest at login prompt, every probe 'banner exchange timeout').
+# unset behavior is byte-for-byte unchanged).
 SSH_TIMEOUT="${INVFS_VOID_SSH_TIMEOUT:-$BOOT_TIMEOUT}"
 ssh_deadline=$((SECONDS + SSH_TIMEOUT))
 until ssh_ready; do
@@ -274,8 +327,7 @@ KREL=$(ssh_guest "uname -r" 2>/dev/null || true)
 echo "guest kernel: $KREL"
 
 # ---------------------------------------------------------------------------
-# WP227 REGRESSION GUARD -- see tools/lib-nonroot-gate.sh for why. Everything
-# above this line asserts as root; this is the one that cannot.
+# WP227 REGRESSION GUARD -- see tools/lib-nonroot-gate.sh for why.
 # ---------------------------------------------------------------------------
 note "non-root access to / (WP227 guard)"
 nonroot_gate ssh_guest -- /bin/sh /bin/dash /etc/os-release /usr/bin
@@ -294,63 +346,49 @@ QPID=0
 echo "poweroff OK (QEMU exited)"
 
 # --------------------------------------------------------------------------
-# Offline post-boot checks: bit-exact reads, then fsck CLEAN
+# Offline post-boot checks
 # --------------------------------------------------------------------------
-note "offline bit-exact invf-cat + fsck"
-BITEXACT="usr/lib/os-release usr/bin/dash usr/bin/runit usr/bin/ip \
+if [ "$BOOTLOADER" = 0 ]; then
+    note "offline bit-exact invf-cat + fsck"
+    BITEXACT="usr/lib/os-release usr/bin/dash usr/bin/runit usr/bin/ip \
 usr/bin/mkdir etc/ssh/sshd_config etc/runit/core-services/03-filesystems.sh \
 etc/fstab etc/hostname etc/shadow usr/lib/libc.so.6"
-for f in $BITEXACT; do
-    [ -f "$STAGE/$f" ] || continue
-    out="$LOGDIR/cat-$MODE-$(echo "$f" | tr / _)"
-    "${DEV1_ENV[@]}" "$B/invf-cat" "$IMG" "$f" "$out" >/dev/null 2>&1 \
-        || fail "invf-cat failed: $f"
-    cmp -s "$STAGE/$f" "$out" || fail "bit-exact mismatch: $f"
-    echo "  OK $f"
-done
+    for f in $BITEXACT; do
+        [ -f "$STAGE/$f" ] || continue
+        out="$LOGDIR/cat-$MODE-$(echo "$f" | tr / _)"
+        "${DEV1_ENV[@]}" "$B/invf-cat" "$IMG" "$f" "$out" >/dev/null 2>&1 \
+            || fail "invf-cat failed: $f"
+        cmp -s "$STAGE/$f" "$out" || fail "bit-exact mismatch: $f"
+        echo "  OK $f"
+    done
 
-"${DEV1_ENV[@]}" "$B/invf-fsck" "$IMG" > "$LOGDIR/fsck-$MODE.log" 2>&1 || true
-if ! grep -q '^OK$' "$LOGDIR/fsck-$MODE.log"; then
-    "${DEV1_ENV[@]}" "$B/invf-fsck" -f "$IMG" > "$LOGDIR/fsck-f-$MODE.log" 2>&1 || true
     "${DEV1_ENV[@]}" "$B/invf-fsck" "$IMG" > "$LOGDIR/fsck-$MODE.log" 2>&1 || true
-fi
-grep -q '^OK$' "$LOGDIR/fsck-$MODE.log" \
-    || { cat "$LOGDIR/fsck-$MODE.log"; fail "fsck not clean after boot"; }
-# WP213: this asserted `grep -qE 'orphans:[[:space:]]*0'`, which CANNOT match on
-# a v3 volume -- so the boot harness's last gate was unconditionally red on
-# the only format this build supports, and no boot could ever have passed it.
-#
-# `orphans:` is printed by the v2 report path (src/cli/fsck.c:444). A v3
-# volume takes the VOLF_META branch at fsck.c:146 and RETURNS before that line,
-# so the string is never emitted. On v3 the equivalent facts are different
-# lines, and the one that actually answers "is anything dangling?" is
-# "live recipes: ok (N live inode(s) with content, every recipe blob they
-# name loads and parses)" -- which is the property the orphan grep was
-# reaching for, on the format that has recipes.
-#
-# The "orphan rows: 1" line it looks nothing like is NOT a failure and is not
-# avoidable: the hidden text/binary batch registry (`\x01tzb`,
-# src/core/volume_internal.h:869) is a live inode with no directory entry by
-# DESIGN, and fsck says so in the line itself -- "Not counted as damage ...
-# -f cannot remove it". Measured on a healthy freshly-swept volume with ten
-# batched files: same single orphan row. Asserting zero there would be
-# asserting that batched text is impossible.
-grep -qE '^  live recipes: ok' "$LOGDIR/fsck-$MODE.log" \
-    || { cat "$LOGDIR/fsck-$MODE.log"; \
-         fail "every live recipe must load and parse after boot"; }
-# Report the orphan count rather than gate on it: if it is NOT the expected
-# single hidden-registry row, that is worth seeing in a log, not failing a
-# boot over.
-ORPH=$(sed -n 's/^  orphan rows: *\([0-9]*\).*/\1/p' "$LOGDIR/fsck-$MODE.log" | head -1)
-echo "fsck CLEAN: $(tail -1 "$LOGDIR/fsck-$MODE.log") (orphan rows: ${ORPH:-0}; the hidden batch registry is expected)"
+    if ! grep -q '^OK$' "$LOGDIR/fsck-$MODE.log"; then
+        "${DEV1_ENV[@]}" "$B/invf-fsck" -f "$IMG" > "$LOGDIR/fsck-f-$MODE.log" 2>&1 || true
+        "${DEV1_ENV[@]}" "$B/invf-fsck" "$IMG" > "$LOGDIR/fsck-$MODE.log" 2>&1 || true
+    fi
+    grep -q '^OK$' "$LOGDIR/fsck-$MODE.log" \
+        || { cat "$LOGDIR/fsck-$MODE.log"; fail "fsck not clean after boot"; }
 
-if [ "$KEEP" = 1 ]; then
-    echo "kept images: $IMG ${SHADOW:+$SHADOW}"
-else
-    rm -f "$IMG" "$SHADOW" 2>/dev/null || true
+    grep -qE '^  live recipes: ok' "$LOGDIR/fsck-$MODE.log" \
+        || { cat "$LOGDIR/fsck-$MODE.log"; \
+             fail "every live recipe must load and parse after boot"; }
+
+    ORPH=$(sed -n 's/^  orphan rows: *\([0-9]*\).*/\1/p' "$LOGDIR/fsck-$MODE.log" | head -1)
+    echo "fsck CLEAN: $(tail -1 "$LOGDIR/fsck-$MODE.log") (orphan rows: ${ORPH:-0}; the hidden batch registry is expected)"
+
+    if [ "$KEEP" = 1 ]; then
+        echo "kept images: $IMG ${SHADOW:+$SHADOW}"
+    else
+        rm -f "$IMG" "$SHADOW" 2>/dev/null || true
+    fi
 fi
 
 SERIAL_NAMED="$LOGDIR/serial-$MODE.log"
 echo
-echo "PASS: Void boot ($MODE) — stage2, autologin, sshd+dhcpcd, SSHD/mount invfs, poweroff, bit-exact, fsck CLEAN"
+if [ "$BOOTLOADER" = 1 ]; then
+    echo "PASS: Void-on-InvariantFS OVMF+GRUB boot ($DISK_IMG) — stage2, autologin, sshd+dhcpcd, SSHD/mount invfs, poweroff OK"
+else
+    echo "PASS: Void boot ($MODE) — stage2, autologin, sshd+dhcpcd, SSHD/mount invfs, poweroff, bit-exact, fsck CLEAN"
+fi
 echo "logs: $LOGDIR (serial: $SERIAL_NAMED)"

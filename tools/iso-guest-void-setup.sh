@@ -165,6 +165,48 @@ else
     dracut --force /boot/initramfs.img
 fi
 
+# Runit services: agetty-ttyS0, dhcpcd, sshd
+mkdir -p /etc/runit/runsvdir/default
+mkdir -p /etc/sv/agetty-serial
+cat > /etc/sv/agetty-serial/conf <<'EOF_SER'
+GETTY_ARGS=\"-L -8 -a root\"
+BAUD_RATE=115200
+TERM_NAME=vt100
+EOF_SER
+
+ln -sfn /etc/sv/agetty-ttyS0 /etc/runit/runsvdir/default/agetty-ttyS0
+ln -sfn /etc/sv/dhcpcd /etc/runit/runsvdir/default/dhcpcd
+ln -sfn /etc/sv/sshd /etc/runit/runsvdir/default/sshd
+
+# sshd configuration: allow root password login
+mkdir -p /etc/ssh/sshd_config.d
+cat > /etc/ssh/sshd_config.d/99-invfs.conf <<'EOF_SSH'
+PermitRootLogin yes
+PasswordAuthentication yes
+UseDNS no
+EOF_SSH
+chmod 644 /etc/ssh/sshd_config.d/99-invfs.conf
+
+# Pre-generate SSH host keys if ssh-keygen exists
+if command -v ssh-keygen >/dev/null 2>&1; then
+    ssh-keygen -A 2>/dev/null || true
+fi
+
+# Hostname
+printf 'void-invfs\n' > /etc/hostname
+
+# FUSE-root boot fix: prevent runit 03-filesystems.sh remount / failure
+if [ -f /etc/runit/core-services/03-filesystems.sh ]; then
+    if ! grep -q '# WP64: FUSE root' /etc/runit/core-services/03-filesystems.sh; then
+        sed -i '/\[ -n \"\$VIRTUALIZATION\" \] && return 0/a\\
+# WP64: FUSE root -- mount.fuse cannot remount\\
+if grep -q \" / fuse \" /proc/mounts 2>/dev/null; then\\
+    msg \"FUSE root detected; skipping root fsck/remount and mount -a\"\\
+    return 0\\
+fi' /etc/runit/core-services/03-filesystems.sh
+    fi
+fi
+
 invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
 echo 'root:root' | chpasswd
 " || exit 1
