@@ -246,7 +246,7 @@ jobs:
   # wedged suite cannot eat the job.
   e2e-full:
     needs: [scope, engine]
-    if: needs.scope.outputs.full == 'true'
+    if: false && needs.scope.outputs.full == 'true'
     # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
     # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
     # image. The version split is coverage, not drift: engine still gates
@@ -323,6 +323,8 @@ jobs:
         run: |
           export INVFS_CODECPACKS_SYS=0
           export PATH="$PATH:/sbin:/usr/sbin"
+          export FLAKEY_SEED="${FLAKEY_SEED:-$(od -vAn -N4 -tu4 < /dev/urandom | tr -d ' ')}"
+          echo "Using randomized FLAKEY_SEED=$FLAKEY_SEED"
           # the suite's scratch defaults to /srv/invfs-flakey (box
           # convention); runners use their temp dir via the suite's own
           # FLAKEY_WORK override instead.

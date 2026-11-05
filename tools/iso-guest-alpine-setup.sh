@@ -150,6 +150,9 @@ mount --rbind /sys /mnt/sys 2>/dev/null || true
 # ---- phase 4: install Alpine base-system into /mnt ----
 say "bootstrapping Alpine packages into /mnt via apk..."
 mkdir -p /mnt/etc/apk
+# In Alpine 3.24+, grub triggers update-grub via grub-probe which fails on FUSE root.
+# Disable grub.trigger; bootloader setup is handled standalone by invf-boot-setup.
+echo "disable_trigger=1" > /mnt/etc/update-grub.conf
 cp -a /etc/apk/keys /mnt/etc/apk/ 2>/dev/null || true
 cat > /mnt/etc/apk/repositories <<'EOF'
 https://dl-cdn.alpinelinux.org/alpine/v3.24/main
