@@ -65,7 +65,6 @@ jobs:
   deb:
     needs: [test-gate]
     runs-on: ubuntu-22.04
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -147,7 +146,7 @@ jobs:
           path: rpmbuild/RPMS/
 
   publish:
-    if: github.event_name == 'push' && always() && !cancelled() && needs.test-gate.result == 'success' && needs.tarball.result == 'success' && needs.arch.result == 'success'
+    if: github.event_name == 'push' && needs.test-gate.result == 'success' && needs.tarball.result == 'success' && needs.deb.result == 'success' && needs.arch.result == 'success' && needs.rpm.result == 'success'
     needs: [test-gate, tarball, deb, arch, rpm]
     runs-on: ubuntu-22.04
     permissions:
@@ -165,7 +164,6 @@ jobs:
           name: dist-tarball
           path: assets
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: dist-deb
           path: assets
@@ -174,7 +172,6 @@ jobs:
           name: dist-arch
           path: assets
       - uses: actions/download-artifact@v4
-        continue-on-error: true
         with:
           name: dist-rpm
           path: assets

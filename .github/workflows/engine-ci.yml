@@ -701,7 +701,7 @@ jobs:
       - name: initramfs for the boot harnesses
         run: bash tools/mkinitramfs.sh
 
-      - name: debian root -> InvariantFS volume
+      - name: debian root -> InvariantFS volume and BOOT (single device)
         run: |
           set -euo pipefail
           S="$RUNNER_TEMP/debian"
@@ -717,34 +717,13 @@ jobs:
             trixie "$S"
           sudo chown -R "$(id -u):$(id -g)" "$S"
           bash tools/configure-debian.sh "$S"
-          # DIAGNOSTIC (saga layer 3): 600 s poweroff budget on this step
-          # only, to discriminate daemon-grinding-slowly (powers down at
-          # ~400 s) from writeback-wedged (identical D-state stall past
-          # 600 s). Script default stays 300. Revisit once WP626 concludes:
-          # slow -> accept/document or speed up (own WP); stuck -> the
-          # request-tracing fix lands and this override goes away.
-          INVFS_DEB_BOOT_TIMEOUT=2100 \
-          INVFS_DEB_POWEROFF_TIMEOUT=600 \
-          INVFS_DEB_POWEROFF_SILENCE_TIMEOUT=600 \
-          INVFS_DEB_SHUTDOWN_DEBUG=1 \
-          INVFS_DEB_STAGE="$S" bash tools/boot-debian-qemu.sh
-      - name: debian root BOOTS on InvariantFS (single device)
-        run: |
-          set -o pipefail
           rc=0
-          # TCG boots on shared runners vary 13-16+ min wall; the script's
-          # 900 s default turns variance into red. 2100 s still catches a
-          # true hang (which never finishes) while surviving slow hosts.
-          # DIAGNOSTIC: 1200 s qemu-exit budget (script default 600) to
-          # tell a slow TCG poweroff tail (exits late) from a wedged guest
-          # (never exits). Revisit once the verdict is in: slow -> keep or
-          # document; wedged -> root-cause instead of a bigger number.
           INVFS_DEB_BOOT_TIMEOUT=2100 \
           INVFS_DEB_POWEROFF_TIMEOUT=600 \
           INVFS_DEB_POWEROFF_SILENCE_TIMEOUT=600 \
           INVFS_DEB_QEMU_EXIT_TIMEOUT=1200 \
           INVFS_DEB_SHUTDOWN_DEBUG=1 \
-          INVFS_DEB_STAGE="$RUNNER_TEMP/debian" \
+          INVFS_DEB_STAGE="$S" \
             bash tools/boot-debian-qemu.sh \
               2>&1 | tee "$RUNNER_TEMP/debianboot.log" || rc=${PIPESTATUS[0]}
           cp /tmp/invfs-debian-boot-single.log "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
@@ -1141,6 +1120,15 @@ jobs:
       - name: packaging suite (deb native)
         run: bash tools/test-packaging.sh
 
+      - name: upload debian packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-deb
+          path: |
+            /tmp/invfs-pkg-test-*/invfs_*.deb
+          if-no-files-found: ignore
+
   # Arch, natively: full suite in an Arch container (arch leg staged as
   # elsewhere) PLUS a real makepkg of the recipe against the
   # HEAD-built artifact -- the exact proof the staged leg cannot give
@@ -1186,6 +1174,17 @@ jobs:
           runuser -u builder -- makepkg --noconfirm
           ls invfs-*.pkg.tar.zst
           pacman -Qip invfs-*.pkg.tar.zst | head -5
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          cp invfs-*.pkg.tar.zst "$GITHUB_WORKSPACE/pkg/"
+
+      - name: upload arch packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-arch
+          path: |
+            pkg/invfs-*.pkg.tar.zst
+          if-no-files-found: ignore
 
   # Void, natively: real xbps-src build of the template against the
   # HEAD-built artifact (staged do_install() runs inside the suite too).
@@ -1282,3 +1281,14 @@ jobs:
           grep -q "^checksum=$H$" "$OVER/template" || { echo "re-pin failed"; exit 1; }
           cd /tmp/vp && ./xbps-src pkg invfs
           ls hostdir/binpkgs/invfs-*.xbps
+          mkdir -p "$GITHUB_WORKSPACE/pkg-void"
+          cp hostdir/binpkgs/invfs-*.xbps "$GITHUB_WORKSPACE/pkg-void/"
+
+      - name: upload void packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-void
+          path: |
+            pkg-void/invfs-*.xbps
+          if-no-files-found: ignore
