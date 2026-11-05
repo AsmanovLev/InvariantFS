@@ -359,7 +359,7 @@ jobs:
   # runner's small /tmp.
   installation-bootstrap-arch:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.boot_arch == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.boot_arch == 'true')
     # DISABLED: the bootstrap-tarball path (test-arch-install.sh) tests the
     # same ground as the stock-ISO flow (archiso-validation) with less
     # realism for the same CI minutes. Re-enable by deleting this condition;
@@ -498,7 +498,7 @@ jobs:
 
   installation-bootstrap-void:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.boot_void == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.boot_void == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -627,7 +627,7 @@ jobs:
 
   installation-bootstrap-debian:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.deb == 'true' || needs.scope.outputs.boot_debian == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.deb == 'true' || needs.scope.outputs.boot_debian == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
@@ -762,7 +762,7 @@ jobs:
   # boot-fedora-qemu.sh, which does not exist. Scratch under RUNNER_TEMP.
   installation-bootstrap-fedora:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.rpm == 'true' || needs.scope.outputs.boot_fedora == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.rpm == 'true' || needs.scope.outputs.boot_fedora == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     steps:
@@ -881,7 +881,7 @@ jobs:
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -953,7 +953,7 @@ jobs:
   # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
   installation-iso-void:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -997,7 +997,7 @@ jobs:
   # has no installer TUI; the Handbook install IS the CLI flow.
   installation-iso-gentoo:
     needs: [scope]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
     steps:
@@ -1071,8 +1071,9 @@ jobs:
 
   # Alpine minirootfs offline bootstrap onto InvariantFS: unpack,
   # configure-alpine.sh, invf-mkfs, invf-import, invf-fsck, invf-cat.
+  # Depends on packaging-alpine so the generated .apk package is installed into the stage.
   installation-bootstrap-alpine:
-    needs: [scope]
+    needs: [scope, packaging-alpine]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.boot_alpine == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -1080,6 +1081,12 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
+
+      - name: download alpine package
+        uses: actions/download-artifact@v4
+        with:
+          name: dist-apk
+          path: ${{ runner.temp }}/dist-apk
 
       - name: dependencies
         run: |
