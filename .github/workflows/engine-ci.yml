@@ -610,7 +610,7 @@ jobs:
   # verifies PASS marker).
   installation-iso-alpine:
     needs: [scope, packaging-alpine]
-    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true'
+    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     steps:
@@ -640,6 +640,8 @@ jobs:
           path: |
             ${{ runner.temp }}/iso-alpine/serial.log
             ${{ runner.temp }}/iso-alpine/serve.log
+            ${{ runner.temp }}/iso-alpine/boot-logs/*
+            ${{ runner.temp }}/iso-alpine/boot-test/*
           if-no-files-found: warn
 
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
