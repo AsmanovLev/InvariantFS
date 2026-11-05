@@ -20,6 +20,7 @@ const char *strerrordesc_np(int errnum) {
     return strerror(errnum);
 }
 
+#ifndef fcntl64
 int fcntl64(int fd, int cmd, ...) __attribute__((weak));
 int fcntl64(int fd, int cmd, ...) {
     va_list va;
@@ -28,6 +29,7 @@ int fcntl64(int fd, int cmd, ...) {
     va_end(va);
     return fcntl(fd, cmd, arg);
 }
+#endif
 
 long int __isoc23_strtol(const char *nptr, char **endptr, int base) __attribute__((weak));
 long int __isoc23_strtol(const char *nptr, char **endptr, int base) {

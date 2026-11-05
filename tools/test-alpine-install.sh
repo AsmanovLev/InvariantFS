@@ -36,12 +36,12 @@ note "stage 1: Alpine minirootfs tarball"
 if [ ! -s "$TARBALL" ]; then
     echo "downloading $URL/$ROOTFS"
     if command -v curl >/dev/null; then
-        curl -fL --retry 3 -o "$TARBALL.part" "$URL/$ROOTFS" \
+        curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.part" "$URL/$ROOTFS" \
             || fail "download failed (offline?)"
-        curl -fL --retry 3 -o "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+        curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
     elif command -v wget >/dev/null; then
-        wget -O "$TARBALL.part" "$URL/$ROOTFS" || fail "download failed (offline?)"
-        wget -O "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+        wget -T 15 --tries=5 -O "$TARBALL.part" "$URL/$ROOTFS" || fail "download failed (offline?)"
+        wget -T 15 --tries=5 -O "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
     else
         fail "no curl/wget and no cached tarball at $TARBALL"
     fi

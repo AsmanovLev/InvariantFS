@@ -39,7 +39,6 @@ SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $
 vpath %.c $(SRCDIRS)
 
 CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
-           -include core/glibc_compat.h \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
            -DINVFS_VERSION_STRING=\"$(VERSION)\" \
@@ -376,7 +375,6 @@ $(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
 CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z iso9660 wim
 PACKDIR      = tools/codecpacks/$(1).codecpack
 PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
-                 -I$(SRC) -include core/glibc_compat.h \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
 # qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
 PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
@@ -421,7 +419,7 @@ plugin-so: $(PLUGIN_SO) $(JXLEST_SO)
 # for itself with a hand-written `cc -std=c11 -O2 -Wall -Wextra -Werror` line.
 # Built here too, from the same manifest `libs`, so a pack's link needs are
 # declared once and the harnesses can ask for them (`print-libs-%`).
-HELPER_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror -I$(SRC) -include core/glibc_compat.h
+HELPER_CFLAGS := -std=c11 -O2 -Wall -Wextra -Werror
 HELPER_CFLAGS_qcow2 := $(HELPER_CFLAGS) -I$(SRC)/codecs -I$(SRC)/zlib -DZ_PREFIX
 define HELPER_RULE
 $(call PACKDIR,$(1))/bin/$(1): $(call PACKDIR,$(1))/$(1).c $(call PACKDIR,$(1))/manifest $(PLUGIN_EXTRA_$(1))
