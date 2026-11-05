@@ -41,8 +41,8 @@ printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\n' > "$E/resolv.conf"
 # --- apk repositories -----------------------------------------------------
 mkdir -p "$E/apk"
 cat > "$E/apk/repositories" <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/v3.21/main
-https://dl-cdn.alpinelinux.org/alpine/v3.21/community
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community
 EOF
 
 # --- serial console: autologin root on ttyS0 ------------------------------

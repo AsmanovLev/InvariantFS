@@ -70,8 +70,8 @@ say "updating live apk and installing prerequisites (gcompat, dosfstools, sfdisk
 # In stock Alpine live ISO, repositories may need community for some packages
 grep -q community /etc/apk/repositories 2>/dev/null || {
     sed -i 's/main/community/' /etc/apk/repositories 2>/dev/null || true
-    echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/main" >> /etc/apk/repositories
-    echo "https://dl-cdn.alpinelinux.org/alpine/v3.21/community" >> /etc/apk/repositories
+    echo "https://dl-cdn.alpinelinux.org/alpine/v3.24/main" >> /etc/apk/repositories
+    echo "https://dl-cdn.alpinelinux.org/alpine/v3.24/community" >> /etc/apk/repositories
 }
 apk update || true
 apk add sfdisk util-linux dosfstools e2fsprogs gcompat curl zstd || true
@@ -152,8 +152,8 @@ say "bootstrapping Alpine packages into /mnt via apk..."
 mkdir -p /mnt/etc/apk
 cp -a /etc/apk/keys /mnt/etc/apk/ 2>/dev/null || true
 cat > /mnt/etc/apk/repositories <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/v3.21/main
-https://dl-cdn.alpinelinux.org/alpine/v3.21/community
+https://dl-cdn.alpinelinux.org/alpine/v3.24/main
+https://dl-cdn.alpinelinux.org/alpine/v3.24/community
 EOF
 
 apk add --root /mnt --initdb --repositories-file /mnt/etc/apk/repositories --keys-dir /etc/apk/keys \
