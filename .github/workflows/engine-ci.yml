@@ -108,8 +108,8 @@ jobs:
                 tools/boot-debian-qemu.sh|tools/test-initramfs-bootstrap.sh|tools/mkinitramfs.sh) BD=1;;
                 tools/test-fedora-install.sh) BF=1;;
                 tools/iso-gentoo-install.sh|tools/iso-guest-gentoo-setup.sh) IG=1;;
-                tools/configure-alpine.sh|tools/test-alpine-install.sh|tools/boot-alpine-qemu.sh) BALP=1;;
-                tools/iso-alpine-install.sh|tools/iso-guest-alpine-setup.sh) IALP=1;;
+                tools/configure-alpine.sh|tools/test-alpine-install.sh|tools/boot-alpine-qemu.sh) ALP=1; BALP=1;;
+                tools/iso-alpine-install.sh|tools/iso-guest-alpine-setup.sh) ALP=1; IALP=1;;
                 tools/sbin/invf-boot-setup) BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
                 src/*|include/*|Makefile|tools/test-meta*|tools/run-unit-isolated.sh|tools/check-vol-find.sh|tools/check-repo-hygiene.sh|tools/lint-test-heredocs.sh) ENGINE=1;;
                 *) force_full;;
