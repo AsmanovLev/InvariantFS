@@ -48,86 +48,53 @@ EOF
 # --- serial console: autologin root on ttyS0 ------------------------------
 if [ -f "$E/inittab" ]; then
     # Replace default ttyS0 getty with autologin root shell
-    python3 - "$E/inittab" <<'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path, "r") as f:
-    lines = f.readlines()
-new_lines = []
-has_ttyS0 = False
-for line in lines:
-    if line.startswith("ttyS0::"):
-        new_lines.append("ttyS0::respawn:/sbin/getty -L 115200 ttyS0 -a root\n")
-        has_ttyS0 = True
-    else:
-        new_lines.append(line)
-if not has_ttyS0:
-    new_lines.append("ttyS0::respawn:/sbin/getty -L 115200 ttyS0 -a root\n")
-with open(path, "w") as f:
-    f.writelines(new_lines)
-PYEOF
+    awk '
+        BEGIN { found = 0 }
+        /^ttyS0::/ {
+            print "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 -a root"
+            found = 1
+            next
+        }
+        { print }
+        END {
+            if (!found) {
+                print "ttyS0::respawn:/sbin/getty -L 115200 ttyS0 -a root"
+            }
+        }
+    ' "$E/inittab" > "$E/inittab.tmp" && mv "$E/inittab.tmp" "$E/inittab"
 fi
 
 # --- shadow / root password -----------------------------------------------
 # Allow root login without password
 if [ -f "$E/shadow" ]; then
-    python3 - "$E/shadow" <<'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path, "r") as f:
-    lines = f.readlines()
-new_lines = []
-for line in lines:
-    if line.startswith("root:"):
-        parts = line.split(":")
-        parts[1] = "" # empty password
-        new_lines.append(":".join(parts))
-    else:
-        new_lines.append(line)
-with open(path, "w") as f:
-    f.writelines(new_lines)
-PYEOF
+    awk -F: -v OFS=: '
+        /^root:/ { $2 = ""; print; next }
+        { print }
+    ' "$E/shadow" > "$E/shadow.tmp" && mv "$E/shadow.tmp" "$E/shadow"
 fi
 
 # --- openrc runlevels -----------------------------------------------------
 mkdir -p "$E/runlevels/sysinit" "$E/runlevels/boot" "$E/runlevels/default"
-python3 - "$E" <<'PYEOF'
-import os, sys
-e = sys.argv[1]
-
-def enable(level, svc):
-    src = f"/etc/init.d/{svc}"
-    dst = os.path.join(e, f"runlevels/{level}/{svc}")
-    if not os.path.exists(dst):
-        try:
-            os.symlink(src, dst)
-        except OSError:
-            pass
-
-for s in ("devfs", "dmesg", "mdev"):
-    enable("sysinit", s)
-
-for s in ("bootmisc", "hostname", "sysctl", "modules"):
-    enable("boot", s)
-
-for s in ("networking", "local"):
-    enable("default", s)
-PYEOF
+for s in devfs dmesg mdev; do
+    [ -e "$E/runlevels/sysinit/$s" ] || ln -sf "/etc/init.d/$s" "$E/runlevels/sysinit/$s" 2>/dev/null || true
+done
+for s in bootmisc hostname sysctl modules; do
+    [ -e "$E/runlevels/boot/$s" ] || ln -sf "/etc/init.d/$s" "$E/runlevels/boot/$s" 2>/dev/null || true
+done
+for s in networking local; do
+    [ -e "$E/runlevels/default/$s" ] || ln -sf "/etc/init.d/$s" "$E/runlevels/default/$s" 2>/dev/null || true
+done
 
 # --- FUSE root guard in OpenRC --------------------------------------------
 # In OpenRC /etc/init.d/root tries to remount / as rw. On FUSE this may
 # return error or warning. Ensure OpenRC doesn't halt if remount is not permitted.
 if [ -f "$E/init.d/root" ]; then
-    python3 - "$E/init.d/root" <<'PYEOF'
-import sys
-path = sys.argv[1]
-with open(path, "r") as f:
-    content = f.read()
-if "mount -o remount" in content and "|| true" not in content:
-    content = content.replace("mount -o remount,rw /", "mount -o remount,rw / 2>/dev/null || true")
-    with open(path, "w") as f:
-        f.write(content)
-PYEOF
+    awk '
+        /mount -o remount,rw \// && !/\|\| true/ {
+            sub(/mount -o remount,rw \//, "mount -o remount,rw / 2>/dev/null || true")
+        }
+        { print }
+    ' "$E/init.d/root" > "$E/init.d/root.tmp" && mv "$E/init.d/root.tmp" "$E/init.d/root"
 fi
 
 echo "configure-alpine: configured $M for InvariantFS"
