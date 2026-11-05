@@ -1,0 +1,38 @@
+# APKBUILD for InvariantFS.
+#
+# Consumes the PUBLISHED RELEASE ARTIFACT, not a git checkout: a machine
+# that builds via `abuild -r` gets exactly the bytes that were checksummed
+# and signed at release time, and needs no compiler toolchain. The artifact
+# is `make release` output -- prebuilt bin/invf-*, codecpacks with helpers,
+# and the packaging/ tree.
+#
+# Checksum provenance: the sha256 pinned below matches dist/SHA256SUMS,
+# signed at release time.
+#
+# Run inside an Alpine container or host:
+#   abuild -r
+#
+pkgname=invfs
+pkgver=${INVFS_APK_VERSION:-0.6.12}
+pkgrel=1
+pkgdesc="Semantic content-addressed filesystem with a bit-exactness invariant"
+url="https://github.com/AsmanovLev/InvariantFS"
+arch="x86_64 aarch64"
+license="GPL-2.0-only"
+# Alpine uses musl and requires gcompat for prebuilt glibc binaries if glibc-linked,
+# plus fuse3, zstd, and zlib libraries.
+depends="fuse3 zstd zlib gcompat"
+makedepends=""
+options="!strip !check"
+source="invfs-v${pkgver}-x86_64.tar.zst"
+sha256sums="af1b5a1da96b7c46e5a8434afb87b798c41941c3a4d628cce4904096a0e4e684  invfs-v0.6.12-x86_64.tar.zst"
+
+builddir="$srcdir/invfs-v${pkgver}-x86_64"
+
+package() {
+	cd "$builddir"
+	DESTDIR="$pkgdir" PREFIX=/usr SBINDIR=/usr/sbin \
+		WITH_SYSTEMD=0 WITH_DRACUT=0 WITH_MKINITCPIO=0 \
+		WITH_INITRAMFS_TOOLS=0 \
+		sh packaging/install.sh
+}

@@ -73,7 +73,7 @@ jobs:
           fetch-depth: 0
       - id: calc
         run: |
-          FULL=0; ENGINE=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0
+          FULL=0; ENGINE=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0; ALP=0
           BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
           BALP=0; IALP=0
           force_full() { FULL=1; ENGINE=1; }
@@ -94,9 +94,10 @@ jobs:
                 packaging/PKGBUILD) ARCH=1; BA=1; IA=1;;
                 packaging/gentoo/*) GEN=1; IG=1;;
                 packaging/void/*) VOID=1; BV=1; IV=1;;
-                packaging/install.sh|packaging/systemd/*|packaging/dracut/*|packaging/mkinitcpio/*) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
-                packaging/bootstrap.sh|tools/test-bootstrap.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
-                tools/test-packaging.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1;;
+                packaging/alpine/*) ALP=1; BALP=1; IALP=1;;
+                packaging/install.sh|packaging/systemd/*|packaging/dracut/*|packaging/mkinitcpio/*) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
+                packaging/bootstrap.sh|tools/test-bootstrap.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
+                tools/test-packaging.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1;;
                 tools/iso-arch-install.sh|tools/iso-guest-arch-setup.sh) IA=1;;
                 tools/boot-arch-qemu.sh|tools/test-arch-install.sh) BA=1;;
                 tools/iso-void-install.sh|tools/iso-guest-void-setup.sh) IV=1;;
@@ -120,12 +121,13 @@ jobs:
             echo "full=$(t "$FULL")"; echo "engine=$(t "$ENGINE")"
             echo "deb=$(t "$DEB")"; echo "rpm=$(t "$RPM")"
             echo "arch=$(t "$ARCH")"; echo "gentoo=$(t "$GEN")"; echo "void=$(t "$VOID")"
+            echo "alpine_pkg=$(t "$ALP")"
             echo "boot_arch=$(t "$BA")"; echo "boot_void=$(t "$BV")"
             echo "boot_debian=$(t "$BD")"; echo "boot_fedora=$(t "$BF")"
             echo "iso_arch=$(t "$IA")"; echo "iso_void=$(t "$IV")"; echo "iso_gentoo=$(t "$IG")"
             echo "boot_alpine=$(t "$BALP")"; echo "iso_alpine=$(t "$IALP")"
           } >> "$GITHUB_OUTPUT"
-          echo "scope: full=$FULL engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID alpine=$BALP/$IALP"
+          echo "scope: full=$FULL engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID alpine_pkg=$ALP alpine_boot=$BALP/$IALP"
 
   # Load-bearing docs gate (AGENTS.md §1.8): broken doc links or man-page
   # syntax fail the build here in under a minute, on every push.
@@ -1291,4 +1293,57 @@ jobs:
           name: dist-void
           path: |
             pkg-void/invfs-*.xbps
+          if-no-files-found: ignore
+
+  # Alpine, natively: real abuild of the APKBUILD against the HEAD-built artifact
+  # inside a pure alpine container.
+  packaging-alpine:
+    runs-on: ubuntu-22.04
+    container: alpine:latest
+    timeout-minutes: 30
+    needs: [scope]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.alpine_pkg == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          apk update
+          apk add alpine-sdk zstd sudo bash tar gzip curl file shadow
+          adduser -D -G abuild builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
+
+      - name: build
+        run: make -j"$(nproc)" && make helpers
+
+      - name: packaging suite (alpine staged)
+        run: bash tools/test-packaging.sh
+
+      - name: real abuild of the package
+        run: |
+          set -euo pipefail
+          ART=$(ls -t dist/invfs-*-x86_64.tar.zst | head -1)
+          D=/tmp/apkpkg; rm -rf "$D"; mkdir -p "$D"
+          cp packaging/alpine/APKBUILD "$D/"
+          cp "$ART" "$D/"
+          H=$(sha256sum "$ART" | cut -d' ' -f1)
+          BASE=$(basename "$ART")
+          sed -i "s|sha256sums=.*|sha256sums=\"$H  $BASE\"|" "$D/APKBUILD"
+          chown -R builder:abuild "$D"
+          su builder -c 'abuild-keygen -a -i -n'
+          cd "$D"
+          su builder -c 'abuild -F -c -r'
+          mkdir -p "$GITHUB_WORKSPACE/pkg-apk"
+          cp /home/builder/packages/*/*/*.apk "$GITHUB_WORKSPACE/pkg-apk/" 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/pkg-apk"
+
+      - name: upload alpine packages
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-apk
+          path: |
+            pkg-apk/invfs-*.apk
           if-no-files-found: ignore

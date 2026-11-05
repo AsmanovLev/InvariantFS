@@ -177,7 +177,7 @@ assert_tree() {
         for gz in "$mandir/man8/invf-mkfs.8.gz" "$mandir/man7/invarifs.7.gz" \
                    "$mandir/man8/ru/invf-mkfs.8.gz"; do
             [ -f "$gz" ] || continue
-            out=$(MANWIDTH=80 man --nh --nj -l "$gz" 2>/dev/null)
+            out=$(MANWIDTH=80 man --nh --nj -l "$gz" 2>/dev/null || man -l "$gz" 2>/dev/null || man "$gz" 2>/dev/null || mandoc -Tascii "$gz" 2>/dev/null)
             case "$out" in
                 *"invf-mkfs"*|*"INVF-MKFS"*|*"InvariantFS"*)
                     rendered=$((rendered+1))
@@ -284,6 +284,29 @@ stage_void() {
     fi
     pass "void: xbps template do_install() ran clean"
     assert_tree "$PKGDESTDIR" "void"; assert_version "$PKGDESTDIR" "void"
+}
+
+# --------------------------------------------------------------------------
+# 3b. ALPINE — run the APKBUILD package() step
+# --------------------------------------------------------------------------
+stage_alpine() {
+    d="$WORK/alpine"; mkdir -p "$d/src" "$d/pkg"
+    tar --zstd -xf "$ART" -C "$d/src"
+    srcdir="$d/src"
+    pkgdir="$d/pkg"
+    _tver=$(echo "$VFILE" | sed 's/^v//')
+    ( set -e
+      INVFS_APK_VERSION="$_tver"
+      . "$REPO/packaging/alpine/APKBUILD"
+      package
+    ) > "$d/log" 2>&1
+    rc=$?
+    if [ $rc -ne 0 ]; then
+        fail "alpine: APKBUILD package() failed (rc=$rc)"; tail -15 "$d/log"
+        return 1
+    fi
+    pass "alpine: APKBUILD package() ran clean"
+    assert_tree "$pkgdir" "alpine"; assert_version "$pkgdir" "alpine"
 }
 
 # --------------------------------------------------------------------------
@@ -686,6 +709,7 @@ stage_rpm
 stage_arch
 stage_gentoo
 stage_void
+stage_alpine
 stage_debian
 
 note ""
