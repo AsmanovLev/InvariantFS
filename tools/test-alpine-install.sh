@@ -67,7 +67,7 @@ for f in etc/inittab bin/busybox etc/issue; do
 done
 
 note "stage 3: provision (inittab autologin, fstab, network, runlevels)"
-"$REPO/tools/configure-alpine.sh" "$STAGE" || fail "configure-alpine.sh failed"
+sh "$REPO/tools/configure-alpine.sh" "$STAGE" || fail "configure-alpine.sh failed"
 grep -q 'ttyS0' "$STAGE/etc/inittab" || fail "ttyS0 missing in inittab"
 grep -q 'alpine-invfs' "$STAGE/etc/hostname" || fail "hostname not configured"
 
