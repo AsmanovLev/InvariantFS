@@ -35,13 +35,19 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 note "stage 1: Alpine minirootfs tarball"
 if [ ! -s "$TARBALL" ]; then
     echo "downloading $URL/$ROOTFS"
+    FALLBACK_URL="https://mirrors.edge.kernel.org/alpine/v3.21/releases/x86_64"
     if command -v curl >/dev/null; then
         curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.part" "$URL/$ROOTFS" \
+            || curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.part" "$FALLBACK_URL/$ROOTFS" \
             || fail "download failed (offline?)"
-        curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+        curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null \
+            || curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.sha256" "$FALLBACK_URL/$ROOTFS.sha256" 2>/dev/null || true
     elif command -v wget >/dev/null; then
-        wget -T 15 --tries=5 -O "$TARBALL.part" "$URL/$ROOTFS" || fail "download failed (offline?)"
-        wget -T 15 --tries=5 -O "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null || true
+        wget -T 15 --tries=5 -O "$TARBALL.part" "$URL/$ROOTFS" \
+            || wget -T 15 --tries=5 -O "$TARBALL.part" "$FALLBACK_URL/$ROOTFS" \
+            || fail "download failed (offline?)"
+        wget -T 15 --tries=5 -O "$TARBALL.sha256" "$URL/$ROOTFS.sha256" 2>/dev/null \
+            || wget -T 15 --tries=5 -O "$TARBALL.sha256" "$FALLBACK_URL/$ROOTFS.sha256" 2>/dev/null || true
     else
         fail "no curl/wget and no cached tarball at $TARBALL"
     fi

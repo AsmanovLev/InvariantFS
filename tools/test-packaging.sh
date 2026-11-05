@@ -551,7 +551,7 @@ neg_tampered_sums() {
 # tree with WITH_GZIP_MAN=0 and assert that assert_tree rejects it.
 neg_uncompressed_man() {
     d="$WORK/neg-man"; mkdir -p "$d/root"
-    tmp=$(mktemp -d "$WORK/unsrc.XXXX")
+    tmp=$(mktemp -d "$WORK/unsrc.XXXXXX")
     # a copy with only the man pages, so install.sh's build steps are skipped
     mkdir -p "$tmp/packaging/man" "$tmp/bin"
     cp -a "$REPO/packaging/man/." "$tmp/packaging/man/"

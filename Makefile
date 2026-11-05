@@ -1804,7 +1804,7 @@ release: unflag all helpers
 # debian/invfs.initramfs-* payload files) all stays.
 	rm -f $(RELEASE_DIR)/packaging/PKGBUILD \
 	      $(RELEASE_DIR)/packaging/invfs.spec
-	rm -rf $(RELEASE_DIR)/packaging/gentoo $(RELEASE_DIR)/packaging/void
+	rm -rf $(RELEASE_DIR)/packaging/gentoo $(RELEASE_DIR)/packaging/void $(RELEASE_DIR)/packaging/alpine
 	rm -f $(RELEASE_DIR)/packaging/debian/rules \
 	      $(RELEASE_DIR)/packaging/debian/control \
 	      $(RELEASE_DIR)/packaging/debian/changelog \
