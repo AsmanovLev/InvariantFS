@@ -192,6 +192,14 @@ if [ -f /etc/shadow ]; then
     rm -f /etc/shadow.tmp
 fi
 
+# Ensure generic symlinks exist on /boot
+if [ -f /boot/vmlinuz-virt ] && [ ! -e /boot/vmlinuz ]; then
+    ln -sf vmlinuz-virt /boot/vmlinuz || true
+fi
+if [ -f /boot/initramfs-virt ] && [ ! -e /boot/initramfs.img ]; then
+    ln -sf initramfs-virt /boot/initramfs.img || true
+fi
+
 invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
 " || exit 1
 

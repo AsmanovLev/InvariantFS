@@ -253,7 +253,7 @@ for k in "$ESP_DIR"/vmlinuz* "$ESP_DIR"/kernel* "$ESP_DIR"/boot/vmlinuz*; do
     break
 done
 
-for i in "$ESP_DIR"/initramfs*.img "$ESP_DIR"/initrd* "$ESP_DIR"/boot/initramfs*.img; do
+for i in "$ESP_DIR"/initramfs* "$ESP_DIR"/initrd* "$ESP_DIR"/boot/initramfs* "$ESP_DIR"/boot/initrd*; do
     [ -f "$i" ] || continue
     bn=$(basename "$i")
     case "$bn" in
@@ -287,6 +287,12 @@ if [ -n "$detected_kfile" ] && [ -n "$detected_ifile" ]; then
     elif [ -f /vmlinuz ]; then
         linux /vmlinuz $kcmd
         initrd /initramfs.img
+    elif [ -f /vmlinuz-virt ]; then
+        linux /vmlinuz-virt $kcmd
+        initrd /initramfs-virt
+    elif [ -f /boot/vmlinuz-virt ]; then
+        linux /boot/vmlinuz-virt $kcmd
+        initrd /boot/initramfs-virt
     else
         linux /boot/vmlinuz $kcmd
         initrd /boot/initramfs.img
@@ -303,6 +309,12 @@ else
     elif [ -f /vmlinuz ]; then
         linux /vmlinuz $kcmd
         initrd /initramfs.img
+    elif [ -f /vmlinuz-virt ]; then
+        linux /vmlinuz-virt $kcmd
+        initrd /initramfs-virt
+    elif [ -f /boot/vmlinuz-virt ]; then
+        linux /boot/vmlinuz-virt $kcmd
+        initrd /boot/initramfs-virt
     else
         linux /boot/vmlinuz $kcmd
         initrd /boot/initramfs.img
