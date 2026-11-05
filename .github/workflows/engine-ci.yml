@@ -1090,8 +1090,9 @@ jobs:
 
       - name: alpine minirootfs -> InvariantFS volume (offline)
         run: |
+          set -x
           INVFS_ALPINE_WORK="$RUNNER_TEMP/alpine-test" \
-            bash tools/test-alpine-install.sh
+            bash -x tools/test-alpine-install.sh
 
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
   # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
