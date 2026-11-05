@@ -67,6 +67,7 @@ jobs:
       iso_gentoo: ${{ steps.calc.outputs.iso_gentoo }}
       boot_alpine: ${{ steps.calc.outputs.boot_alpine }}
       iso_alpine: ${{ steps.calc.outputs.iso_alpine }}
+      alpine_pkg: ${{ steps.calc.outputs.alpine_pkg }}
     steps:
       - uses: actions/checkout@v7
         with:
