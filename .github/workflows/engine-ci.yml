@@ -1093,7 +1093,19 @@ jobs:
         run: |
           set -x
           INVFS_ALPINE_WORK="$RUNNER_TEMP/alpine-test" \
-            bash -x tools/test-alpine-install.sh
+            bash -x tools/test-alpine-install.sh || {
+              rc=$?
+              echo "=== TEST FAILED WITH RC $rc ==="
+              echo "=== FILES IN RUNNER_TEMP/alpine-test ==="
+              ls -la "$RUNNER_TEMP/alpine-test" || true
+              for f in "$RUNNER_TEMP/alpine-test"/*.log "$RUNNER_TEMP/alpine-test"/*.txt; do
+                if [ -f "$f" ]; then
+                  echo "=== LOG: $f ==="
+                  cat "$f" || true
+                fi
+              done
+              exit $rc
+            }
 
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
   # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
