@@ -36,3 +36,4 @@ package() {
 		WITH_INITRAMFS_TOOLS=0 \
 		sh packaging/install.sh
 }
+
