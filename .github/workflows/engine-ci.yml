@@ -1312,7 +1312,7 @@ jobs:
         run: |
           apk update
           apk add alpine-sdk zstd sudo bash tar gzip curl file shadow \
-            fuse3-dev zlib-dev zstd-dev make pkgconf git
+            fuse3-dev zlib-dev zstd-dev make pkgconf git linux-headers
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           adduser -D -G abuild builder
           echo 'builder ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers
