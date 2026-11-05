@@ -77,10 +77,12 @@ jobs:
           FULL=0; ENGINE=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0; ALP=0
           BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
           BALP=0; IALP=0
-          force_full() { FULL=1; ENGINE=1; }
+          force_full() { FULL=1; ENGINE=1; DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1; }
+          COMMIT_MSG="${{ github.event.head_commit.message }}"
           if [ "${{ github.event_name }}" = schedule ]; then force_full
           elif [ "${{ github.event_name }}" = workflow_dispatch ] && \
                [ "${{ inputs.full }}" = "true" ]; then force_full
+          elif echo "$COMMIT_MSG" | grep -qiE '\[(ci full|full ci|release)\]'; then force_full
           else
             BASE="${{ github.event.pull_request.base.sha }}"
             [ -z "$BASE" ] && BASE="${{ github.event.before }}"
