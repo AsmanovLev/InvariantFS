@@ -1036,7 +1036,7 @@ jobs:
   # with event triggers (detects login prompt, runs guest setup script,
   # verifies PASS marker).
   installation-iso-alpine:
-    needs: [scope]
+    needs: [scope, packaging-alpine]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 120
