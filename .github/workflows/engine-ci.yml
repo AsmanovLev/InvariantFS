@@ -78,44 +78,8 @@ jobs:
           BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
           BALP=0; IALP=0
           force_full() { FULL=1; ENGINE=1; DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1; }
-          COMMIT_MSG="${{ github.event.head_commit.message }}"
-          if [ "${{ github.event_name }}" = schedule ]; then force_full
-          elif [ "${{ github.event_name }}" = workflow_dispatch ] && \
-               [ "${{ inputs.full }}" = "true" ]; then force_full
-          elif echo "$COMMIT_MSG" | grep -qiE '\[(ci full|full ci|release)\]'; then force_full
-          else
-            BASE="${{ github.event.pull_request.base.sha }}"
-            [ -z "$BASE" ] && BASE="${{ github.event.before }}"
-            case "$BASE" in ""|0000000000000000000000000000000000000000) force_full;; *)
-            FILES=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || echo FORCE_FULL)
-            [ "$FILES" = FORCE_FULL ] && force_full
-            for f in $FILES; do
-              case "$f" in
-                docs/*|*.md|packaging/man/*) ;;
-                packaging/debian/*) DEB=1; BD=1;;
-                packaging/invfs.spec) RPM=1; BF=1;;
-                packaging/PKGBUILD) ARCH=1; BA=1; IA=1;;
-                packaging/gentoo/*) GEN=1; IG=1;;
-                packaging/void/*) VOID=1; BV=1; IV=1;;
-                packaging/alpine/*) ALP=1; BALP=1; IALP=1;;
-                packaging/install.sh|packaging/systemd/*|packaging/dracut/*|packaging/mkinitcpio/*) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
-                packaging/bootstrap.sh|tools/test-bootstrap.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
-                tools/test-packaging.sh) DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1;;
-                tools/iso-arch-install.sh|tools/iso-guest-arch-setup.sh) IA=1;;
-                tools/boot-arch-qemu.sh|tools/test-arch-install.sh) BA=1;;
-                tools/iso-void-install.sh|tools/iso-guest-void-setup.sh) IV=1;;
-                tools/boot-void-qemu.sh|tools/test-void-install.sh) BV=1;;
-                tools/boot-debian-qemu.sh|tools/test-initramfs-bootstrap.sh|tools/mkinitramfs.sh) BD=1;;
-                tools/test-fedora-install.sh) BF=1;;
-                tools/iso-gentoo-install.sh|tools/iso-guest-gentoo-setup.sh) IG=1;;
-                tools/configure-alpine.sh|tools/test-alpine-install.sh|tools/boot-alpine-qemu.sh) ALP=1; BALP=1;;
-                tools/iso-alpine-install.sh|tools/iso-guest-alpine-setup.sh) ALP=1; IALP=1;;
-                tools/sbin/invf-boot-setup) BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1;;
-                src/*|include/*|Makefile|tools/test-meta*|tools/run-unit-isolated.sh|tools/check-vol-find.sh|tools/check-repo-hygiene.sh|tools/lint-test-heredocs.sh) ENGINE=1;;
-                *) force_full;;
-              esac
-            done;; esac
-          fi
+          # Temporarily force full run for all jobs:
+          force_full
           # Outputs are the literal strings true/false: the job ifs
           # compare against 'true', and 0/1 never equals it (shipped once:
           # every scoped job silently skipped and the run went "green").
