@@ -19,7 +19,7 @@ env:
 
 jobs:
   test-gate:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -39,7 +39,7 @@ jobs:
 
   tarball:
     needs: [test-gate]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -64,7 +64,7 @@ jobs:
 
   deb:
     needs: [test-gate]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -88,7 +88,7 @@ jobs:
 
   arch:
     needs: [test-gate, tarball]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
       - uses: actions/checkout@v4
@@ -122,7 +122,7 @@ jobs:
 
   rpm:
     needs: [test-gate]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: fedora:latest
     steps:
       - uses: actions/checkout@v4
@@ -148,7 +148,7 @@ jobs:
   publish:
     if: github.event_name == 'push' && needs.test-gate.result == 'success' && needs.tarball.result == 'success' && needs.deb.result == 'success' && needs.arch.result == 'success' && needs.rpm.result == 'success'
     needs: [test-gate, tarball, deb, arch, rpm]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       id-token: write
@@ -212,7 +212,7 @@ jobs:
 
   repro:
     needs: tarball
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -230,7 +230,7 @@ jobs:
   repin:
     needs: [publish]
     if: always() && !cancelled() && needs.publish.result == 'success'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:

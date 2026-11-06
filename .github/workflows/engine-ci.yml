@@ -48,7 +48,7 @@ jobs:
   # Tag discipline: tag a release only off a full-green run -- dispatch
   # with full=true (the default) when the push itself ran scoped.
   scope:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     outputs:
       full: ${{ steps.calc.outputs.full }}
@@ -136,7 +136,7 @@ jobs:
   # syntax fail the build here in under a minute, on every push.
   docs-gate:
     needs: [scope]
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -155,7 +155,7 @@ jobs:
   engine:
     needs: [scope]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.engine == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       # fetch-depth 0 so TAGS are present. Without them `git describe` degrades
@@ -305,7 +305,7 @@ jobs:
   soak-flakey:
     needs: [scope, engine]
     if: needs.scope.outputs.full == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     continue-on-error: true
     steps:
@@ -357,7 +357,7 @@ jobs:
   packaging-fedora:
     needs: [scope]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.rpm == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: fedora:latest
     timeout-minutes: 40
     steps:
@@ -399,7 +399,7 @@ jobs:
   packaging-gentoo:
     needs: [scope]
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true'
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: gentoo/stage3:latest
     timeout-minutes: 60
     steps:
@@ -454,8 +454,8 @@ jobs:
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
     needs: [scope, packaging-arch]
-    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true')
-    runs-on: ubuntu-22.04
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
@@ -526,8 +526,8 @@ jobs:
   # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
   installation-iso-void:
     needs: [scope, packaging-void]
-    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true')
-    runs-on: ubuntu-22.04
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
@@ -570,8 +570,8 @@ jobs:
   # has no installer TUI; the Handbook install IS the CLI flow.
   installation-iso-gentoo:
     needs: [scope, packaging-gentoo]
-    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true')
-    runs-on: ubuntu-22.04
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
@@ -610,8 +610,8 @@ jobs:
   # verifies PASS marker).
   installation-iso-alpine:
     needs: [scope, packaging-alpine]
-    if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true')
-    runs-on: ubuntu-22.04
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_alpine == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
@@ -648,7 +648,7 @@ jobs:
   # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
   # legs skip, staged legs run, debian leg native).
   packaging-debian:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: debian:bookworm
     timeout-minutes: 40
     needs: [scope]
@@ -689,7 +689,7 @@ jobs:
   # lived there). Containers run as root but makepkg refuses root (and
   # current pacman removed --asroot), so the build runs as a builder user.
   packaging-arch:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: archlinux:base
     timeout-minutes: 40
     needs: [scope]
@@ -745,7 +745,7 @@ jobs:
   # bootstrap, then a local srcpkgs overlay with re-pinned distfiles
   # (same test-staging shape as the Gentoo job).
   packaging-void:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container:
       image: ghcr.io/void-linux/void-glibc-full:latest
       # xbps-src builds as non-root inside user+mount namespaces and bind-
@@ -849,7 +849,7 @@ jobs:
   # Alpine, natively: real abuild of the APKBUILD against the HEAD-built artifact
   # inside a pure alpine container.
   packaging-alpine:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
     container: alpine:latest
     timeout-minutes: 30
     needs: [scope]
