@@ -453,7 +453,7 @@ jobs:
   # off. No KVM on runners: the driver falls back to TCG (slow), hence the
   # generous timeout. See tools/iso-arch-install.sh.
   installation-iso-arch:
-    needs: [scope]
+    needs: [scope, packaging-arch]
     if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.arch == 'true' || needs.scope.outputs.iso_arch == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -525,7 +525,7 @@ jobs:
   # driver falls back to TCG (slow), hence the generous timeout. See
   # tools/iso-void-install.sh. No void-installer TUI is driven anywhere.
   installation-iso-void:
-    needs: [scope]
+    needs: [scope, packaging-void]
     if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.void == 'true' || needs.scope.outputs.iso_void == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
@@ -569,7 +569,7 @@ jobs:
   # hence the generous timeout. See tools/iso-gentoo-install.sh. Gentoo
   # has no installer TUI; the Handbook install IS the CLI flow.
   installation-iso-gentoo:
-    needs: [scope]
+    needs: [scope, packaging-gentoo]
     if: false && (needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true')
     runs-on: ubuntu-22.04
     timeout-minutes: 150
