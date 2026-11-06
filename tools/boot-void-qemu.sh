@@ -229,7 +229,6 @@ if [ "$BOOTLOADER" = 1 ]; then
     QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
            -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
            -drive "id=root,file=$DISK_IMG,format=raw,if=virtio"
-           -append "console=ttyS0,115200"
            -netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
            -device virtio-net-pci,netdev=net0
            -object rng-random,filename=/dev/urandom,id=rng0

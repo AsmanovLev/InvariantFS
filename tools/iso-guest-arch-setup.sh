@@ -104,6 +104,7 @@ genfstab -U /mnt >> /mnt/etc/fstab || true
 say "configuring inside arch-chroot /mnt..."
 arch-chroot /mnt /bin/bash <<CHROOT_EOF || exit 1
 set -eu
+say() { echo "iso-setup: \$*"; }
 export INVFS_SERVER="$SRV"
 say "installing InvariantFS inside target rootfs..."
 curl -fsSL "$SRV/sh" | sh

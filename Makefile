@@ -39,6 +39,7 @@ SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $
 vpath %.c $(SRCDIRS)
 
 CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
+           -include $(SRC)/core/glibc_compat.h \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
            -DINVFS_VERSION_STRING=\"$(VERSION)\" \
@@ -1256,7 +1257,7 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 	$(TESTENV) $(TESTISO) $(OUT)/invf-tar_cap_test /tmp
 	$(TESTENV) $(OUT)/invf-entry_v3_test
 
-test-shard-4: $(TEST_SHARD_DEPS) test-shard-check
+test-shard-4: $(TEST_SHARD_DEPS) test-shard-check plugin-so
 # WP201: the two v2-era paths that kept running on Meta. The
 # containerpack MAP branch's rollback reached v3, where the commit it
 # rolls back superseded the row IN PLACE -- so it cannot undo anything,

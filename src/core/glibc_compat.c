@@ -50,3 +50,48 @@ unsigned long long int __isoc23_strtoull(const char *nptr, char **endptr, int ba
 unsigned long long int __isoc23_strtoull(const char *nptr, char **endptr, int base) {
     return strtoull(nptr, endptr, base);
 }
+
+#include <stdio.h>
+
+int __isoc23_fscanf(FILE *stream, const char *format, ...) __attribute__((weak));
+int __isoc23_fscanf(FILE *stream, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vfscanf(stream, format, args);
+    va_end(args);
+    return ret;
+}
+
+int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) __attribute__((weak));
+int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) {
+    return vfscanf(stream, format, arg);
+}
+
+int __isoc23_sscanf(const char *str, const char *format, ...) __attribute__((weak));
+int __isoc23_sscanf(const char *str, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vsscanf(str, format, args);
+    va_end(args);
+    return ret;
+}
+
+int __isoc23_vsscanf(const char *str, const char *format, va_list arg) __attribute__((weak));
+int __isoc23_vsscanf(const char *str, const char *format, va_list arg) {
+    return vsscanf(str, format, arg);
+}
+
+int __isoc23_scanf(const char *format, ...) __attribute__((weak));
+int __isoc23_scanf(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = vscanf(format, args);
+    va_end(args);
+    return ret;
+}
+
+int __isoc23_vscanf(const char *format, va_list arg) __attribute__((weak));
+int __isoc23_vscanf(const char *format, va_list arg) {
+    return vscanf(format, arg);
+}
+
