@@ -40,11 +40,7 @@ static inline double fuse_now_sec(void)
 }
 
 static invfs_volume *g_vol;
-#ifdef PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
 static pthread_mutex_t g_io_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
-#else
-static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
-#endif
 
 /* ---- foreground write-path arrival clock (WP626) ----------------------
  *
@@ -621,8 +617,7 @@ static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
     strncpy(g_stage_entries[g_nstage].name, name, sizeof(g_stage_entries[g_nstage].name) - 1);
     g_stage_entries[g_nstage].inode_id = ino;
     g_stage_entries[g_nstage].size = size;
-    g_stage_entries[g_nstage].ctime = ctime;
-    g_stage_entries[g_nstage].pos = g_nstage;
+    g_stage_entries[g_nstage].ctime = ctime; g_stage_entries[g_nstage].pos = g_nstage;
     g_nstage++;
 
     if (g_nstage >= 1024) {
