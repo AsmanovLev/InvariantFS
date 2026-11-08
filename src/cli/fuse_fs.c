@@ -40,7 +40,7 @@ static inline double fuse_now_sec(void)
 }
 
 static invfs_volume *g_vol;
-static pthread_mutex_t g_io_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
 
 /* ---- foreground write-path arrival clock (WP626) ----------------------
  *
