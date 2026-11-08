@@ -226,6 +226,60 @@ if [ -f /boot/initramfs-virt ] && [ ! -e /boot/initramfs.img ]; then
     ln -sf initramfs-virt /boot/initramfs.img || true
 fi
 
+# Configure mkinitfs with InvariantFS support
+say \"configuring mkinitfs for InvariantFS root...\"
+mkdir -p /etc/mkinitfs/features.d
+cat > /etc/mkinitfs/features.d/invfs.modules << 'M_EOF'
+kernel/fs/fuse/*
+M_EOF
+
+cat > /etc/mkinitfs/features.d/invfs.files << 'F_EOF'
+/usr/bin/invf-fuse
+/usr/sbin/invf-fuse
+/lib/ld-linux-x86-64.so.2
+/usr/lib/libgcompat.so*
+/lib/libgcompat.so*
+/usr/lib/libfuse3.so*
+/lib/libfuse3.so*
+/usr/lib/libzstd.so*
+/lib/libzstd.so*
+/lib/libz.so*
+/usr/lib/libz.so*
+F_EOF
+
+if [ -f /etc/mkinitfs/mkinitfs.conf ]; then
+    if ! grep -qw \"invfs\" /etc/mkinitfs/mkinitfs.conf; then
+        sed -i 's/^features=\"/features=\"invfs /' /etc/mkinitfs/mkinitfs.conf 2>/dev/null || \
+            echo 'features=\"\$features invfs\"' >> /etc/mkinitfs/mkinitfs.conf
+    fi
+fi
+
+if [ -f /usr/share/mkinitfs/initramfs-init ] && ! grep -q \"invf-fuse\" /usr/share/mkinitfs/initramfs-init; then
+    awk '/if \\[ \"\\\$rootfstype\" = \"zfs\" \\]; then/{
+        print \"\\t\\tif [ \\\"\\\$rootfstype\\\" = \\\"invfs\\\" ]; then\"
+        print \"\\t\\t\\tmodprobe fuse 2>/dev/null || true\"
+        print \"\\t\\t\\t[ -e /dev/fuse ] || mknod /dev/fuse c 10 229 2>/dev/null || true\"
+        print \"\\t\\t\\t[ -e /dev/fuse ] && chmod 666 /dev/fuse 2>/dev/null || true\"
+        print \"\\t\\t\\topts=\\\"allow_other,survive_term\\\"\"
+        print \"\\t\\t\\t[ -n \\\"\\\$KOPT_rootflags\\\" ] && opts=\\\"\\\$opts,\\\$KOPT_rootflags\\\"\"
+        print \"\\t\\t\\tinvf-fuse -o \\\"\\\$opts\\\" \\\"\\\$KOPT_root\\\" \\\"\\\$sysroot\\\"\"
+        print \"\\t\\t\\tmount --rbind /proc \\\"\\\$sysroot\\\"/proc 2>/dev/null || true\"
+        print \"\\t\\t\\tmount --rbind /sys \\\"\\\$sysroot\\\"/sys 2>/dev/null || true\"
+        print \"\\t\\t\\tmount --rbind /dev \\\"\\\$sysroot\\\"/dev 2>/dev/null || true\"
+        print \"\\t\\t\\tmkdir -p \\\"\\\$sysroot\\\"/run 2>/dev/null || true\"
+        print \"\\t\\t\\tmount -t tmpfs tmpfs \\\"\\\$sysroot\\\"/run 2>/dev/null || true\"
+        print \"\\t\\t\\texec chroot \\\"\\\$sysroot\\\" \\\"\\\${KOPT_init:-/sbin/init}\\\"\"
+        print \"\\t\\tfi\"
+    }
+    { print }' /usr/share/mkinitfs/initramfs-init > /usr/share/mkinitfs/initramfs-init.tmp && \
+    mv /usr/share/mkinitfs/initramfs-init.tmp /usr/share/mkinitfs/initramfs-init
+fi
+
+kver=\$(ls /lib/modules 2>/dev/null | tail -1 || true)
+if [ -n \"\$kver\" ]; then
+    mkinitfs -o /boot/initramfs-virt \"\$kver\" || true
+fi
+
 invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
 " || exit 1
 

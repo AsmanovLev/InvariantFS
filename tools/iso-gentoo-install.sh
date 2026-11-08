@@ -182,6 +182,11 @@ cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/is
 zstd -dc "$ART" | gzip -9 > "$SERVEDIR/$(basename "$ART_GZ")"
 ( cd "$SERVEDIR" && sha256sum "$(basename "$ART_GZ")" >> SHA256SUMS )
 
+if command -v grub-mkimage >/dev/null 2>&1; then
+    grub-mkimage -O x86_64-efi -o "$SERVEDIR/BOOTX64.EFI" -p /boot/grub \
+        fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null || true
+fi
+
 cat > "$SERVEDIR/sh" <<'SH_EOF'
 #!/bin/sh
 set -eu

@@ -159,25 +159,37 @@ fi
 [ -n "$esp_uuid" ] || die "could not determine UUID of ESP partition at $ESP_DIR"
 info "detected ESP: $ESP_DIR (UUID: $esp_uuid)"
 
-# 4. Check for grub-mkimage
-command -v grub-mkimage >/dev/null 2>&1 || die "grub-mkimage not found; please install grub (pacman -S grub / apt install grub-efi-amd64-bin)"
-
-# 5. Build Standalone GRUB EFI Binary
+# 4. Check for grub-mkimage or existing/remote BOOTX64.EFI
 efi_boot_dir="$ESP_DIR/EFI/BOOT"
 efi_grub_dir="$ESP_DIR/EFI/invfs"
 grub_cfg_dir="$ESP_DIR/boot/grub"
 
-info "generating GRUB EFI binary for x86_64-efi..."
 if [ "$DRY_RUN" = 0 ]; then
     mkdir -p "$efi_boot_dir" "$efi_grub_dir" "$grub_cfg_dir"
 
-    grub-mkimage -O x86_64-efi \
-        -o "$efi_boot_dir/BOOTX64.EFI" \
-        -p /boot/grub \
-        fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv
+    if command -v grub-mkimage >/dev/null 2>&1; then
+        info "generating GRUB EFI binary for x86_64-efi..."
+        grub-mkimage -O x86_64-efi \
+            -o "$efi_boot_dir/BOOTX64.EFI" \
+            -p /boot/grub \
+            fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv
+    elif [ -f "$efi_boot_dir/BOOTX64.EFI" ]; then
+        info "using existing $efi_boot_dir/BOOTX64.EFI"
+    elif [ -f "/usr/lib/invfs/BOOTX64.EFI" ]; then
+        info "using /usr/lib/invfs/BOOTX64.EFI"
+        cp "/usr/lib/invfs/BOOTX64.EFI" "$efi_boot_dir/BOOTX64.EFI"
+    elif [ -n "${INVFS_SERVER:-}" ]; then
+        info "fetching BOOTX64.EFI from $INVFS_SERVER..."
+        curl -fsSL -o "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || \
+        wget -q -O "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
+    fi
 
-    cp "$efi_boot_dir/BOOTX64.EFI" "$efi_boot_dir/grubx64.efi"
-    cp "$efi_boot_dir/BOOTX64.EFI" "$efi_grub_dir/grubx64.efi"
+    if [ ! -f "$efi_boot_dir/BOOTX64.EFI" ]; then
+        die "grub-mkimage not found and no BOOTX64.EFI available; please install grub (pacman -S grub / apt install grub-efi-amd64-bin)"
+    fi
+
+    cp -f "$efi_boot_dir/BOOTX64.EFI" "$efi_boot_dir/grubx64.efi"
+    cp -f "$efi_boot_dir/BOOTX64.EFI" "$efi_grub_dir/grubx64.efi"
 fi
 
 # 6. Build Kernel Command Line
