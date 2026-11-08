@@ -81,46 +81,73 @@ unsigned long long int __isoc23_strtoull(const char *nptr, char **endptr, int ba
 }
 
 #include <stdio.h>
+#define _GNU_SOURCE
+#include <dlfcn.h>
 
-int __isoc23_fscanf(FILE *stream, const char *format, ...) __attribute__((weak));
-int __isoc23_fscanf(FILE *stream, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    int ret = vfscanf(stream, format, args);
-    va_end(args);
-    return ret;
-}
+static int (*real_vsscanf_fn)(const char *, const char *, va_list);
+static int (*real_vfscanf_fn)(FILE *, const char *, va_list);
+static int (*real_vscanf_fn)(const char *, va_list);
 
-int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) __attribute__((weak));
-int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) {
-    return vfscanf(stream, format, arg);
+int __isoc23_vsscanf(const char *str, const char *format, va_list arg) __attribute__((weak));
+int __isoc23_vsscanf(const char *str, const char *format, va_list arg) {
+    if (!real_vsscanf_fn) {
+        real_vsscanf_fn = (int (*)(const char *, const char *, va_list))dlsym(RTLD_NEXT, "__isoc23_vsscanf");
+        if (!real_vsscanf_fn)
+            real_vsscanf_fn = (int (*)(const char *, const char *, va_list))dlsym(RTLD_DEFAULT, "vsscanf");
+    }
+    if (real_vsscanf_fn)
+        return real_vsscanf_fn(str, format, arg);
+    return vsscanf(str, format, arg);
 }
 
 int __isoc23_sscanf(const char *str, const char *format, ...) __attribute__((weak));
 int __isoc23_sscanf(const char *str, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    int ret = vsscanf(str, format, args);
+    int ret = __isoc23_vsscanf(str, format, args);
     va_end(args);
     return ret;
 }
 
-int __isoc23_vsscanf(const char *str, const char *format, va_list arg) __attribute__((weak));
-int __isoc23_vsscanf(const char *str, const char *format, va_list arg) {
-    return vsscanf(str, format, arg);
+int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) __attribute__((weak));
+int __isoc23_vfscanf(FILE *stream, const char *format, va_list arg) {
+    if (!real_vfscanf_fn) {
+        real_vfscanf_fn = (int (*)(FILE *, const char *, va_list))dlsym(RTLD_NEXT, "__isoc23_vfscanf");
+        if (!real_vfscanf_fn)
+            real_vfscanf_fn = (int (*)(FILE *, const char *, va_list))dlsym(RTLD_DEFAULT, "vfscanf");
+    }
+    if (real_vfscanf_fn)
+        return real_vfscanf_fn(stream, format, arg);
+    return vfscanf(stream, format, arg);
 }
 
-int __isoc23_scanf(const char *format, ...) __attribute__((weak));
-int __isoc23_scanf(const char *format, ...) {
+int __isoc23_fscanf(FILE *stream, const char *format, ...) __attribute__((weak));
+int __isoc23_fscanf(FILE *stream, const char *format, ...) {
     va_list args;
     va_start(args, format);
-    int ret = vscanf(format, args);
+    int ret = __isoc23_vfscanf(stream, format, args);
     va_end(args);
     return ret;
 }
 
 int __isoc23_vscanf(const char *format, va_list arg) __attribute__((weak));
 int __isoc23_vscanf(const char *format, va_list arg) {
+    if (!real_vscanf_fn) {
+        real_vscanf_fn = (int (*)(const char *, va_list))dlsym(RTLD_NEXT, "__isoc23_vscanf");
+        if (!real_vscanf_fn)
+            real_vscanf_fn = (int (*)(const char *, va_list))dlsym(RTLD_DEFAULT, "vscanf");
+    }
+    if (real_vscanf_fn)
+        return real_vscanf_fn(format, arg);
     return vscanf(format, arg);
+}
+
+int __isoc23_scanf(const char *format, ...) __attribute__((weak));
+int __isoc23_scanf(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    int ret = __isoc23_vscanf(format, args);
+    va_end(args);
+    return ret;
 }
 
