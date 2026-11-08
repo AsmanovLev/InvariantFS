@@ -42,9 +42,19 @@ trap 'done_rc=$?; finish' EXIT
         stat=$(cat "$p/stat" 2>/dev/null) || continue
         st="${stat##*) }"
         state="${st%% *}"
-        if [ "$state" = "R" ] || [ "$state" = "D" ]; then
+        comm=$(cat "$p/comm" 2>/dev/null || echo "?")
+        show=0
+        case "$state" in
+            R|D) show=1 ;;
+            *)
+                case "$comm" in
+                    apk|pacman|xbps*|dnf|yum|apt*|dpkg*|nix*|emerge|ebuild|tar|invf*|sh|bash|addgroup|useradd|chroot|mkfs*|mount*)
+                        show=1 ;;
+                esac
+                ;;
+        esac
+        if [ "$show" = "1" ]; then
             pid="${p##*/}"
-            comm=$(cat "$p/comm" 2>/dev/null || echo "?")
             wc=$(cat "$p/wchan" 2>/dev/null || echo "?")
             cmd=$(tr '\0\n' '  ' < "$p/cmdline" 2>/dev/null | cut -c1-40)
             act="$act [${pid}:${comm}(${state},${wc}) ${cmd}]"

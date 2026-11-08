@@ -87,15 +87,22 @@ static void ok(int cond, const char *what)
 
 /* the kernel-side half of readdir: everything the filler was told. */
 #define SEEN_MAX 64
-static char seen[SEEN_MAX][256];
-static int  nseen;
+static char  seen[SEEN_MAX][256];
+static int   nseen;
+static off_t last_seen_off;
+static int   filler_cap = 0;     /* 0 = unlimited, >0 = return 1 after N entries */
+static int   filler_emitted = 0;
 
 static int record_filler(void *buf, const char *name,
                          const struct stat *st, off_t off, enum fuse_fill_dir_flags f)
 {
-    (void)buf; (void)st; (void)off; (void)f;
+    (void)buf; (void)st; (void)f;
+    if (filler_cap > 0 && filler_emitted >= filler_cap)
+        return 1;
     if (nseen < SEEN_MAX)
         snprintf(seen[nseen++], sizeof seen[0], "%s", name);
+    last_seen_off = off;
+    filler_emitted++;
     return 0;
 }
 
@@ -235,6 +242,30 @@ int main(int argc, char **argv)
         vol_set_readonly(v, 0);
         ok((int)vol_free_blocks_cached(v) == before,
            "the refused write allocated nothing");
+    }
+
+    /* ---- 6. pagination / offset handling in invf_readdir ---------------
+     * Kernels allocate a bounded buffer (~4KB, or ~25 entries with PLUS
+     * attributes). When the buffer is full, filler() returns 1 and readdir
+     * must exit gracefully with the offset of the next entry. The kernel
+     * then calls readdir with that offset to resume.
+     * With offset ignored or offset=0, this resulted in an infinite loop
+     * in any directory with >25 entries (apk, pacman, xbps, etc.). */
+    {
+        seen_reset();
+        off_t cur_off = 0;
+        int calls = 0;
+        while (calls++ < 10) {
+            filler_cap = 2;
+            filler_emitted = 0;
+            rc = invf_readdir("/", NULL, record_filler, cur_off, NULL, 0);
+            if (rc != 0 || filler_emitted == 0) break;
+            cur_off = last_seen_off;
+        }
+        filler_cap = 0;
+        ok(nseen == 7, "paginated readdir (batch size 2) visits all 7 entries");
+        ok(seen_has("f0") && seen_has("f4") && seen_has(".") && seen_has(".."),
+           "paginated readdir preserves all dirent names exactly without duplicates");
     }
 
     printf("%s: %d checks, %d failures\n",

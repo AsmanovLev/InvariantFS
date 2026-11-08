@@ -46,17 +46,17 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1723:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2025:SKIP
-src/cli/fuse_fs.c:2363:SKIP
-src/cli/fuse_fs.c:3072:SKIP
-src/cli/fuse_fs.c:3293:SKIP
-src/cli/fuse_fs.c:3348:SKIP
-src/cli/fuse_fs.c:3609:SKIP
-src/cli/fuse_fs.c:3814:SKIP
-src/cli/fuse_fs.c:3901:SKIP
-src/cli/fuse_fs.c:3936:SKIP
-src/cli/fuse_fs.c:3973:SKIP
+src/cli/fuse_fs.c:1724:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2029:SKIP
+src/cli/fuse_fs.c:2367:SKIP
+src/cli/fuse_fs.c:3076:SKIP
+src/cli/fuse_fs.c:3297:SKIP
+src/cli/fuse_fs.c:3352:SKIP
+src/cli/fuse_fs.c:3613:SKIP
+src/cli/fuse_fs.c:3818:SKIP
+src/cli/fuse_fs.c:3905:SKIP
+src/cli/fuse_fs.c:3940:SKIP
+src/cli/fuse_fs.c:3977:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row

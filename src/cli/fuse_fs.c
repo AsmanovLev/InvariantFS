@@ -1637,7 +1637,8 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                         off_t offset, struct fuse_file_info *fi,
                         enum fuse_readdir_flags flags)
 {
-    (void)offset; (void)fi; (void)flags;
+    (void)fi; (void)flags;
+    if (offset < 0) offset = 0;
     const char *dir = path[0] == '/' && path[1] ? path + 1 : "";
     {
         /* listing needs R on the dir itself, X on the way there */
@@ -1664,23 +1665,23 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
          * through to `return 0` is how a directory that could not be read
          * reached ls(1) as a directory with nothing in it and exit 0 -- a
          * silently wrong answer to the question the user asked, and a hole
-         * in the tree for anything walking it. Propagate the errno.
-         *
-         * Why not emit what we have and then fail: this entry point ignores
-         * `offset` and re-lists from scratch on every call, so the kernel
-         * has no resume point -- a short list would be indistinguishable
-         * from a directory that really is short. Emitting nothing and
-         * failing is the only answer a caller can tell from a complete one. */
+         * in the tree for anything walking it. Propagate the errno. */
         if (n < 0) { free(ents); return n; }
         if (n < cap) break;
         cap *= 2;   /* possibly truncated: retry with a bigger buffer */
     }
+    if (offset == 0) {
+        if (filler(buf, ".", NULL, 1, 0) != 0) goto done;
+    }
+    if (offset <= 1) {
+        if (filler(buf, "..", NULL, 2, 0) != 0) goto done;
+    }
+    int start_i = (offset >= 2) ? (int)(offset - 2) : 0;
     int i;
-    filler(buf, ".", NULL, 0, 0);
-    filler(buf, "..", NULL, 0, 0);
-    for (i = 0; i < n; i++) {
+    for (i = start_i; i < n; i++) {
         /* internal names (WP10 batch owner "\x01tzb") stay hidden */
         if ((unsigned char)ents[i].name[0] == 0x01) continue;
+        off_t next_off = (off_t)i + 3;
         /* Plus-mode attrs: the rows are in hand, so answer inline and
          * spare the kernel a LOOKUP+GETATTR round trip per entry.
          * The mapping MUST be what getattr would answer -- it is built
@@ -1725,14 +1726,17 @@ static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
                 goto nostat;
             fill_stat_from_meta(&st, &m, size, ctime);
             st.st_ino = (ino_t)ino;
-            filler(buf, ents[i].name, &st, 0, FUSE_FILL_DIR_PLUS);
+            if (filler(buf, ents[i].name, &st, next_off, FUSE_FILL_DIR_PLUS) != 0)
+                break;
             continue;
         }
 nostat:
         /* no cached stat: let the kernel re-stat each entry through
          * getattr, which knows about v2 types (dirs, symlinks, devices) */
-        filler(buf, ents[i].name, NULL, 0, 0);
+        if (filler(buf, ents[i].name, NULL, next_off, 0) != 0)
+            break;
     }
+done:
     free(ents);
     return 0;
 }

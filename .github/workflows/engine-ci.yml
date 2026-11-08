@@ -162,7 +162,19 @@ jobs:
       # build, ~1-2 min per test, all at once -- simpler than shard jobs
       # and just as fast on a 4-vCPU runner.
       - name: unit tests (4 parallel shards)
-        run: make -j4 test TESTENV='INVFS_TEST_DEBUG=1'
+        run: |
+          ( while true; do
+              sleep 30
+              echo "--- [engine-watchdog] $(date -u +%T) ---"
+              ps -eo pid,ppid,state,wchan:20,comm,args | grep -E 'invf|test|make|sh|python|unshare' | grep -v 'grep' || true
+            done ) &
+          WATCHDOG_PID=$!
+          set +e
+          make -j4 test TESTENV='INVFS_TEST_DEBUG=1'
+          RC=$?
+          kill $WATCHDOG_PID 2>/dev/null || true
+          wait $WATCHDOG_PID 2>/dev/null || true
+          exit $RC
 
       - name: engine e2e suites
         run: |

@@ -427,6 +427,15 @@ int main(int argc, char **argv)
         blkio_close(&io);
         return 1;
     }
+    if (!(sb.vol_flags & VOLF_META)) {
+        fprintf(stderr, "invf-resize: %s: volume reports %s (VOLF_META is not set). "
+                "This build operates on format v%d only.\n",
+                path,
+                (sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
+                INVFS_FORMAT_VERSION);
+        blkio_close(&io);
+        return 1;
+    }
 
     /* an armed resize from a killed run takes precedence: complete it (the
      * roll-forward in vol_open), report, done */
