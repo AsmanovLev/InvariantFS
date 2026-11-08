@@ -143,7 +143,7 @@ static void mkfs_fresh(void)
     char cmd[800];
     const char *mk = getenv("INVF_MKFS");
     unlink(g_img);
-    snprintf(cmd, sizeof cmd, "%s %s 64 >/dev/null 2>&1",
+    snprintf(cmd, sizeof cmd, "%s %s 1 >/dev/null 2>&1",
              mk && *mk ? mk : "./bin/invf-mkfs", g_img);
     if (system(cmd) != 0) { fprintf(stderr, "mkfs failed\n"); exit(2); }
 }

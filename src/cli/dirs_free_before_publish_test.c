@@ -228,7 +228,7 @@ static void mkfs_fresh(void)
 {
     char cmd[800];
     unlink(g_img);
-    snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 64 >/dev/null 2>&1", g_img);
+    snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 1 >/dev/null 2>&1", g_img);
     if (system(cmd) != 0) { fprintf(stderr, "mkfs failed\n"); exit(2); }
 }
 

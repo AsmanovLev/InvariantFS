@@ -40,7 +40,11 @@ static inline double fuse_now_sec(void)
 }
 
 static invfs_volume *g_vol;
+#ifdef PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP
+static pthread_mutex_t g_io_lock = PTHREAD_RECURSIVE_MUTEX_INITIALIZER_NP;
+#else
 static pthread_mutex_t g_io_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 /* ---- foreground write-path arrival clock (WP626) ----------------------
  *
@@ -618,6 +622,7 @@ static void table_upsert_locked(const char *name, uint64_t ino, uint64_t size,
     g_stage_entries[g_nstage].inode_id = ino;
     g_stage_entries[g_nstage].size = size;
     g_stage_entries[g_nstage].ctime = ctime;
+    g_stage_entries[g_nstage].pos = g_nstage;
     g_nstage++;
 
     if (g_nstage >= 1024) {
@@ -4227,6 +4232,12 @@ static int parse_size_opt(const char *s, uint64_t *out)
 
 int main(int argc, char *argv[])
 {
+    pthread_mutexattr_t io_attr;
+    pthread_mutexattr_init(&io_attr);
+    pthread_mutexattr_settype(&io_attr, PTHREAD_MUTEX_RECURSIVE);
+    pthread_mutex_init(&g_io_lock, &io_attr);
+    pthread_mutexattr_destroy(&io_attr);
+
     double t_main_start = fuse_now_sec();
     /* usage: invf-fuse [-f] [-o opt[,opt...]] <image> <mountpoint> */
     const char *img = NULL, *mnt = NULL, *opts = NULL;

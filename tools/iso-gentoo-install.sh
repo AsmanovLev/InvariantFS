@@ -27,9 +27,25 @@ WORK="${WORK:?set WORK to a scratch dir}"
 GENTOO_BASE="https://distfiles.gentoo.org/releases/amd64/autobuilds"
 
 # resolve_latest <latest-txt-url> <ere>: the artefact name upstream currently
-# points at. Prints nothing (rc 1) when the listing cannot be read.
+# points at. Tries primary and fallback mirrors with curl retries.
 resolve_latest() {
-    curl -fsSL "$1" 2>/dev/null | tr -d '\r' | grep -Eo "$2" | head -1
+    local url="$1" ere="$2" mirror res=""
+    for mirror in "" \
+                  "https://gentoo.osuosl.org/releases/amd64/autobuilds" \
+                  "https://mirrors.kernel.org/gentoo/releases/amd64/autobuilds"; do
+        local fetch_url
+        if [ -z "$mirror" ]; then
+            fetch_url="$url"
+        else
+            fetch_url="$mirror/${url#*autobuilds/}"
+        fi
+        res=$(curl --retry 3 --retry-delay 2 -fsSL "$fetch_url" 2>/dev/null | tr -d '\r' | grep -Eo "$ere" | head -1) || true
+        if [ -n "$res" ]; then
+            echo "$res"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # digest_sha512 <digests-url> <exact-name>: the SHA512 line for that artefact.
@@ -37,12 +53,28 @@ resolve_latest() {
 # has its own), so the name must match exactly -- and the line is passed
 # through with its original two-space separator, which sha512sum -c requires.
 digest_sha512() {
-    curl -fsSL "$1" 2>/dev/null | tr -d '\r' \
-        | awk -v want="$2" '
-            /# SHA512 HASH/ { in_sha=1; next }
-            /^# [A-Z0-9]+ HASH/ { in_sha=0 }
-            in_sha && length($1)==128 && $1 ~ /^[0-9a-f]+$/ && $2==want { print; exit }
-        '
+    local url="$1" want="$2" mirror res=""
+    for mirror in "" \
+                  "https://gentoo.osuosl.org/releases/amd64/autobuilds" \
+                  "https://mirrors.kernel.org/gentoo/releases/amd64/autobuilds"; do
+        local fetch_url
+        if [ -z "$mirror" ]; then
+            fetch_url="$url"
+        else
+            fetch_url="$mirror/${url#*autobuilds/}"
+        fi
+        res=$(curl --retry 3 --retry-delay 2 -fsSL "$fetch_url" 2>/dev/null | tr -d '\r' \
+            | awk -v want="$want" '
+                /# SHA512 HASH/ { in_sha=1; next }
+                /^# [A-Z0-9]+ HASH/ { in_sha=0 }
+                in_sha && length($1)==128 && $1 ~ /^[0-9a-f]+$/ && $2==want { print; exit }
+            ') || true
+        if [ -n "$res" ]; then
+            echo "$res"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # Kernel+initramfs paths INSIDE the ISO. Stable across builds; the copy below

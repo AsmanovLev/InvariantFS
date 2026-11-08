@@ -145,10 +145,11 @@ jobs:
           # unmeasured and nothing said so. It skips again if these are absent,
           # which is right, but CI should not be that host.
           sudo apt-get install -y -qq build-essential pkg-config \
-            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+            libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils gdb
           # Enable unprivileged user namespaces on Ubuntu 24.04 so run-unit-isolated.sh
           # can provide private /tmp and /dev/shm mount namespaces for each test shard.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.yama.ptrace_scope=0 || true
 
       - name: build
         run: make -j"$(nproc)"
@@ -164,13 +165,18 @@ jobs:
       - name: unit tests (4 parallel shards)
         run: |
           ( while true; do
-              sleep 30
+              sleep 20
               echo "--- [engine-watchdog] $(date -u +%T) ---"
               ps -eo pid,ppid,state,wchan:20,comm,args | grep -E 'invf|test|make|sh|python|unshare' | grep -v 'grep' || true
+              for p in $(pgrep -f 'bin/invf' 2>/dev/null || true); do
+                  echo "=== [engine-watchdog] GDB backtrace for PID $p ==="
+                  cat "/proc/$p/stack" 2>/dev/null || true
+                  sudo gdb --batch -ex "set pagination off" -ex "thread apply all bt full" -p "$p" 2>&1 || true
+              done
             done ) &
           WATCHDOG_PID=$!
           set +e
-          make -j4 test TESTENV='INVFS_TEST_DEBUG=1'
+          timeout 5m make -j4 test TESTENV='INVFS_TEST_DEBUG=1'
           RC=$?
           kill $WATCHDOG_PID 2>/dev/null || true
           wait $WATCHDOG_PID 2>/dev/null || true
