@@ -31,24 +31,53 @@ int fcntl64(int fd, int cmd, ...) {
 }
 #endif
 
+static unsigned long long parse_u64_c23(const char *nptr, char **endptr, int base) {
+    const char *s = nptr;
+    while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r' || *s == '\f' || *s == '\v') s++;
+    int neg = 0;
+    if (*s == '-') { neg = 1; s++; } else if (*s == '+') { s++; }
+    if ((base == 0 || base == 16) && s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) {
+        base = 16; s += 2;
+    } else if ((base == 0 || base == 2) && s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) {
+        base = 2; s += 2;
+    } else if (base == 0) {
+        base = (s[0] == '0') ? 8 : 10;
+    }
+    unsigned long long acc = 0;
+    int any = 0;
+    for (;; s++) {
+        int c = (unsigned char)*s;
+        int dig;
+        if (c >= '0' && c <= '9') dig = c - '0';
+        else if (c >= 'a' && c <= 'z') dig = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'Z') dig = c - 'A' + 10;
+        else break;
+        if (dig >= base) break;
+        acc = acc * (unsigned long long)base + (unsigned long long)dig;
+        any = 1;
+    }
+    if (endptr) *endptr = (char *)(any ? s : nptr);
+    return neg ? (unsigned long long)(-(long long)acc) : acc;
+}
+
 long int __isoc23_strtol(const char *nptr, char **endptr, int base) __attribute__((weak));
 long int __isoc23_strtol(const char *nptr, char **endptr, int base) {
-    return strtol(nptr, endptr, base);
+    return (long int)parse_u64_c23(nptr, endptr, base);
 }
 
 unsigned long int __isoc23_strtoul(const char *nptr, char **endptr, int base) __attribute__((weak));
 unsigned long int __isoc23_strtoul(const char *nptr, char **endptr, int base) {
-    return strtoul(nptr, endptr, base);
+    return (unsigned long int)parse_u64_c23(nptr, endptr, base);
 }
 
 long long int __isoc23_strtoll(const char *nptr, char **endptr, int base) __attribute__((weak));
 long long int __isoc23_strtoll(const char *nptr, char **endptr, int base) {
-    return strtoll(nptr, endptr, base);
+    return (long long int)parse_u64_c23(nptr, endptr, base);
 }
 
 unsigned long long int __isoc23_strtoull(const char *nptr, char **endptr, int base) __attribute__((weak));
 unsigned long long int __isoc23_strtoull(const char *nptr, char **endptr, int base) {
-    return strtoull(nptr, endptr, base);
+    return parse_u64_c23(nptr, endptr, base);
 }
 
 #include <stdio.h>

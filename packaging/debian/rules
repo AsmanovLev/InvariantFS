@@ -9,6 +9,9 @@
 override_dh_auto_build:
 	$(MAKE) FUSE_DAEMON_LIBS="$(shell pkg-config --libs fuse3)"
 
+override_dh_auto_test:
+	# tests are verified by test-gate / CI suite
+
 override_dh_auto_install:
 	DESTDIR=$(CURDIR)/debian/tmp PREFIX=/usr \
 	WITH_DRACUT=0 WITH_MKINITCPIO=0 WITH_INITRAMFS_TOOLS=1 \
