@@ -610,7 +610,8 @@ int pack_sig_sign_dir(const char *packdir, const char *secfile,
         return -1;
     {
         /* worst case: old manifest + one new line. */
-        rebuilt = (char *)malloc(manlen + 128);
+        size_t alloc_sz = manlen + 256;
+        rebuilt = (char *)malloc(alloc_sz);
         size_t off = 0;
         const char *p = manifest;
         if (!rebuilt) {
@@ -647,8 +648,10 @@ int pack_sig_sign_dir(const char *packdir, const char *secfile,
                 break;
             p = eol + 1;
         }
-        off += (size_t)snprintf(rebuilt + off, 128, "%s = %s\n",
-                                INTEGRITY_KEY, hex);
+        if (off < alloc_sz) {
+            off += (size_t)snprintf(rebuilt + off, alloc_sz - off, "%s = %s\n",
+                                    INTEGRITY_KEY, hex);
+        }
         f = fopen(manpath, "wb");
         if (!f) {
             set_err(err, errcap, "cannot rewrite manifest", manpath);
