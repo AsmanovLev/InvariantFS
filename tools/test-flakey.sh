@@ -50,7 +50,7 @@
 #   (repeatability: fixed seeds; any failure preserves the backing
 #      image + all logs under tools/flakey/artifacts/<leg>-<ts>/.)
 #
-# Env knobs: FLAKEY_SEED (default 20260831), FLAKEY_SOAK_S (default 210),
+# Env knobs: FLAKEY_SEED (default commit-derived or 20260831), FLAKEY_SOAK_S (default 210),
 #            FLAKEY_WORK (default /srv/invfs-flakey, else the first of
 #            /var/tmp /opt /var/lib that is NOT tmpfs, else /tmp/invfs-flakey
 #            — picked by disk_work_root() because the old hardcoded /tmp
@@ -116,7 +116,17 @@ DM=/dev/mapper/$DEV
 # loop treatment as before.
 BACK=${FLAKEY_BACKING:-$FLK/backing.img}
 MNT=$FLK/mnt
-SEED=${FLAKEY_SEED:-20260831}
+# Commit-derived default seed: deterministic per commit, but changes across commits.
+_default_seed() {
+    local h
+    h=$(git -C "$REPO" rev-parse --short=8 HEAD 2>/dev/null) || h=""
+    if [ -n "$h" ]; then
+        printf "%d\n" "$((16#$h % 1000000000))"
+    else
+        echo 20260831
+    fi
+}
+SEED=${FLAKEY_SEED:-$(_default_seed)}
 SOAK_S=${FLAKEY_SOAK_S:-210}
 SIZE_GB=2
 ONLY=${FLAKEY_ONLY:-}

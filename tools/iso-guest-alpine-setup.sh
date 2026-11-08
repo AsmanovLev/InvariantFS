@@ -32,10 +32,26 @@ finish() {
 }
 trap 'done_rc=$?; finish' EXIT
 
-# Watchdog
+# Watchdog: heartbeat + memory + active processes to console
 ( while true; do
-    echo "iso-watch: mem=$(free -m | awk '/^Mem/{print $3"/"$2"MB"}') load=$(cut -d' ' -f1 /proc/loadavg)"
-    sleep 60
+    mem=$(free -m | awk '/^Mem/{print $3"/"$2"MB"}')
+    load=$(cut -d' ' -f1 /proc/loadavg)
+    act=""
+    for p in /proc/[0-9]*; do
+        [ -d "$p" ] || continue
+        stat=$(cat "$p/stat" 2>/dev/null) || continue
+        st="${stat##*) }"
+        state="${st%% *}"
+        if [ "$state" = "R" ] || [ "$state" = "D" ]; then
+            pid="${p##*/}"
+            comm=$(cat "$p/comm" 2>/dev/null || echo "?")
+            wc=$(cat "$p/wchan" 2>/dev/null || echo "?")
+            cmd=$(tr '\0\n' '  ' < "$p/cmdline" 2>/dev/null | cut -c1-40)
+            act="$act [${pid}:${comm}(${state},${wc}) ${cmd}]"
+        fi
+    done
+    echo "iso-watch: mem=$mem load=$load act=$act"
+    sleep 30
   done ) &
 
 say "checking connectivity to $SRV..."

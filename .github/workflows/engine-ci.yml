@@ -146,6 +146,9 @@ jobs:
           # which is right, but CI should not be that host.
           sudo apt-get install -y -qq build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev python3 qemu-utils
+          # Enable unprivileged user namespaces on Ubuntu 24.04 so run-unit-isolated.sh
+          # can provide private /tmp and /dev/shm mount namespaces for each test shard.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
 
       - name: build
         run: make -j"$(nproc)"

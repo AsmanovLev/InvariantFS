@@ -38,7 +38,17 @@ DEV0=${FLAKEY_MD_DEV0:-invfs_flakey_md0}
 DEV1=${FLAKEY_MD_DEV1:-invfs_flakey_md1}
 DM0=/dev/mapper/$DEV0
 DM1=/dev/mapper/$DEV1
-SEED=${FLAKEY_MD_SEED:-20261008}
+# Commit-derived default seed: deterministic per commit, but changes across commits.
+_default_seed() {
+    local h
+    h=$(git -C "$REPO" rev-parse --short=8 HEAD 2>/dev/null) || h=""
+    if [ -n "$h" ]; then
+        printf "%d\n" "$(( (16#$h + 1008) % 1000000000 ))"
+    else
+        echo 20261008
+    fi
+}
+SEED=${FLAKEY_MD_SEED:-$(_default_seed)}
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 say() { echo; echo "== $* =="; }
