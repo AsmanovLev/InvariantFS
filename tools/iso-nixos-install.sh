@@ -149,7 +149,7 @@ QLOG="$WORK/qemu.log"
 note "starting qemu (accel=$ACCEL, stock NixOS minimal kernel+initrd)"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -kernel "$WORK/vmlinuz-nixos" -initrd "$WORK/initrd-nixos" \
-  -append "${NIXOS_INIT} console=ttyS0,115200 invfsvol=/dev/vda" \
+  -append "${NIXOS_INIT} root=/dev/sr0 console=ttyS0,115200 invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
@@ -172,19 +172,24 @@ serial_wait() {
 }
 
 # Responsive event-driven triggers:
-# In NixOS minimal ISO, it auto-logs in root on console, or shows login/prompt
+# In NixOS minimal ISO, it auto-logs in root/nixos on console, or shows login/prompt
 note "waiting for NixOS boot prompt..."
 TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
-serial_wait "nixos#" "$TIMEOUT_SEC" || serial_wait "login:" 60 || serial_wait "#" 30 || true
+serial_wait "nixos#" "$TIMEOUT_SEC" || serial_wait "nixos@" 60 || serial_wait "login:" 60 || serial_wait "#" 30 || true
 
-# Check if we need to send enter or root
+# Wake console and handle login
+sleep 2
 serial_send ""
 sleep 1
-if grep -q -a "login:" "$SER" 2>/dev/null && ! grep -q -a "nixos#" "$SER" 2>/dev/null; then
+if tail -n 20 "$SER" 2>/dev/null | grep -q -a "login:"; then
     note "login prompt detected; sending root login"
     serial_send "root"
-    sleep 1
+    sleep 2
 fi
+
+# Ensure root shell (handles both root and nixos user with passwordless sudo)
+serial_send "sudo -i"
+sleep 1
 
 note "triggering guest setup script via curl..."
 serial_send "curl -fsSL http://10.0.2.2:$PORT/iso-guest-nixos-setup.sh | bash"

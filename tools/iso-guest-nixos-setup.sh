@@ -165,6 +165,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
 
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
+  boot.kernelModules = [ "fuse" ];
 
   networking.hostName = "nixos-invfs";
   networking.useDHCP = true;
@@ -177,7 +178,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
 }
 EOF
     say "running nixos-install (no-root-passwd)..."
-    nixos-install --no-root-passwd || exit 1
+    nixos-install --no-root-passwd --no-channel-copy || exit 1
 else
     say "nixos-generate-config not present, writing minimal root structure..."
     mkdir -p /mnt/etc /mnt/usr /mnt/bin /mnt/sbin /mnt/home /mnt/root
