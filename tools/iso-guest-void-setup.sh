@@ -224,12 +224,17 @@ printf 'void-invfs\n' > /etc/hostname
 # FUSE-root boot fix: prevent runit 03-filesystems.sh remount / failure
 if [ -f /etc/runit/core-services/03-filesystems.sh ]; then
     if ! grep -q '# WP64: FUSE root' /etc/runit/core-services/03-filesystems.sh; then
-        sed -i '/\[ -n \"\$VIRTUALIZATION\" \] && return 0/a\\
-# WP64: FUSE root -- mount.fuse cannot remount\\
-if grep -q \" / fuse\" /proc/mounts 2>/dev/null; then\\
-    msg \"FUSE root detected; skipping root fsck/remount and mount -a\"\\
-    return 0\\
-fi' /etc/runit/core-services/03-filesystems.sh
+        cat <<'EOF_FS' > /tmp/fuse_guard.sh
+# WP64: FUSE root -- mount.fuse cannot remount
+if grep -q " / fuse" /proc/mounts 2>/dev/null; then
+    msg "FUSE root detected; skipping root fsck/remount and mount -a"
+    return 0
+fi
+EOF_FS
+        cat /tmp/fuse_guard.sh /etc/runit/core-services/03-filesystems.sh > /tmp/03-filesystems.sh.new
+        mv -f /tmp/03-filesystems.sh.new /etc/runit/core-services/03-filesystems.sh
+        rm -f /tmp/fuse_guard.sh
+        chmod 755 /etc/runit/core-services/03-filesystems.sh
     fi
 fi
 

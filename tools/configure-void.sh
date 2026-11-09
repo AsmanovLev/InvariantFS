@@ -156,9 +156,16 @@ if grep -q ' / fuse' /proc/mounts 2>/dev/null; then
     msg "FUSE root detected; skipping root fsck/remount and mount -a"
     return 0
 fi
+
 '''
-    s = s.replace("[ -n \"$VIRTUALIZATION\" ] && return 0\n",
-                  "[ -n \"$VIRTUALIZATION\" ] && return 0\n\n" + guard, 1)
+    if '[ -n "$IS_CONTAINER" ] && return 0\n' in s:
+        s = s.replace('[ -n "$IS_CONTAINER" ] && return 0\n',
+                      '[ -n "$IS_CONTAINER" ] && return 0\n\n' + guard, 1)
+    elif '[ -n "$VIRTUALIZATION" ] && return 0\n' in s:
+        s = s.replace('[ -n "$VIRTUALIZATION" ] && return 0\n',
+                      '[ -n "$VIRTUALIZATION" ] && return 0\n\n' + guard, 1)
+    else:
+        s = guard + s
     open(p, "w", encoding="utf-8", errors="surrogateescape").write(s)
 PYEOF
 fi
