@@ -163,7 +163,7 @@ serial_wait() {
     local pat="$1" timeout="$2"
     local start=$(date +%s)
     while true; do
-        if grep -q -a "$pat" "$SER" 2>/dev/null; then return 0; fi
+        if grep -q -E -a "$pat" "$SER" 2>/dev/null; then return 0; fi
         if ! kill -0 "$QPIDE" 2>/dev/null; then return 2; fi
         local now=$(date +%s)
         if [ $((now - start)) -ge "$timeout" ]; then return 1; fi
@@ -175,24 +175,27 @@ serial_wait() {
 # In NixOS minimal ISO, it auto-logs in root/nixos on console, or shows login/prompt
 note "waiting for NixOS boot prompt..."
 TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
-serial_wait "nixos#" "$TIMEOUT_SEC" || serial_wait "nixos@" 60 || serial_wait "login:" 60 || serial_wait "#" 30 || true
+serial_wait "nixos@|nixos#|login:|~\]\\$" "$TIMEOUT_SEC" || fail "boot prompt never appeared (see $SER)"
 
 # Wake console and handle login
 sleep 2
 serial_send ""
 sleep 1
-if tail -n 20 "$SER" 2>/dev/null | grep -q -a "login:"; then
+if tail -n 5 "$SER" 2>/dev/null | grep -q -E -a "[$#][[:space:]]*$"; then
+    note "shell prompt detected"
+elif tail -n 10 "$SER" 2>/dev/null | grep -q -a "login:[[:space:]]*$"; then
     note "login prompt detected; sending root login"
     serial_send "root"
     sleep 2
 fi
 
 # Ensure root shell (handles both root and nixos user with passwordless sudo)
+note "ensuring root interactive shell..."
 serial_send "sudo -i"
-sleep 1
+sleep 2
 
 note "triggering guest setup script via curl..."
-serial_send "curl -fsSL http://10.0.2.2:$PORT/iso-guest-nixos-setup.sh | bash"
+serial_send "curl -fsSL http://10.0.2.2:$PORT/iso-guest-nixos-setup.sh | sudo bash"
 
 # Stream progress and wait for setup marker
 note "monitoring live guest installation..."
