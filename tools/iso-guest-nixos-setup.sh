@@ -158,7 +158,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
     nixos-generate-config --root /mnt || exit 1
     # Customize configuration.nix for minimal headless boot & InvariantFS
     cat > /mnt/etc/nixos/configuration.nix <<EOF
-{ config, pkgs, ... }:
+{ config, pkgs, lib, ... }:
 
 {
   imports = [ ./hardware-configuration.nix ];
@@ -169,33 +169,43 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
     options = [ "allow_other" ];
   };
 
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.systemd-boot.enable = false;
+  boot.loader.grub.enable = false;
   boot.kernelModules = [ "fuse" ];
 
-  networking.hostName = "nixos-invfs";
-  networking.useDHCP = true;
+  # Minimal headless system: strictly avoid docs, fonts, sound, desktop bloat
+  # to guarantee fast installation using only pre-cached packages from ISO.
+  documentation.enable = false;
+  documentation.nixos.enable = false;
+  documentation.man.enable = false;
+  documentation.info.enable = false;
+  documentation.doc.enable = false;
+  fonts.fontconfig.enable = false;
+  programs.command-not-found.enable = false;
+  services.openssh.enable = false;
+  services.udisks2.enable = false;
+  xdg.sounds.enable = false;
+  xdg.mime.enable = false;
+  xdg.icons.enable = false;
 
-  services.openssh.enable = true;
-  services.openssh.settings.PermitRootLogin = "yes";
+  networking.hostName = "nixos-invfs";
+
   users.users.root.initialPassword = "root";
 
   system.stateVersion = "24.11";
 }
 EOF
-    say "configuring nix daemon for root build on FUSE..."
-    mkdir -p /etc/nix
-    cat >> /etc/nix/nix.conf <<'EOF_NIX'
-sandbox = false
-build-users-group =
-EOF_NIX
-    systemctl restart nix-daemon 2>/dev/null || true
 
     ( while true; do chmod 1777 /mnt/tmp* 2>/dev/null || true; sleep 0.2; done ) &
     WATCH_TMP_PID=$!
 
     say "running nixos-install (no-root-passwd)..."
-    nixos-install --no-root-passwd --no-channel-copy --option build-users-group "" --option sandbox false || exit 1
+    nixos-install --no-root-passwd --no-channel-copy \
+        --option build-users-group "" \
+        --option sandbox false \
+        --option connect-timeout 5 \
+        --option max-jobs 2 \
+        --option cores 2 || exit 1
     kill $WATCH_TMP_PID 2>/dev/null || true
 else
     say "nixos-generate-config not present, writing minimal root structure..."
