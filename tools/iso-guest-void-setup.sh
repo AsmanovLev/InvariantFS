@@ -150,11 +150,17 @@ mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
 
 # ---- phase 4: install base-system via xbps-install -r /mnt ----
-say "configuring xbps repo keys for target..."
-mkdir -p /mnt/var/db/xbps/keys /mnt/etc/xbps.d
+say "configuring xbps repo keys and dracut config for target..."
+mkdir -p /mnt/var/db/xbps/keys /mnt/etc/xbps.d /mnt/etc/dracut.conf.d
 cp /var/db/xbps/keys/*.plist /mnt/var/db/xbps/keys/ || exit 1
 printf 'repository=https://repo-default.voidlinux.org/current\n' \
     > /mnt/etc/xbps.d/00-repository-main.conf
+
+cat > /mnt/etc/dracut.conf.d/invfs.conf <<'EOF_DRACUT'
+add_dracutmodules+=" invfs "
+omit_dracutmodules+=" drm btrfs zfs cifs nfs dmraid mdraid multipath iscsi fcoe "
+compress="gzip -1"
+EOF_DRACUT
 
 say "updating xbps index and installing base-system grub grub-x86_64-efi into /mnt..."
 XBPS_ARCH=x86_64 xbps-install -r /mnt -Sy base-system grub grub-x86_64-efi || exit 1
@@ -229,7 +235,7 @@ fi
 # Hostname
 printf 'void-invfs\n' > /etc/hostname
 
-invf-boot-setup --esp /boot --root "$P2" --cmdline "console=ttyS0,115200"
+invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
 echo 'root:root' | chpasswd 2>/dev/null || true
 " || exit 1
 
@@ -279,7 +285,8 @@ chmod 644 /mnt/etc/ssh/sshd_config.d/99-invfs.conf
 for kt in rsa ecdsa ed25519; do
     k="/mnt/etc/ssh/ssh_host_${kt}_key"
     if [ ! -s "$k" ]; then
-        ssh-keygen -q -t "$kt" -N '' -f "$k" 2>/dev/null || true
+        rm -f "$k" "$k.pub" 2>/dev/null || true
+        ssh-keygen -q -t "$kt" -N '' -f "$k" < /dev/null 2>/dev/null || true
     fi
 done
 chmod 600 /mnt/etc/ssh/ssh_host_*_key 2>/dev/null || true
