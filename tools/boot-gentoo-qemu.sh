@@ -88,6 +88,9 @@ if [ "$BOOTLOADER" = 1 ]; then
         else ACCEL=tcg; CPU=max; log "/dev/kvm unusable; TCG fallback"; fi
     fi
     [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+    if [ "$ACCEL" = tcg ] && [ -z "${INVFS_GENTOO_TIMEOUT:-}" ]; then
+        TIMEOUT_SEC=600
+    fi
 
     if [ -z "$OVMF" ]; then
         for p in /usr/share/OVMF/OVMF_CODE.fd \

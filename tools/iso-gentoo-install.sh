@@ -183,9 +183,11 @@ zstd -dc "$ART" | gzip -9 > "$SERVEDIR/$(basename "$ART_GZ")"
 ( cd "$SERVEDIR" && sha256sum "$(basename "$ART_GZ")" >> SHA256SUMS )
 
 [ -f "$WORK/vmlinuz-gentoo" ] && cp "$WORK/vmlinuz-gentoo" "$SERVEDIR/vmlinuz"
-if [ -f "$REPO/vm/initramfs.cpio.gz" ]; then
-    cp "$REPO/vm/initramfs.cpio.gz" "$SERVEDIR/initramfs.cpio.gz"
+if [ ! -f "$REPO/vm/initramfs.cpio.gz" ]; then
+    note "building universal InvariantFS initramfs..."
+    bash "$REPO/tools/mkinitramfs.sh" || fail "failed to build initramfs"
 fi
+cp "$REPO/vm/initramfs.cpio.gz" "$SERVEDIR/initramfs.cpio.gz"
 
 if command -v grub-mkimage >/dev/null 2>&1; then
     grub-mkimage -O x86_64-efi -o "$SERVEDIR/BOOTX64.EFI" -p /boot/grub \

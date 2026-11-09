@@ -183,8 +183,20 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   system.stateVersion = "24.11";
 }
 EOF
+    say "configuring nix daemon for root build on FUSE..."
+    mkdir -p /etc/nix
+    cat >> /etc/nix/nix.conf <<'EOF_NIX'
+sandbox = false
+build-users-group =
+EOF_NIX
+    systemctl restart nix-daemon 2>/dev/null || true
+
+    ( while true; do chmod 1777 /mnt/tmp* 2>/dev/null || true; sleep 0.2; done ) &
+    WATCH_TMP_PID=$!
+
     say "running nixos-install (no-root-passwd)..."
-    nixos-install --no-root-passwd --no-channel-copy || exit 1
+    nixos-install --no-root-passwd --no-channel-copy --option build-users-group "" --option sandbox false || exit 1
+    kill $WATCH_TMP_PID 2>/dev/null || true
 else
     say "nixos-generate-config not present, writing minimal root structure..."
     mkdir -p /mnt/etc /mnt/usr /mnt/bin /mnt/sbin /mnt/home /mnt/root

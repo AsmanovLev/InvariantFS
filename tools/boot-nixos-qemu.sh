@@ -49,6 +49,9 @@ if [ "$ACCEL" = auto ]; then
     else ACCEL=tcg; CPU=max; note "/dev/kvm unusable; TCG fallback (slower)"; fi
 fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+if [ "$ACCEL" = tcg ] && [ -z "${INVFS_NIXOS_TIMEOUT:-}" ]; then
+    TIMEOUT_SEC=600
+fi
 
 if [ -z "$OVMF" ]; then
     for p in /usr/share/OVMF/OVMF_CODE.fd \
