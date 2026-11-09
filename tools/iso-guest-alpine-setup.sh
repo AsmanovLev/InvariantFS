@@ -203,10 +203,10 @@ sh ./sh
 
 printf 'alpine-invfs\n' > /etc/hostname
 
-# inittab serial autologin
+# inittab serial autologin / console
 if [ -f /etc/inittab ]; then
     grep -v 'ttyS0' /etc/inittab > /etc/inittab.tmp || true
-    echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 -a root' >> /etc/inittab.tmp
+    echo 'ttyS0::respawn:/sbin/getty -L 115200 ttyS0 vt100' >> /etc/inittab.tmp
     cat /etc/inittab.tmp > /etc/inittab
     rm -f /etc/inittab.tmp
 fi

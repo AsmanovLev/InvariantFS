@@ -152,7 +152,7 @@ if marker not in s:
     guard = '''# WP64: FUSE root -- mount.fuse cannot remount (it re-execs the
 # bracketed source as a helper) and fsck(8) has no FUSE handler, so the
 # root fsck/remount/mount -a block below would drop to emergency_shell.
-if grep -q ' / fuse ' /proc/mounts 2>/dev/null; then
+if grep -q ' / fuse' /proc/mounts 2>/dev/null; then
     msg "FUSE root detected; skipping root fsck/remount and mount -a"
     return 0
 fi
