@@ -182,6 +182,11 @@ cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/is
 zstd -dc "$ART" | gzip -9 > "$SERVEDIR/$(basename "$ART_GZ")"
 ( cd "$SERVEDIR" && sha256sum "$(basename "$ART_GZ")" >> SHA256SUMS )
 
+[ -f "$WORK/vmlinuz-gentoo" ] && cp "$WORK/vmlinuz-gentoo" "$SERVEDIR/vmlinuz"
+if [ -f "$REPO/vm/initramfs.cpio.gz" ]; then
+    cp "$REPO/vm/initramfs.cpio.gz" "$SERVEDIR/initramfs.cpio.gz"
+fi
+
 if command -v grub-mkimage >/dev/null 2>&1; then
     grub-mkimage -O x86_64-efi -o "$SERVEDIR/BOOTX64.EFI" -p /boot/grub \
         fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null || true
@@ -353,6 +358,17 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     if kill -0 $QPIDE 2>/dev/null; then
         kill -KILL $QPIDE 2>/dev/null
         wait $QPIDE 2>/dev/null
+    fi
+
+    # Post-install UEFI boot verification
+    if [ -x "$REPO/tools/boot-gentoo-qemu.sh" ]; then
+        note "verifying post-install UEFI boot via boot-gentoo-qemu.sh --bootloader"
+        INVFS_GENTOO_WORK="$WORK/boot-test" \
+        INVFS_GENTOO_LOGDIR="$WORK/boot-logs" \
+        INVFS_ACCEL="$ACCEL" \
+        INVFS_CPU="$CPU" \
+            bash "$REPO/tools/boot-gentoo-qemu.sh" --bootloader "$VOL" || fail "Gentoo post-install UEFI boot verification failed"
+        note "Gentoo post-install UEFI boot verification: PASS"
     fi
     exit 0
 else

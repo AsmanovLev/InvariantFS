@@ -157,11 +157,17 @@ say "generating nixos-generate-config..."
 if command -v nixos-generate-config >/dev/null 2>&1; then
     nixos-generate-config --root /mnt || exit 1
     # Customize configuration.nix for minimal headless boot & InvariantFS
-    cat > /mnt/etc/nixos/configuration.nix <<'EOF'
+    cat > /mnt/etc/nixos/configuration.nix <<EOF
 { config, pkgs, ... }:
 
 {
   imports = [ ./hardware-configuration.nix ];
+
+  fileSystems."/" = {
+    device = "$P2";
+    fsType = "invfs";
+    options = [ "allow_other" ];
+  };
 
   boot.loader.systemd-boot.enable = true;
   boot.loader.efi.canTouchEfiVariables = true;
@@ -197,6 +203,32 @@ say "installing invfs into target root..."
         chroot /mnt /bin/sh -c "export INVFS_SERVER='$SRV'; cd /tmp/invfs-sh && sh ./sh" || true
     fi
 )
+
+# Prepare universal UEFI InvariantFS boot on the ESP (/mnt/boot)
+say "preparing universal UEFI InvariantFS boot on ESP..."
+K=$(find /mnt/boot -name "*vmlinuz*" -o -name "*bzImage*" 2>/dev/null | head -1 || true)
+if [ -z "$K" ]; then
+    K=$(find /mnt/nix/store -maxdepth 3 -name "bzImage" 2>/dev/null | head -1 || true)
+fi
+if [ -z "$K" ]; then
+    K=/boot/bzImage
+fi
+if [ -f "$K" ]; then
+    cp -f "$K" /mnt/boot/vmlinuz
+    say "staged kernel $K -> /mnt/boot/vmlinuz"
+fi
+
+if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; then
+    say "staged universal InvariantFS initramfs -> /mnt/boot/initramfs.img"
+fi
+
+# Ensure /mnt/sbin/init points to /init or NixOS system profile init
+mkdir -p /mnt/sbin
+[ -e /mnt/sbin/init ] || ln -sf /init /mnt/sbin/init 2>/dev/null || true
+
+# Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
+say "running invf-boot-setup on /mnt/boot (ESP)..."
+invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 invfs.init=/init" || true
 
 # ---- phase 5: clean unmount & validation ----
 say "unmounting /mnt/boot and /mnt..."

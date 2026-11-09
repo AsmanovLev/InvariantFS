@@ -85,6 +85,14 @@ cp "$ART" "$REPO/dist/SHA256SUMS" "$REPO/packaging/bootstrap.sh" "$REPO/tools/is
 zstd -dc "$ART" | gzip -9 > "$SERVEDIR/$(basename "$ART_GZ")"
 ( cd "$SERVEDIR" && sha256sum "$(basename "$ART_GZ")" >> SHA256SUMS )
 
+if [ -f "$REPO/vm/initramfs.cpio.gz" ]; then
+    cp "$REPO/vm/initramfs.cpio.gz" "$SERVEDIR/initramfs.cpio.gz"
+fi
+if command -v grub-mkimage >/dev/null 2>&1; then
+    grub-mkimage -O x86_64-efi -o "$SERVEDIR/BOOTX64.EFI" -p /boot/grub \
+        fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null || true
+fi
+
 cat > "$SERVEDIR/sh" <<'SH_EOF'
 #!/bin/sh
 set -eu
@@ -207,6 +215,20 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
         kill -0 "$QPIDE" 2>/dev/null || break
         sleep 1
     done
+    if kill -0 "$QPIDE" 2>/dev/null; then
+        kill -KILL "$QPIDE" 2>/dev/null || true
+        wait "$QPIDE" 2>/dev/null || true
+    fi
+
+    # Post-install UEFI boot verification
+    note "verifying post-install UEFI boot via boot-nixos-qemu.sh --bootloader"
+    INVFS_NIXOS_WORK="$WORK/boot-test" \
+    INVFS_NIXOS_LOGDIR="$WORK/boot-logs" \
+    INVFS_ACCEL="$ACCEL" \
+    INVFS_CPU="$CPU" \
+        bash "$REPO/tools/boot-nixos-qemu.sh" --bootloader "$VOL" || fail "NixOS post-install UEFI boot verification failed"
+
+    note "NixOS post-install UEFI boot verification: PASS"
     exit 0
 else
     fail "NixOS ISO install: FAIL (see $SER)"

@@ -145,6 +145,19 @@ say "unpacking stage3 directly into /mnt/gentoo..."
 tar -xpf "$B/$STAGE3_FILE" -C /mnt/gentoo || exit 1
 printf 'invfs-gentoo\n' > /mnt/gentoo/etc/hostname
 
+say "staging kernel and initramfs into /mnt/gentoo/boot..."
+fetch "$SRV/vmlinuz" "/mnt/gentoo/boot/vmlinuz" || cp -f /boot/gentoo* /mnt/gentoo/boot/vmlinuz 2>/dev/null || true
+fetch "$SRV/initramfs.cpio.gz" "/mnt/gentoo/boot/initramfs.img" || true
+
+if [ -d "/lib/modules/$(uname -r)" ]; then
+    mkdir -p /mnt/gentoo/lib/modules
+    cp -a "/lib/modules/$(uname -r)" /mnt/gentoo/lib/modules/ 2>/dev/null || true
+fi
+
+if [ -f /mnt/gentoo/etc/inittab ]; then
+    grep -q "ttyS0" /mnt/gentoo/etc/inittab 2>/dev/null || echo "s0:12345:respawn:/sbin/agetty 115200 ttyS0 vt100" >> /mnt/gentoo/etc/inittab
+fi
+
 # ---- phase 5: in-chroot configuration ----
 say "binding dev/proc/sys into /mnt/gentoo..."
 mount --rbind /dev /mnt/gentoo/dev 2>/dev/null || true

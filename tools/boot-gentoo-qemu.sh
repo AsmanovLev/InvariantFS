@@ -52,17 +52,141 @@ IMPORT_LOG="$WP62_DIR/import.log"
 SSH_KEY="$WP62_DIR/id_ed25519"
 SSH_OUT="$WP62_DIR/ssh.out"
 
+BOOTLOADER=0
+DISK_IMG=""
 while [ $# -gt 0 ]; do
     case "$1" in
-        --keep-image) KEEP_IMAGE=1 ;;
+        --bootloader) BOOTLOADER=1; DISK_IMG="${2:-}"; shift 2 ;;
+        --keep-image) KEEP_IMAGE=1; shift ;;
         --help|-h) sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *) echo "unknown option: $1" >&2; exit 2 ;;
+        *)
+            if [ -f "$1" ]; then
+                BOOTLOADER=1; DISK_IMG="$1"; shift
+            else
+                echo "unknown option: $1" >&2; exit 2
+            fi
+            ;;
     esac
-    shift
 done
 
 log() { printf '== %s\n' "$*"; }
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+
+if [ "$BOOTLOADER" = 1 ]; then
+    [ -n "$DISK_IMG" ] || die "--bootloader requires a disk image argument"
+    [ -f "$DISK_IMG" ] || die "disk image not found: $DISK_IMG"
+    WORK="${INVFS_GENTOO_WORK:-/var/tmp/invfs-gentoo-boot}"
+    LOGDIR="${INVFS_GENTOO_LOGDIR:-/var/tmp/invfs-gentoo-logs}"
+    MEM="${INVFS_GENTOO_MEM:-2048}"
+    TIMEOUT_SEC="${INVFS_GENTOO_TIMEOUT:-300}"
+    ACCEL="${INVFS_ACCEL:-auto}"
+    OVMF="${INVFS_GENTOO_OVMF:-${ARCH_OVMF:-}}"
+
+    mkdir -p "$WORK" "$LOGDIR"
+    if [ "$ACCEL" = auto ]; then
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; CPU=host
+        else ACCEL=tcg; CPU=max; log "/dev/kvm unusable; TCG fallback"; fi
+    fi
+    [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+
+    if [ -z "$OVMF" ]; then
+        for p in /usr/share/OVMF/OVMF_CODE.fd \
+                 /usr/share/OVMF/OVMF_CODE_4M.fd \
+                 /usr/share/edk2/ovmf/OVMF_CODE.fd \
+                 /usr/share/edk2/OVMF_CODE.fd \
+                 /usr/share/qemu/OVMF_CODE.fd \
+                 /usr/share/qemu/edk2-x86_64-code.fd \
+                 /usr/share/edk2/x64/OVMF_CODE.4m.fd \
+                 /usr/share/edk2-ovmf/x64/OVMF_CODE.fd; do
+            [ -r "$p" ] && { OVMF="$p"; break; }
+        done
+    fi
+    [ -n "$OVMF" ] || die "OVMF firmware not found"
+
+    SPIPE="$WORK/serial.pipe"
+    SER="$LOGDIR/serial-bootloader.log"
+    rm -f "$SPIPE.in" "$SPIPE.out" "$SER"
+    mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
+    : > "$SER"
+
+    tee -a "$SER" < "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+        printf '[guest %s] %s\n' "$(date +%T)" "$line"
+    done &
+    READER_PID=$!
+
+    QPID=""
+    cleanup_bootloader() {
+        [ -n "$QPID" ] && kill -KILL "$QPID" 2>/dev/null || true
+        kill -KILL "$READER_PID" 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+    }
+    trap cleanup_bootloader EXIT
+
+    QLOG="$LOGDIR/qemu-bootloader.log"
+    log "launching Gentoo QEMU via UEFI (accel=$ACCEL, mem=$MEM MB)"
+    qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
+        -drive if=pflash,format=raw,readonly=on,file="$OVMF" \
+        -drive file="$DISK_IMG",format=raw,if=virtio \
+        -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+        -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
+    QPID=$!
+
+    exec 9>"$SPIPE.in"
+    serial_send() { printf '%s\n' "$1" >&9; }
+    serial_wait_match() {
+        local pat="$1" to="$2"
+        local start=$(date +%s)
+        while true; do
+            if grep -q -a -E "$pat" "$SER" 2>/dev/null; then return 0; fi
+            if ! kill -0 "$QPID" 2>/dev/null; then return 2; fi
+            local now=$(date +%s)
+            if [ $((now - start)) -ge "$to" ]; then return 1; fi
+            sleep 0.5
+        done
+    }
+
+    log "waiting for Gentoo boot / login trigger..."
+    serial_wait_match "login:|Entering runlevel: 3|gentoo" "$TIMEOUT_SEC" || die "login prompt or runlevel 3 never appeared (see $SER)"
+
+    if ! grep -q -a "login:" "$SER" 2>/dev/null; then
+        serial_wait_match "login:" 15 || true
+    fi
+
+    serial_send ""
+    sleep 1
+    if grep -q -a "login:" "$SER" 2>/dev/null; then
+        serial_send "root"
+        sleep 1
+    fi
+    serial_send "root"
+    sleep 1
+    serial_send ""
+
+    log "verifying FUSE root mount..."
+    serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
+    serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
+    serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || die "root check timed out"
+
+    if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
+        log "FUSE root confirmed mounted on InvariantFS!"
+    else
+        die "root is not InvariantFS / FUSE"
+    fi
+
+    log "triggering clean shutdown..."
+    serial_send "poweroff -f"
+
+    for _ in $(seq 1 60); do
+        kill -0 "$QPID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$QPID" 2>/dev/null; then
+        kill -KILL "$QPID" 2>/dev/null || true
+    fi
+
+    log "PASS: Gentoo post-install UEFI boot verification"
+    exit 0
+fi
 
 QPID=""
 cleanup() {
