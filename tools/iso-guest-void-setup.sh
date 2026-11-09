@@ -205,16 +205,11 @@ ln -sfn /etc/sv/dhcpcd /etc/runit/runsvdir/default/dhcpcd
 ln -sfn /etc/sv/sshd /etc/runit/runsvdir/default/sshd
 
 # sshd configuration: allow root password login
-if [ -f /etc/ssh/sshd_config ]; then
-    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
-    grep -q '^PermitRootLogin yes' /etc/ssh/sshd_config 2>/dev/null || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
-    grep -q '^PasswordAuthentication yes' /etc/ssh/sshd_config 2>/dev/null || echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
-fi
-mkdir -p /etc/ssh/sshd_config.d
+mkdir -p /etc/ssh /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-invfs.conf <<'EOF_SSH'
 PermitRootLogin yes
 PasswordAuthentication yes
+UsePAM yes
 UseDNS no
 EOF_SSH
 chmod 644 /etc/ssh/sshd_config.d/99-invfs.conf
@@ -234,9 +229,71 @@ fi
 # Hostname
 printf 'void-invfs\n' > /etc/hostname
 
-invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
-echo 'root:root' | chpasswd
+invf-boot-setup --esp /boot --root "$P2" --cmdline "console=ttyS0,115200"
+echo 'root:root' | chpasswd 2>/dev/null || true
 " || exit 1
+
+# Direct host-side provisioning of /mnt (in-place rewrite without rename(2))
+say "provisioning root credentials and sshd on /mnt..."
+HASH='$6$invfs$Q.slEqK/Csg.XVpwZp0Ymfmuk5Cw0PvnFY65mFfcB8hRrLrGADakV.PBthjdDxLlE/EbvT5uFjcY3F8Dx5fNT1'
+if [ -f /mnt/etc/shadow ]; then
+    chmod 600 /mnt/etc/shadow 2>/dev/null || true
+    grep -v '^root:' /mnt/etc/shadow > /tmp/shadow.tmp 2>/dev/null || true
+    echo "root:${HASH}:19000:0:99999:7:::" >> /tmp/shadow.tmp
+    cat /tmp/shadow.tmp > /mnt/etc/shadow
+    rm -f /tmp/shadow.tmp
+else
+    echo "root:${HASH}:19000:0:99999:7:::" > /mnt/etc/shadow
+fi
+chmod 600 /mnt/etc/shadow
+
+if [ -f /mnt/etc/passwd ]; then
+    grep -v '^root:' /mnt/etc/passwd > /tmp/passwd.tmp 2>/dev/null || true
+    echo 'root:x:0:0:root:/root:/bin/bash' >> /tmp/passwd.tmp
+    cat /tmp/passwd.tmp > /mnt/etc/passwd
+    rm -f /tmp/passwd.tmp
+    chmod 644 /mnt/etc/passwd
+fi
+
+# Prepend PermitRootLogin yes / PasswordAuthentication yes to sshd_config in place
+if [ -f /mnt/etc/ssh/sshd_config ]; then
+    printf 'PermitRootLogin yes\nPasswordAuthentication yes\nUsePAM yes\n' > /tmp/sshd.head
+    cat /mnt/etc/ssh/sshd_config >> /tmp/sshd.head
+    cat /tmp/sshd.head > /mnt/etc/ssh/sshd_config
+    rm -f /tmp/sshd.head
+    chmod 644 /mnt/etc/ssh/sshd_config
+else
+    mkdir -p /mnt/etc/ssh
+    printf 'PermitRootLogin yes\nPasswordAuthentication yes\nUsePAM yes\n' > /mnt/etc/ssh/sshd_config
+    chmod 644 /mnt/etc/ssh/sshd_config
+fi
+mkdir -p /mnt/etc/ssh/sshd_config.d
+cat > /mnt/etc/ssh/sshd_config.d/99-invfs.conf <<'EOF_SSH'
+PermitRootLogin yes
+PasswordAuthentication yes
+UsePAM yes
+UseDNS no
+EOF_SSH
+chmod 644 /mnt/etc/ssh/sshd_config.d/99-invfs.conf
+
+for kt in rsa ecdsa ed25519; do
+    k="/mnt/etc/ssh/ssh_host_${kt}_key"
+    if [ ! -s "$k" ]; then
+        ssh-keygen -q -t "$kt" -N '' -f "$k" 2>/dev/null || true
+    fi
+done
+chmod 600 /mnt/etc/ssh/ssh_host_*_key 2>/dev/null || true
+chmod 644 /mnt/etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
+
+if [ ! -s /mnt/etc/fstab ]; then
+    cat > /mnt/etc/fstab <<'EOF_FSTAB'
+proc	/proc	proc	defaults	0 0
+sysfs	/sys	sysfs	defaults	0 0
+tmpfs	/tmp	tmpfs	defaults,noatime,mode=1777,size=1G	0 0
+tmpfs	/var/tmp	tmpfs	defaults,noatime,mode=1777,size=512M	0 0
+EOF_FSTAB
+fi
+rm -f /mnt/etc/nologin /mnt/var/run/nologin 2>/dev/null || true
 
 # FUSE-root boot fix: prevent runit 03-filesystems.sh remount / failure
 if [ -f /mnt/etc/runit/core-services/03-filesystems.sh ]; then
@@ -248,15 +305,16 @@ if grep -q " / fuse" /proc/mounts 2>/dev/null; then
     return 0
 fi
 EOF_FS
-        cat /tmp/fuse_guard.sh /mnt/etc/runit/core-services/03-filesystems.sh > /mnt/etc/runit/core-services/03-filesystems.sh.new
-        mv -f /mnt/etc/runit/core-services/03-filesystems.sh.new /mnt/etc/runit/core-services/03-filesystems.sh
-        rm -f /tmp/fuse_guard.sh
+        cat /tmp/fuse_guard.sh /mnt/etc/runit/core-services/03-filesystems.sh > /tmp/fuse_guard_full.sh
+        cat /tmp/fuse_guard_full.sh > /mnt/etc/runit/core-services/03-filesystems.sh
+        rm -f /tmp/fuse_guard.sh /tmp/fuse_guard_full.sh
         chmod 755 /mnt/etc/runit/core-services/03-filesystems.sh
     fi
 fi
 
-ln -sf /usr/bin/invf-fuse /mnt/sbin/mount.invfs 2>/dev/null || true
-ln -sf /usr/bin/invf-fuse /mnt/sbin/mount.fuse.invfs 2>/dev/null || true
+rm -f /mnt/sbin/mount.invfs /mnt/sbin/mount.fuse.invfs 2>/dev/null || true
+ln -s /usr/bin/invf-fuse /mnt/sbin/mount.invfs 2>/dev/null || true
+ln -s /usr/bin/invf-fuse /mnt/sbin/mount.fuse.invfs 2>/dev/null || true
 
 # ---- phase 6: clean unmount & validation ----
 say "unmounting /mnt..."
@@ -272,10 +330,14 @@ invf-fsck "$P2" || exit 1
 
 say "spot checking bit-exact reads via invf-cat..."
 mkdir -p "$B"
-for f in etc/os-release etc/passwd; do
+for f in etc/os-release etc/passwd etc/shadow etc/ssh/sshd_config; do
     invf-cat "$P2" "$f" "$B/out" || exit 1
     [ -s "$B/out" ] || { say "empty $f"; exit 1; }
 done
+invf-cat "$P2" etc/shadow "$B/out" || exit 1
+grep -q 'root:\$6\$invfs\$' "$B/out" || { say "shadow missing root hash"; exit 1; }
+invf-cat "$P2" etc/ssh/sshd_config "$B/out" || exit 1
+grep -q '^PermitRootLogin yes' "$B/out" || { say "sshd_config missing PermitRootLogin"; exit 1; }
 say "spot bit-exact OK"
 
 STATS="root=$P2 esp=$P1"
