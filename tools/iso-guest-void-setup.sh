@@ -221,9 +221,13 @@ fi
 # Hostname
 printf 'void-invfs\n' > /etc/hostname
 
+invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
+echo 'root:root' | chpasswd
+" || exit 1
+
 # FUSE-root boot fix: prevent runit 03-filesystems.sh remount / failure
-if [ -f /etc/runit/core-services/03-filesystems.sh ]; then
-    if ! grep -q '# WP64: FUSE root' /etc/runit/core-services/03-filesystems.sh; then
+if [ -f /mnt/etc/runit/core-services/03-filesystems.sh ]; then
+    if ! grep -q '# WP64: FUSE root' /mnt/etc/runit/core-services/03-filesystems.sh; then
         cat <<'EOF_FS' > /tmp/fuse_guard.sh
 # WP64: FUSE root -- mount.fuse cannot remount
 if grep -q " / fuse" /proc/mounts 2>/dev/null; then
@@ -231,18 +235,15 @@ if grep -q " / fuse" /proc/mounts 2>/dev/null; then
     return 0
 fi
 EOF_FS
-        cat /tmp/fuse_guard.sh /etc/runit/core-services/03-filesystems.sh > /tmp/03-filesystems.sh.new
-        mv -f /tmp/03-filesystems.sh.new /etc/runit/core-services/03-filesystems.sh
+        cat /tmp/fuse_guard.sh /mnt/etc/runit/core-services/03-filesystems.sh > /mnt/etc/runit/core-services/03-filesystems.sh.new
+        mv -f /mnt/etc/runit/core-services/03-filesystems.sh.new /mnt/etc/runit/core-services/03-filesystems.sh
         rm -f /tmp/fuse_guard.sh
-        chmod 755 /etc/runit/core-services/03-filesystems.sh
+        chmod 755 /mnt/etc/runit/core-services/03-filesystems.sh
     fi
 fi
 
-ln -sf /usr/bin/invf-fuse /sbin/mount.invfs 2>/dev/null || true
-ln -sf /usr/bin/invf-fuse /sbin/mount.fuse.invfs 2>/dev/null || true
-invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
-echo 'root:root' | chpasswd
-" || exit 1
+ln -sf /usr/bin/invf-fuse /mnt/sbin/mount.invfs 2>/dev/null || true
+ln -sf /usr/bin/invf-fuse /mnt/sbin/mount.fuse.invfs 2>/dev/null || true
 
 # ---- phase 6: clean unmount & validation ----
 say "unmounting /mnt..."
