@@ -2,6 +2,7 @@
 { lib
 , stdenv
 , pkg-config
+, autoPatchelfHook
 , fuse3
 , zlib
 , zstd
@@ -14,12 +15,12 @@ stdenv.mkDerivation rec {
 
   src = ../..;
 
-  nativeBuildInputs = [ pkg-config ];
+  nativeBuildInputs = [ pkg-config autoPatchelfHook ];
   buildInputs = [ fuse3 zlib zstd e2fsprogs ];
 
   buildPhase = ''
     runHook preBuild
-    make -j$NIX_BUILD_CORES
+    make -j$NIX_BUILD_CORES LDLIBS="-lzstd -lz -lpthread -ldl"
     runHook postBuild
   '';
 

@@ -942,4 +942,7 @@ jobs:
           nix-build default.nix -o result
           ls -la result/bin/invf-*
           ./result/bin/invf-mkfs -V
+          nix-build -E 'with import <nixpkgs> {}; callPackage ./packaging/nix/default.nix {}' -o result-pkg
+          ls -la result-pkg/bin/invf-*
+          ./result-pkg/bin/invf-mkfs -V
 

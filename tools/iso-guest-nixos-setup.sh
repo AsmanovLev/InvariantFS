@@ -108,15 +108,24 @@ mkfs.vfat -F32 "$P1" || mkfs.fat -F32 "$P1" || exit 1
 
 # ---- phase 2: install InvariantFS in live env ----
 say "setting up FHS binary compatibility in NixOS live environment..."
-mkdir -p /lib64 /usr/local/bin /usr/local/lib
-INTERP=$(find /nix/store -maxdepth 3 -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 || true)
+mkdir -p /lib64 /usr/lib /usr/lib64 /lib /usr/local/bin /usr/local/sbin /usr/local/lib
+INTERP=$(find /nix/store -maxdepth 4 -name "ld-linux-x86-64.so.2" 2>/dev/null | head -1 || true)
 if [ -n "$INTERP" ] && [ ! -e /lib64/ld-linux-x86-64.so.2 ]; then
     ln -sf "$INTERP" /lib64/ld-linux-x86-64.so.2 || true
     say "linked ld-linux-x86-64.so.2 -> $INTERP"
 fi
 
-# Locate core shared libraries in /nix/store to add to LD_LIBRARY_PATH
-NIX_LIB_DIRS=$(find /nix/store -maxdepth 3 -type d -name lib 2>/dev/null | tr '\n' ':')
+# Locate core shared libraries in /nix/store and symlink into /usr/lib and /lib
+for libname in libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2 libz.so.1 libzstd.so.1 libfuse3.so.3; do
+    so=$(find /nix/store -maxdepth 4 -name "$libname" 2>/dev/null | head -1 || true)
+    if [ -n "$so" ]; then
+        ln -sf "$so" "/usr/lib/$libname" 2>/dev/null || true
+        ln -sf "$so" "/lib/$libname" 2>/dev/null || true
+        ln -sf "$so" "/lib64/$libname" 2>/dev/null || true
+    fi
+done
+
+NIX_LIB_DIRS=$(find /nix/store -maxdepth 4 -type d -name lib 2>/dev/null | tr '\n' ':')
 export LD_LIBRARY_PATH="${NIX_LIB_DIRS}${LD_LIBRARY_PATH:-}"
 
 say "installing InvariantFS in live env via $SRV/sh..."
@@ -125,9 +134,12 @@ mkdir -p /tmp/invfs-sh
 cd /tmp/invfs-sh
 curl -fsSL -o sh "$SRV/sh"
 sh ./sh || exit 1
-export PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
-command -v mkfs.invfs >/dev/null 2>&1 || command -v /usr/local/bin/mkfs.invfs >/dev/null 2>&1 || { say "mkfs.invfs not found (PATH=$PATH)"; exit 1; }
-command -v mount.invfs >/dev/null 2>&1 || command -v /usr/local/bin/mount.invfs >/dev/null 2>&1 || { say "mount.invfs not found (PATH=$PATH)"; exit 1; }
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
+[ -x /usr/local/sbin/mkfs.invfs ] && ln -sf /usr/local/sbin/mkfs.invfs /usr/local/bin/mkfs.invfs 2>/dev/null || true
+[ -x /usr/local/sbin/mount.invfs ] && ln -sf /usr/local/sbin/mount.invfs /usr/local/bin/mount.invfs 2>/dev/null || true
+[ -x /usr/local/sbin/fsck.invfs ] && ln -sf /usr/local/sbin/fsck.invfs /usr/local/bin/fsck.invfs 2>/dev/null || true
+command -v mkfs.invfs >/dev/null 2>&1 || command -v /usr/local/bin/mkfs.invfs >/dev/null 2>&1 || command -v /usr/local/sbin/mkfs.invfs >/dev/null 2>&1 || { say "mkfs.invfs not found (PATH=$PATH)"; exit 1; }
+command -v mount.invfs >/dev/null 2>&1 || command -v /usr/local/bin/mount.invfs >/dev/null 2>&1 || command -v /usr/local/sbin/mount.invfs >/dev/null 2>&1 || { say "mount.invfs not found (PATH=$PATH)"; exit 1; }
 say "InvariantFS installed in live env"
 
 # ---- phase 3: format root & mount ----

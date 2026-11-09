@@ -9,6 +9,7 @@ pkgs.stdenv.mkDerivation rec {
 
   nativeBuildInputs = with pkgs; [
     pkg-config
+    autoPatchelfHook
   ];
 
   buildInputs = with pkgs; [
@@ -20,7 +21,7 @@ pkgs.stdenv.mkDerivation rec {
 
   buildPhase = ''
     runHook preBuild
-    make -j$NIX_BUILD_CORES
+    make -j$NIX_BUILD_CORES LDLIBS="-lzstd -lz -lpthread -ldl"
     runHook postBuild
   '';
 
