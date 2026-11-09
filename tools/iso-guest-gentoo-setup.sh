@@ -149,6 +149,48 @@ say "staging kernel and initramfs into /mnt/gentoo/boot..."
 fetch "$SRV/vmlinuz" "/mnt/gentoo/boot/vmlinuz" || cp -f /boot/gentoo* /mnt/gentoo/boot/vmlinuz 2>/dev/null || true
 fetch "$SRV/initramfs.cpio.gz" "/mnt/gentoo/boot/initramfs.img" || true
 
+if [ -f /mnt/gentoo/boot/initramfs.img ]; then
+    say "injecting host-matching kernel modules into initramfs.img..."
+    fetch "$SRV/busybox" /tmp/busybox 2>/dev/null && chmod +x /tmp/busybox || true
+    CPIO_BIN="cpio"
+    if [ -x /tmp/busybox ]; then
+        CPIO_BIN="/tmp/busybox cpio"
+    elif command -v cpio >/dev/null 2>&1; then
+        CPIO_BIN="cpio"
+    elif command -v busybox >/dev/null 2>&1; then
+        CPIO_BIN="busybox cpio"
+    fi
+    TMOD=$(mktemp -d /tmp/initrd-inject.XXXXXX)
+    (
+        cd "$TMOD"
+        gzip -dc /mnt/gentoo/boot/initramfs.img | $CPIO_BIN -idm 2>/dev/null
+        FUSE_SRC=$(find /lib/modules/$(uname -r) -name "fuse.ko*" 2>/dev/null | head -1)
+        if [ -n "$FUSE_SRC" ]; then
+            case "$FUSE_SRC" in
+                *.xz)   xz -dc "$FUSE_SRC" > fuse.ko ;;
+                *.zst)  zstd -dc "$FUSE_SRC" > fuse.ko ;;
+                *.gz)   gzip -dc "$FUSE_SRC" > fuse.ko ;;
+                *)      cp -f "$FUSE_SRC" fuse.ko ;;
+            esac
+            say "injected fuse.ko ($(uname -r)) into initramfs"
+        fi
+        for mod in virtio_blk virtio_pci virtio_net failover net_failover; do
+            MSRC=$(find /lib/modules/$(uname -r) -name "$mod.ko*" 2>/dev/null | head -1)
+            if [ -n "$MSRC" ]; then
+                mkdir -p lib/modules
+                case "$MSRC" in
+                    *.xz)  xz -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *.zst) zstd -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *.gz)  gzip -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *)     cp -f "$MSRC" "lib/modules/$mod.ko" ;;
+                esac
+            fi
+        done
+        find . | $CPIO_BIN -o -H newc 2>/dev/null | gzip -9 > /mnt/gentoo/boot/initramfs.img
+    )
+    rm -rf "$TMOD"
+fi
+
 if [ -d "/lib/modules/$(uname -r)" ]; then
     mkdir -p /mnt/gentoo/lib/modules
     cp -a "/lib/modules/$(uname -r)" /mnt/gentoo/lib/modules/ 2>/dev/null || true

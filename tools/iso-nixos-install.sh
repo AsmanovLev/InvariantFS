@@ -90,6 +90,9 @@ if [ ! -f "$REPO/vm/initramfs.cpio.gz" ]; then
     bash "$REPO/tools/mkinitramfs.sh" || fail "failed to build initramfs"
 fi
 cp "$REPO/vm/initramfs.cpio.gz" "$SERVEDIR/initramfs.cpio.gz"
+if [ -f "$REPO/bin/busybox-static" ]; then
+    cp "$REPO/bin/busybox-static" "$SERVEDIR/busybox"
+fi
 if command -v grub-mkimage >/dev/null 2>&1; then
     grub-mkimage -O x86_64-efi -o "$SERVEDIR/BOOTX64.EFI" -p /boot/grub \
         fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null || true

@@ -38,11 +38,14 @@ sleep 1
 # kernel in use. Without this, invf-fuse fails with "fuse: device not
 # found" and we drop to a shell after the 120s wait below. The NIC modules
 # let the guest reach the network after chroot.
-if [ ! -e /dev/fuse ]; then
-    busybox insmod /fuse.ko 2>/dev/null || true
-    [ -e /dev/fuse ] || busybox mknod /dev/fuse c 10 229 2>/dev/null || true
-    [ -e /dev/fuse ] && chmod 666 /dev/fuse 2>/dev/null
+if [ -f /fuse.ko ]; then
+    busybox insmod /fuse.ko 2>/dev/null || insmod /fuse.ko 2>/dev/null || true
 fi
+for m in /lib/modules/fuse.ko /modules/fuse.ko; do
+    [ -f "$m" ] && busybox insmod "$m" 2>/dev/null || true
+done
+[ -e /dev/fuse ] || busybox mknod /dev/fuse c 10 229 2>/dev/null || true
+[ -e /dev/fuse ] && chmod 666 /dev/fuse 2>/dev/null
 # virtio_blk FIRST, then the NIC. It is not a nicety: on a distro kernel
 # CONFIG_VIRTIO_BLK=m, so a virtio-attached volume does not exist as a block
 # device until this loads, and the probe below then reports "no InvariantFS

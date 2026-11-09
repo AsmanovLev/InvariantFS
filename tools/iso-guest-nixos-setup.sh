@@ -232,6 +232,47 @@ fi
 
 if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; then
     say "staged universal InvariantFS initramfs -> /mnt/boot/initramfs.img"
+    say "injecting host-matching kernel modules into /mnt/boot/initramfs.img..."
+    curl -fsSL "$SRV/busybox" -o /tmp/busybox 2>/dev/null && chmod +x /tmp/busybox || true
+    CPIO_BIN="cpio"
+    if [ -x /tmp/busybox ]; then
+        CPIO_BIN="/tmp/busybox cpio"
+    elif command -v cpio >/dev/null 2>&1; then
+        CPIO_BIN="cpio"
+    elif command -v busybox >/dev/null 2>&1; then
+        CPIO_BIN="busybox cpio"
+    fi
+    TMOD=$(mktemp -d /tmp/initrd-inject.XXXXXX)
+    (
+        cd "$TMOD"
+        gzip -dc /mnt/boot/initramfs.img | $CPIO_BIN -idm 2>/dev/null
+        FUSE_SRC=$(find /mnt/nix/store -name "fuse.ko*" 2>/dev/null | head -1)
+        [ -n "$FUSE_SRC" ] || FUSE_SRC=$(find /lib/modules -name "fuse.ko*" 2>/dev/null | head -1)
+        if [ -n "$FUSE_SRC" ]; then
+            case "$FUSE_SRC" in
+                *.xz)   xz -dc "$FUSE_SRC" > fuse.ko ;;
+                *.zst)  zstd -dc "$FUSE_SRC" > fuse.ko ;;
+                *.gz)   gzip -dc "$FUSE_SRC" > fuse.ko ;;
+                *)      cp -f "$FUSE_SRC" fuse.ko ;;
+            esac
+            say "injected fuse.ko into initramfs ($FUSE_SRC)"
+        fi
+        for mod in virtio_blk virtio_pci virtio_net failover net_failover; do
+            MSRC=$(find /mnt/nix/store -name "$mod.ko*" 2>/dev/null | head -1)
+            [ -n "$MSRC" ] || MSRC=$(find /lib/modules -name "$mod.ko*" 2>/dev/null | head -1)
+            if [ -n "$MSRC" ]; then
+                mkdir -p lib/modules
+                case "$MSRC" in
+                    *.xz)  xz -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *.zst) zstd -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *.gz)  gzip -dc "$MSRC" > "lib/modules/$mod.ko" ;;
+                    *)     cp -f "$MSRC" "lib/modules/$mod.ko" ;;
+                esac
+            fi
+        done
+        find . | $CPIO_BIN -o -H newc 2>/dev/null | gzip -9 > /mnt/boot/initramfs.img
+    )
+    rm -rf "$TMOD"
 fi
 
 # Ensure /mnt/sbin/init points to /init or NixOS system profile init
