@@ -124,10 +124,9 @@ rm -f "$SPIPE.in" "$SPIPE.out" "$SER"
 mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
 : > "$SER"
 
-# Real-time streaming reader: logs every line to console with timestamp
-cat "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+# Real-time streaming reader: unbuffered tee to $SER and line logger to console
+tee -a "$SER" < "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
     printf '[guest %s] %s\n' "$(date +%T)" "$line"
-    printf '%s\n' "$line" >> "$SER"
 done &
 READER_PID=$!
 
@@ -175,9 +174,19 @@ serial_wait_match() {
 
 # 5. Responsive triggers
 note "waiting for boot / login trigger..."
-serial_wait_match "login:|alpine-invfs:[~#]" "$TIMEOUT_SEC" || fail "login prompt or shell never appeared (see $SER)"
+serial_wait_match "login:|alpine-invfs:[~#]|Welcome to Alpine Linux" "$TIMEOUT_SEC" || fail "login prompt or shell never appeared (see $SER)"
 note "console trigger detected; sending commands"
-# If it's a login prompt, send root login; if it's already autologged in as root shell, an enter or root is harmless
+
+# If we matched on "Welcome to Alpine Linux" but getty's "login:" hasn't rendered yet, give it up to 10s
+if ! grep -q -a -E "login:|alpine-invfs:[~#]" "$SER" 2>/dev/null; then
+    serial_wait_match "login:|alpine-invfs:[~#]" 10 || true
+fi
+
+# Send newline to wake getty/prompt
+serial_send ""
+sleep 0.5
+
+# If it's a login prompt, send root login
 if grep -q -a "login:" "$SER" 2>/dev/null; then
     serial_send "root"
     sleep 1
