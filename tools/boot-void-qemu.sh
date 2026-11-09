@@ -99,7 +99,15 @@ SHADOW="$WORK/shadow-$MODE.img"
 SERIAL="$LOGDIR/serial-$MODE.log"
 TARBALL="${INVFS_VOID_TARBALL:-}"
 
-fail() { echo "FAIL: $*" >&2; [ -f "$SERIAL" ] && { echo "--- serial tail ---" >&2; tail -40 "$SERIAL" >&2; }; exit 1; }
+fail() {
+    echo "FAIL: $*" >&2
+    if [ -f "$LOGDIR/ssh-probe-$MODE.log" ]; then
+        echo "--- ssh-probe log tail ---" >&2
+        tail -n 25 "$LOGDIR/ssh-probe-$MODE.log" >&2
+    fi
+    [ -f "$SERIAL" ] && { echo "--- serial tail ---" >&2; tail -40 "$SERIAL" >&2; }
+    exit 1
+}
 note() { echo "== $* =="; }
 
 for t in invf-mkfs invf-import invf-cat invf-ls invf-fsck; do
@@ -307,7 +315,11 @@ note "waiting for sshd (hostfwd tcp::$PORT -> :22)"
 SSH_TIMEOUT="${INVFS_VOID_SSH_TIMEOUT:-$BOOT_TIMEOUT}"
 ssh_deadline=$((SECONDS + SSH_TIMEOUT))
 until ssh_ready; do
-    [ "$SECONDS" -lt "$ssh_deadline" ] || fail "SSH not reachable within ${SSH_TIMEOUT}s"
+    [ "$SECONDS" -lt "$ssh_deadline" ] || {
+        echo "=== ssh-probe-$MODE.log (last 20 lines) ==="
+        tail -n 20 "$LOGDIR/ssh-probe-$MODE.log" 2>/dev/null || true
+        fail "SSH not reachable within ${SSH_TIMEOUT}s"
+    }
     qpid_alive || fail "QEMU exited before SSH came up"
     sleep 2
 done

@@ -205,6 +205,12 @@ ln -sfn /etc/sv/dhcpcd /etc/runit/runsvdir/default/dhcpcd
 ln -sfn /etc/sv/sshd /etc/runit/runsvdir/default/sshd
 
 # sshd configuration: allow root password login
+if [ -f /etc/ssh/sshd_config ]; then
+    sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null || true
+    grep -q '^PermitRootLogin yes' /etc/ssh/sshd_config 2>/dev/null || echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config
+    grep -q '^PasswordAuthentication yes' /etc/ssh/sshd_config 2>/dev/null || echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config
+fi
 mkdir -p /etc/ssh/sshd_config.d
 cat > /etc/ssh/sshd_config.d/99-invfs.conf <<'EOF_SSH'
 PermitRootLogin yes
@@ -216,6 +222,13 @@ chmod 644 /etc/ssh/sshd_config.d/99-invfs.conf
 # Pre-generate SSH host keys if ssh-keygen exists
 if command -v ssh-keygen >/dev/null 2>&1; then
     ssh-keygen -A 2>/dev/null || true
+    for kt in rsa ecdsa ed25519; do
+        k=\"/etc/ssh/ssh_host_\${kt}_key\"
+        [ -s \"\$k\" ] && continue
+        ssh-keygen -q -t \"\$kt\" -N '' -f \"\$k\" 2>/dev/null || true
+    done
+    chmod 600 /etc/ssh/ssh_host_*_key 2>/dev/null || true
+    chmod 644 /etc/ssh/ssh_host_*_key.pub 2>/dev/null || true
 fi
 
 # Hostname

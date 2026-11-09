@@ -69,7 +69,37 @@ for name, target in (("agetty-ttyS0", "/etc/sv/agetty-ttyS0"),
 PYEOF
 
 # --- sshd: root login, password auth --------------------------------------
-# Void's sshd_config ends with `Include /etc/ssh/sshd_config.d/*.conf`.
+# Void's sshd_config may or may not include sshd_config.d; configure both.
+if [ -f "$E/ssh/sshd_config" ]; then
+    python3 - "$E/ssh/sshd_config" <<'PYEOF'
+import sys
+p = sys.argv[1]
+try:
+    with open(p, "r", encoding="utf-8", errors="surrogateescape") as f:
+        lines = f.readlines()
+except FileNotFoundError:
+    lines = []
+out = []
+seen_root = False
+seen_pass = False
+for line in lines:
+    s = line.strip()
+    if s.startswith("PermitRootLogin") or s.startswith("#PermitRootLogin"):
+        out.append("PermitRootLogin yes\n")
+        seen_root = True
+    elif s.startswith("PasswordAuthentication") or s.startswith("#PasswordAuthentication"):
+        out.append("PasswordAuthentication yes\n")
+        seen_pass = True
+    else:
+        out.append(line)
+if not seen_root:
+    out.append("PermitRootLogin yes\n")
+if not seen_pass:
+    out.append("PasswordAuthentication yes\n")
+with open(p, "w", encoding="utf-8", errors="surrogateescape") as f:
+    f.writelines(out)
+PYEOF
+fi
 mkdir -p "$E/ssh/sshd_config.d"
 cat > "$E/ssh/sshd_config.d/99-invfs.conf" <<'EOF'
 PermitRootLogin yes

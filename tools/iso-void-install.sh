@@ -256,7 +256,7 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
     fi
     if [ -x "$REPO/tools/boot-void-qemu.sh" ]; then
         note "verifying post-install UEFI boot via boot-void-qemu.sh --bootloader"
-        bash "$REPO/tools/boot-void-qemu.sh" --bootloader "$VOL" || fail "UEFI boot verification failed"
+        INVFS_VOID_LOGDIR="$WORK" bash "$REPO/tools/boot-void-qemu.sh" --bootloader "$VOL" || fail "UEFI boot verification failed"
     fi
     exit 0
 else
