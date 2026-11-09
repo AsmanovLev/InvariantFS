@@ -77,7 +77,7 @@ jobs:
           FULL=0; ENGINE=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0; ALP=0
           BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
           BALP=0; IALP=0
-          force_full() { FULL=1; ENGINE=1; DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1; }
+          force_full() { FULL=1; ENGINE=1; DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; NIX=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1; INIX=1; }
           # Temporarily force full run for all jobs:
           force_full
           # Outputs are the literal strings true/false: the job ifs
@@ -88,13 +88,14 @@ jobs:
             echo "full=$(t "$FULL")"; echo "engine=$(t "$ENGINE")"
             echo "deb=$(t "$DEB")"; echo "rpm=$(t "$RPM")"
             echo "arch=$(t "$ARCH")"; echo "gentoo=$(t "$GEN")"; echo "void=$(t "$VOID")"
-            echo "alpine_pkg=$(t "$ALP")"
+            echo "alpine_pkg=$(t "$ALP")"; echo "nix_pkg=$(t "$NIX")"
             echo "boot_arch=$(t "$BA")"; echo "boot_void=$(t "$BV")"
             echo "boot_debian=$(t "$BD")"; echo "boot_fedora=$(t "$BF")"
             echo "iso_arch=$(t "$IA")"; echo "iso_void=$(t "$IV")"; echo "iso_gentoo=$(t "$IG")"
             echo "boot_alpine=$(t "$BALP")"; echo "iso_alpine=$(t "$IALP")"
+            echo "iso_nixos=$(t "$INIX")"
           } >> "$GITHUB_OUTPUT"
-          echo "scope: full=$FULL engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID alpine_pkg=$ALP alpine_boot=$BALP/$IALP"
+          echo "scope: full=$FULL engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID alpine_pkg=$ALP nix_pkg=$NIX"
 
   # Load-bearing docs gate (AGENTS.md §1.8): broken doc links or man-page
   # syntax fail the build here in under a minute, on every push.
@@ -628,6 +629,42 @@ jobs:
             ${{ runner.temp }}/iso-alpine/boot-test/*
           if-no-files-found: warn
 
+  # Stock-NixOS-minimal-ISO install onto InvariantFS.
+  installation-iso-nixos:
+    needs: [scope, packaging-nix]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_nixos == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config \
+            libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
+            python3 qemu-system-x86 qemu-utils e2fsprogs grub-efi-amd64-bin
+
+      - name: build
+        run: make -j"$(nproc)"
+
+      - name: nixos ISO install onto InvFS
+        run: |
+          WORK="$RUNNER_TEMP/iso-nixos" bash tools/iso-nixos-install.sh
+
+      - name: upload install evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iso-nixos-install-logs
+          path: |
+            ${{ runner.temp }}/iso-nixos/serial.log
+            ${{ runner.temp }}/iso-nixos/serve.log
+            ${{ runner.temp }}/iso-nixos/qemu.log
+          if-no-files-found: warn
+
   # Debian, natively: the same dpkg-buildpackage the matrix runs, but on
   # the real Debian toolchain instead of Ubuntu's. Full suite (foreign
   # legs skip, staged legs run, debian leg native).
@@ -884,3 +921,25 @@ jobs:
           path: |
             pkg-apk/invfs-*.apk
           if-no-files-found: ignore
+
+  # Nix package build: verifies default.nix builds cleanly via nix-build
+  packaging-nix:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [scope]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.nix_pkg == 'true'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: cachix/install-nix-action@v27
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: build via nix-build
+        run: |
+          nix-build default.nix -o result
+          ls -la result/bin/invf-*
+          ./result/bin/invf-mkfs -V
+

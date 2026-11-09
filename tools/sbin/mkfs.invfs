@@ -21,7 +21,11 @@ find_tool() {
         done
         IFS=$_ifs
     fi
-    _selfdir=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+    case "$0" in
+        */*) _selfdir="${0%/*}" ;;
+        *)   _selfdir="." ;;
+    esac
+    _selfdir=$(CDPATH= cd -- "$_selfdir" 2>/dev/null && pwd || echo "$_selfdir")
     for _d in "$_selfdir/../../bin" "$_selfdir/../bin"; do
         [ -x "$_d/$_t" ] && { printf '%s\n' "$_d/$_t"; return 0; }
     done

@@ -52,7 +52,7 @@ fi
 ( cd "$WORK" && echo "$ISO_SHA256" | sha256sum -c - ) || fail "ISO checksum mismatch"
 note "ISO verified against pinned sha256"
 
-note "extracting kernel+initramfs from the ISO"
+note "extracting kernel+initramfs and boot parameters from the ISO"
 mkdir -p "$MNT"
 sudo mount -o loop,ro "$ISO" "$MNT" || fail "loop-mount failed"
 # In NixOS minimal ISO, kernel is boot/bzImage or isolinux/bzImage, initrd is boot/initrd or isolinux/initrd
@@ -70,6 +70,10 @@ else
     sudo cp "$K" "$WORK/vmlinuz-nixos"
     sudo cp "$I" "$WORK/initrd-nixos"
 fi
+
+# Extract init= parameter from the ISO's grub/isolinux config
+NIXOS_INIT=$(grep -Eho 'init=[^ "]+' "$MNT"/boot/grub/grub.cfg "$MNT"/isolinux/*.cfg "$MNT"/loader/entries/*.conf 2>/dev/null | head -1 || true)
+note "NixOS live init param: ${NIXOS_INIT:-none}"
 sudo umount "$MNT"
 sudo chown "$(id -u):$(id -g)" "$WORK/vmlinuz-nixos" "$WORK/initrd-nixos"
 
@@ -109,7 +113,7 @@ elif command -v wget >/dev/null 2>&1; then
     wget -q -O "$ART" "$SRV/$ART"
 fi
 grep "[[:space:]*]$ART\$" SHA256SUMS | sha256sum -c -
-sh bootstrap.sh --file "$ART" --yes --prefix /usr
+sh bootstrap.sh --file "$ART" --yes --prefix /usr/local
 SH_EOF
 chmod 755 "$SERVEDIR/sh"
 
@@ -145,7 +149,7 @@ QLOG="$WORK/qemu.log"
 note "starting qemu (accel=$ACCEL, stock NixOS minimal kernel+initrd)"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
   -kernel "$WORK/vmlinuz-nixos" -initrd "$WORK/initrd-nixos" \
-  -append "quiet console=ttyS0,115200 nixossearch invfsvol=/dev/vda" \
+  -append "${NIXOS_INIT} console=ttyS0,115200 invfsvol=/dev/vda" \
   -cdrom "$ISO" \
   -drive "file=$VOL,format=raw,if=virtio" \
   -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
