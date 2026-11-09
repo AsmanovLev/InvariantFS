@@ -218,16 +218,16 @@ if [ -f /etc/shadow ]; then
     rm -f /etc/shadow.tmp
 fi
 
-# Ensure generic symlinks exist on /boot
+# Ensure generic symlinks or copies exist on /boot
 if [ -f /boot/vmlinuz-virt ] && [ ! -e /boot/vmlinuz ]; then
-    ln -sf vmlinuz-virt /boot/vmlinuz || true
+    ln -sf vmlinuz-virt /boot/vmlinuz 2>/dev/null || cp -f /boot/vmlinuz-virt /boot/vmlinuz 2>/dev/null || true
 fi
 if [ -f /boot/initramfs-virt ] && [ ! -e /boot/initramfs.img ]; then
-    ln -sf initramfs-virt /boot/initramfs.img || true
+    ln -sf initramfs-virt /boot/initramfs.img 2>/dev/null || cp -f /boot/initramfs-virt /boot/initramfs.img 2>/dev/null || true
 fi
 
 # Configure mkinitfs with InvariantFS support
-say \"configuring mkinitfs for InvariantFS root...\"
+echo \"configuring mkinitfs for InvariantFS root...\"
 mkdir -p /etc/mkinitfs/features.d
 cat > /etc/mkinitfs/features.d/invfs.modules << 'M_EOF'
 kernel/fs/fuse/*

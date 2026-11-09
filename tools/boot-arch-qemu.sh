@@ -162,6 +162,9 @@ if [ "$ACCEL" = auto ]; then
     else ACCEL=tcg; echo "note: /dev/kvm not usable here; falling back to TCG (slower)"; fi
 fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+if [ "$ACCEL" = tcg ] && [ -z "${ARCH_TIMEOUT:-}" ]; then
+    TIMEOUT=900
+fi
 if [ "$BOOTLOADER" = 1 ]; then
     # --bootloader: OVMF + GRUB reading the ESP from the GPT disk image.
     # The disk image has p1=ESP(FAT32) with GRUB+kernel+initramfs,
@@ -172,7 +175,6 @@ if [ "$BOOTLOADER" = 1 ]; then
         -machine q35,accel=$ACCEL -cpu "$CPU" -m "$RAM" -smp 2
         -drive "if=pflash,format=raw,readonly=on,file=$OVMF"
         -drive "id=root,file=$DISK_IMG,format=raw,if=virtio"
-        -append "console=ttyS0,115200"
         -netdev user,id=net0,hostfwd=tcp::${PORT}-:22
         -device virtio-net-pci,netdev=net0
         # virtio-rng: guests without it stall saving the RNG seed at shutdown
@@ -205,20 +207,17 @@ else
     )
 fi
 
-KERNEL="$(readable_kernel "$KERNEL")" || exit 1
-# QEMU_ARGS was built ABOVE, and `QEMU_ARGS=( ... -kernel "$KERNEL" ... )`
-# expands $KERNEL INTO THE ARRAY at that moment. Reassigning KERNEL here
-# changes nothing, so QEMU was handed the original root-only
-# /boot/vmlinuz-$(uname -r) that runners ship, failed to read it, and exited
-# in about a second with an empty serial log and five assertions and no cause.
-#
-# e190ca0 fixed the -r/-e half of this and missed the array half. Void has
-# always been right: it substitutes into the array after building it. Done the
-# same way here rather than relying on ordering, so the two harnesses cannot
-# drift apart in this way again.
-for _i in "${!QEMU_ARGS[@]}"; do
-    [ "${QEMU_ARGS[$_i]}" = "-kernel" ] && QEMU_ARGS[$((_i + 1))]="$KERNEL"
-done
+if [ "$BOOTLOADER" = 0 ]; then
+    KERNEL="$(readable_kernel "$KERNEL")" || exit 1
+    # QEMU_ARGS was built ABOVE, and `QEMU_ARGS=( ... -kernel "$KERNEL" ... )`
+    # expands $KERNEL INTO THE ARRAY at that moment. Reassigning KERNEL here
+    # changes nothing, so QEMU was handed the original root-only
+    # /boot/vmlinuz-$(uname -r) that runners ship, failed to read it, and exited
+    # in about a second with an empty serial log and five assertions and no cause.
+    for _i in "${!QEMU_ARGS[@]}"; do
+        [ "${QEMU_ARGS[$_i]}" = "-kernel" ] && QEMU_ARGS[$((_i + 1))]="$KERNEL"
+    done
+fi
 # QEMU's stderr is KEPT. It used to go to /dev/null, which is why an Arch boot
 # that died in under a second produced a 0-byte serial log and five assertions
 # with no reason anywhere: the one stream that said why was the one being
@@ -230,7 +229,11 @@ QERR="$(mktemp -t invfs-arch-qemu-err.XXXXXX)"
 # this answers: wrong qemu, unreadable inputs, no memory.
 qemu-system-x86_64 --version 2>&1 | head -1
 free -m | head -2
-ls -la "$KERNEL" "$INITRD" "$IMG" 2>&1
+if [ "$BOOTLOADER" = 1 ]; then
+    ls -la "$OVMF" "$DISK_IMG" 2>&1
+else
+    ls -la "$KERNEL" "$INITRD" "$IMG" 2>&1
+fi
 qemu-system-x86_64 "${QEMU_ARGS[@]}" 2>"$QERR" &
 QPID=$!
 cleanup() {
@@ -270,7 +273,7 @@ wait_marker() {  # $1 = regex, $2 = human label
 }
 
 note "waiting for serial markers"
-wait_marker "InvariantFS mounted:" "invf-fuse mounted" || fail "no mount marker"
+wait_marker "(InvariantFS mounted:|invfs: root fs mounted)" "invf-fuse mounted" || fail "no mount marker"
 wait_marker "(Chrooting to InvFS root|invfs: chroot hand-off|Reached target System Initialization)" "chroot to InvFS root" || fail "no chroot marker"
 
 if [ "$BOOTLOADER" = 0 ]; then

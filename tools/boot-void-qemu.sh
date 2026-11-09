@@ -223,6 +223,9 @@ if [ "$ACCEL" = auto ]; then
     fi
 fi
 [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+if [ "$ACCEL" = tcg ] && [ -z "${INVFS_VOID_BOOT_TIMEOUT:-}" ]; then
+    BOOT_TIMEOUT=900
+fi
 
 if [ "$BOOTLOADER" = 1 ]; then
     note "booting via OVMF+GRUB from disk: $DISK_IMG (accel=$ACCEL, memory=${MEM}MB, port=$PORT)"
