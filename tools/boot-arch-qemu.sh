@@ -100,7 +100,7 @@ if [ "$BOOTLOADER" = 1 ]; then
     fi
     [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
     if [ "$ACCEL" = tcg ] && [ -z "${ARCH_TIMEOUT:-}" ]; then
-        TIMEOUT_SEC=600
+        TIMEOUT_SEC=900
     fi
 
     SPIPE="$WORK/serial.pipe"

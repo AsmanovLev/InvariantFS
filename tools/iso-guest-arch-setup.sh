@@ -140,7 +140,7 @@ sed -i 's/^HOOKS=.*/HOOKS=(base udev autodetect modconf kms keyboard keymap cons
 mkinitcpio -P
 
 say "running invf-boot-setup on /boot (ESP) for $P2..."
-invf-boot-setup --esp /boot --root "$P2" --cmdline "console=ttyS0,115200"
+invf-boot-setup --esp /boot --root "$P2" --cmdline "console=ttyS0,115200 hung_task_panic=0 hung_task_timeout_secs=0 systemd.udev.event-timeout=30"
 
 echo "root:root" | chpasswd
 mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
@@ -149,6 +149,7 @@ cat << 'EOF_GETTY' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.
 ExecStart=
 ExecStart=-/usr/bin/agetty --autologin root --noclear %I $TERM
 EOF_GETTY
+systemctl mask systemd-udev-settle.service 2>/dev/null || true
 systemctl enable sshd 2>/dev/null || true
 systemctl enable dhcpcd 2>/dev/null || true
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true
