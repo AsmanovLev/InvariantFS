@@ -146,9 +146,9 @@ say "InvariantFS installed in live env"
 say "formatting root $P2 with mkfs.invfs..."
 mkfs.invfs "$P2" || exit 1
 
-say "mounting root on /mnt (allow_other)..."
+say "mounting root on /mnt (allow_other,survive_term)..."
 mkdir -p /mnt
-mount.invfs -o allow_other "$P2" /mnt || exit 1
+mount.invfs -o allow_other,survive_term "$P2" /mnt || exit 1
 mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
 
@@ -212,8 +212,11 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
 }
 EOF
 
-    say "stopping systemd nix-daemon..."
+    say "stopping systemd nix-daemon and systemd-oomd..."
+    echo 0 > /proc/sys/kernel/hung_task_timeout_secs 2>/dev/null || true
     systemctl stop nix-daemon.socket nix-daemon.service 2>/dev/null || true
+    systemctl stop systemd-oomd.service systemd-oomd.socket 2>/dev/null || true
+    systemctl mask systemd-oomd.service systemd-oomd.socket 2>/dev/null || true
     pkill -9 -f nix-daemon 2>/dev/null || true
     sleep 1
 
@@ -226,8 +229,8 @@ build-users-group =
 trusted-users = * root
 substituters = https://cache.nixos.org
 connect-timeout = 5
-max-jobs = 2
-cores = 2
+max-jobs = 1
+cores = 1
 EOF_NIX
     mkdir -p /root/.config/nix
     cp -f /etc/nix/nix.conf /root/.config/nix/nix.conf 2>/dev/null || true
@@ -248,8 +251,8 @@ trusted-users = * root"
         --option build-users-group "" \
         --option sandbox false \
         --option connect-timeout 5 \
-        --option max-jobs 2 \
-        --option cores 2 || exit 1
+        --option max-jobs 1 \
+        --option cores 1 || exit 1
 
     kill "$DAEMON_PID" 2>/dev/null || true
 else
