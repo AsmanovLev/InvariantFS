@@ -47,7 +47,7 @@ sleep 1
 # Download ISO
 if [ ! -f "$ISO" ]; then
     note "downloading $ISO_URL"
-    curl -fsSL -o "$ISO" "$ISO_URL" || fail "ISO download failed"
+    curl -fsSL --retry 5 --retry-delay 2 --retry-connrefused -o "$ISO" "$ISO_URL" || fail "ISO download failed"
 fi
 ( cd "$WORK" && echo "$ISO_SHA256" | sha256sum -c - ) || fail "ISO checksum mismatch"
 note "ISO verified against pinned sha256"
