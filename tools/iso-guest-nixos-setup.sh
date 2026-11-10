@@ -196,7 +196,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
   networking.firewall.enable = false;
-  boot.initrd.enable = false;
+  boot.initrd.supportedFilesystems = [ "vfat" ];
   boot.initrd.checkJournalingFS = false;
 
   users.users.root.initialPassword = "root";
@@ -212,6 +212,8 @@ EOF
 sandbox = false
 build-users-group =
 trusted-users = * root
+substituters = https://cache.nixos.org
+connect-timeout = 5
 max-jobs = 2
 cores = 2
 EOF_NIX
@@ -228,9 +230,9 @@ trusted-users = * root"
 
     say "running nixos-install (no-root-passwd)..."
     nixos-install --no-root-passwd --no-channel-copy \
-        --option substituters "" \
         --option build-users-group "" \
         --option sandbox false \
+        --option connect-timeout 5 \
         --option max-jobs 2 \
         --option cores 2 || exit 1
 else
