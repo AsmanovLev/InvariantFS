@@ -189,6 +189,11 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   xdg.icons.enable = false;
 
   networking.hostName = "nixos-invfs";
+  security.audit.enable = false;
+  networking.useDHCP = false;
+  networking.dhcpcd.enable = false;
+  networking.firewall.enable = false;
+  boot.initrd.checkJournalingFS = false;
 
   users.users.root.initialPassword = "root";
 
@@ -196,7 +201,31 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
 }
 EOF
 
-    ( while true; do chmod 1777 /mnt/tmp* 2>/dev/null || true; sleep 0.2; done ) &
+    say "configuring nix-daemon with writable /etc/nix tmpfs..."
+    mkdir -p /etc/nix
+    mount -t tmpfs tmpfs /etc/nix 2>/dev/null || true
+    cat > /etc/nix/nix.conf <<'EOF_NIX'
+sandbox = false
+build-users-group =
+trusted-users = * root
+substituters = https://cache.nixos.org
+connect-timeout = 5
+max-jobs = 2
+cores = 2
+EOF_NIX
+    mkdir -p /root/.config/nix
+    cp -f /etc/nix/nix.conf /root/.config/nix/nix.conf 2>/dev/null || true
+    export NIX_CONFIG="sandbox = false
+build-users-group =
+trusted-users = * root"
+    systemctl restart nix-daemon 2>/dev/null || true
+    sleep 1
+
+    ( while true; do
+        chmod 1777 /mnt/tmp* 2>/dev/null || true
+        chmod -R 777 /mnt/nix/store/*.chroot 2>/dev/null || true
+        sleep 0.1
+      done ) &
     WATCH_TMP_PID=$!
 
     say "running nixos-install (no-root-passwd)..."
@@ -287,6 +316,7 @@ fi
 
 # Ensure /mnt/sbin/init points to /init or NixOS system profile init
 mkdir -p /mnt/sbin
+[ -e /mnt/init ] || [ ! -e /mnt/nix/var/nix/profiles/system/init ] || ln -sf /nix/var/nix/profiles/system/init /mnt/init 2>/dev/null || true
 [ -e /mnt/sbin/init ] || ln -sf /init /mnt/sbin/init 2>/dev/null || true
 
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
