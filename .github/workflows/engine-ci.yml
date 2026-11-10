@@ -453,8 +453,8 @@ jobs:
 
       - name: dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 qemu-system-x86 qemu-utils ovmf
 
@@ -517,8 +517,8 @@ jobs:
 
       - name: dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 qemu-system-x86 qemu-utils sshpass e2fsprogs grub-efi-amd64-bin
 
@@ -560,8 +560,8 @@ jobs:
 
       - name: dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 qemu-system-x86 qemu-utils sshpass e2fsprogs grub-efi-amd64-bin ovmf cpio
 
@@ -604,8 +604,8 @@ jobs:
 
       - name: dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 qemu-system-x86 qemu-utils e2fsprogs grub-efi-amd64-bin
 
@@ -641,8 +641,8 @@ jobs:
 
       - name: dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential pkg-config \
+          sudo apt-get update -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30
+          sudo apt-get install -y -qq -o Acquire::Retries=3 -o Acquire::http::Timeout=30 build-essential pkg-config \
             libfuse3-dev zlib1g-dev libzstd-dev zstd xz-utils curl \
             python3 qemu-system-x86 qemu-utils e2fsprogs grub-efi-amd64-bin ovmf cpio
 

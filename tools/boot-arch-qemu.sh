@@ -146,21 +146,21 @@ if [ "$BOOTLOADER" = 1 ]; then
     }
 
     echo "waiting for Arch boot / login trigger..."
-    serial_wait_match "archlinux login:|login:|# " "$TIMEOUT_SEC" || { echo "FAIL: login prompt never appeared (see $SER)" >&2; exit 1; }
+    serial_wait_match "archlinux login:|login:|root@|# |~\]#" "$TIMEOUT_SEC" || { echo "FAIL: login prompt never appeared (see $SER)" >&2; exit 1; }
 
-    if ! grep -q -a "login:" "$SER" 2>/dev/null; then
-        serial_wait_match "login:" 15 || true
+    # If login prompt is showing, perform interactive login
+    if grep -q -a -E "login:" "$SER" 2>/dev/null && ! grep -q -a -E "(root@|# |~\]#)" "$SER" 2>/dev/null; then
+        sleep 1
+        serial_send "root"
+        serial_wait_match "Password:" 15 || true
+        sleep 0.5
+        serial_send "root"
+        serial_wait_match "root@|# |~\]#" 15 || true
     fi
 
-    serial_send ""
     sleep 1
-    if grep -q -a "login:" "$SER" 2>/dev/null; then
-        serial_send "root"
-        sleep 1
-        serial_send "root"
-        sleep 1
-    fi
     serial_send ""
+    sleep 0.5
 
     echo "verifying FUSE root mount..."
     serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"

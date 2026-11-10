@@ -206,6 +206,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   boot.initrd.checkJournalingFS = false;
 
   users.users.root.initialPassword = "root";
+  services.getty.autologinUser = "root";
 
   system.stateVersion = "24.11";
 }

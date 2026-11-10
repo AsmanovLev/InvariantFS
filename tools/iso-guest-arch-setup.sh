@@ -143,6 +143,12 @@ say "running invf-boot-setup on /boot (ESP) for $P2..."
 invf-boot-setup --esp /boot --root "$P2" --cmdline "console=ttyS0,115200"
 
 echo "root:root" | chpasswd
+mkdir -p /etc/systemd/system/serial-getty@ttyS0.service.d
+cat << 'EOF_GETTY' > /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+[Service]
+ExecStart=
+ExecStart=-/usr/bin/agetty --autologin root --noclear %I $TERM
+EOF_GETTY
 systemctl enable sshd 2>/dev/null || true
 systemctl enable dhcpcd 2>/dev/null || true
 sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null || true

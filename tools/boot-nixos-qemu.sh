@@ -111,22 +111,22 @@ serial_wait_match() {
 }
 
 note "waiting for NixOS boot / login trigger..."
-serial_wait_match "nixos login:|login:|<<< Welcome to NixOS|nixos-invfs login:" "$TIMEOUT_SEC" || fail "login prompt never appeared (see $SER)"
-note "console trigger detected; sending root login"
+serial_wait_match "nixos login:|login:|<<< Welcome to NixOS|nixos-invfs login:|root@|# |nixos#" "$TIMEOUT_SEC" || fail "login prompt never appeared (see $SER)"
+note "console trigger detected"
 
-if ! grep -q -a -E "login:" "$SER" 2>/dev/null; then
-    serial_wait_match "login:" 15 || true
-fi
-
-serial_send ""
-sleep 1
-if grep -q -a "login:" "$SER" 2>/dev/null; then
-    serial_send "root"
+# If login prompt is showing, perform interactive login
+if grep -q -a -E "login:" "$SER" 2>/dev/null && ! grep -q -a -E "(root@|# |nixos#|~\]#)" "$SER" 2>/dev/null; then
     sleep 1
+    serial_send "root"
+    serial_wait_match "Password:" 15 || true
+    sleep 0.5
+    serial_send "root"
+    serial_wait_match "root@|nixos#|# |~" 15 || true
 fi
-serial_send "root"
+
 sleep 1
 serial_send ""
+sleep 0.5
 
 note "verifying FUSE root mount..."
 serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
