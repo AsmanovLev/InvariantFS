@@ -146,9 +146,10 @@ say "InvariantFS installed in live env"
 say "formatting root $P2 with mkfs.invfs..."
 mkfs.invfs "$P2" || exit 1
 
-say "mounting root on /mnt (allow_other,survive_term)..."
+say "mounting root on /mnt (allow_other,survive_term,exec,dev,suid)..."
 mkdir -p /mnt
-mount.invfs -o allow_other,survive_term "$P2" /mnt || exit 1
+mount.invfs -o allow_other,survive_term,exec,dev,suid "$P2" /mnt || exit 1
+mount -o remount,exec,dev,suid /mnt 2>/dev/null || true
 mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
 
@@ -166,7 +167,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   fileSystems."/" = {
     device = "$P2";
     fsType = "invfs";
-    options = [ "allow_other" ];
+    options = [ "allow_other" "exec" ];
     noCheck = true;
   };
 
@@ -244,8 +245,11 @@ trusted-users = * root"
     DAEMON_PID=$!
     sleep 2
 
-    mkdir -p /mnt/tmp
-    chmod 1777 /mnt/tmp 2>/dev/null || true
+    mkdir -p /mnt/tmp /mnt/var/tmp
+    mount -t tmpfs -o exec,dev,suid tmpfs /mnt/tmp 2>/dev/null || true
+    mount -t tmpfs -o exec,dev,suid tmpfs /mnt/var/tmp 2>/dev/null || true
+    chmod 1777 /mnt/tmp /mnt/var/tmp 2>/dev/null || true
+    export TMPDIR=/mnt/tmp
 
     say "running nixos-install (no-root-passwd)..."
     nixos-install --no-root-passwd --no-channel-copy --no-bootloader \
