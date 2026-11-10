@@ -69,8 +69,10 @@ else
     SSH="$SSH_BASE -i $KEY -o IdentitiesOnly=yes -o PreferredAuthentications=publickey"
 fi
 
-# -- OVMF firmware (only needed for --bootloader) ----------------------------
+# -- OVMF bootloader mode: serial console login & FUSE root verification -----
 if [ "$BOOTLOADER" = 1 ]; then
+    [ -n "$DISK_IMG" ] || { echo "FAIL: --bootloader requires a disk image argument" >&2; exit 1; }
+    [ -f "$DISK_IMG" ] || { echo "FAIL: disk image not found: $DISK_IMG" >&2; exit 1; }
     if [ -z "$OVMF" ]; then
         for p in /usr/share/OVMF/OVMF_CODE.fd \
                  /usr/share/OVMF/OVMF_CODE_4M.fd \
@@ -83,9 +85,108 @@ if [ "$BOOTLOADER" = 1 ]; then
             [ -r "$p" ] && { OVMF="$p"; break; }
         done
     fi
-    [ -n "$OVMF" ] || { echo "FAIL: OVMF firmware not found (set ARCH_OVMF)"; exit 1; }
-    [ -n "$DISK_IMG" ] || { echo "FAIL: --bootloader requires a disk image (set ARCH_DISK or pass arg)"; exit 1; }
-    [ -f "$DISK_IMG" ] || { echo "FAIL: disk image not found: $DISK_IMG"; exit 1; }
+    [ -n "$OVMF" ] || { echo "FAIL: OVMF firmware not found (set ARCH_OVMF)" >&2; exit 1; }
+
+    WORK="${ARCH_WORK:-/tmp/invfs-archboot}"
+    LOGDIR="${ARCH_LOGDIR:-$WORK}"
+    MEM="${ARCH_RAM:-2048}"
+    TIMEOUT_SEC="${ARCH_TIMEOUT:-300}"
+    ACCEL="${INVFS_ACCEL:-auto}"
+
+    mkdir -p "$WORK" "$LOGDIR"
+    if [ "$ACCEL" = auto ]; then
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then ACCEL=kvm; CPU=host
+        else ACCEL=tcg; CPU=max; echo "note: /dev/kvm unusable; TCG fallback"; fi
+    fi
+    [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
+    if [ "$ACCEL" = tcg ] && [ -z "${ARCH_TIMEOUT:-}" ]; then
+        TIMEOUT_SEC=600
+    fi
+
+    SPIPE="$WORK/serial.pipe"
+    SER="$LOGDIR/serial-bootloader.log"
+    rm -f "$SPIPE.in" "$SPIPE.out" "$SER"
+    mkfifo "$SPIPE.in" "$SPIPE.out" 2>/dev/null || true
+    : > "$SER"
+
+    tee -a "$SER" < "$SPIPE.out" | while IFS= read -r line || [ -n "$line" ]; do
+        printf '[guest %s] %s\n' "$(date +%T)" "$line"
+    done &
+    READER_PID=$!
+
+    QPID=""
+    cleanup_bootloader() {
+        [ -n "$QPID" ] && kill -KILL "$QPID" 2>/dev/null || true
+        kill -KILL "$READER_PID" 2>/dev/null || true
+        exec 9>&- 2>/dev/null || true
+    }
+    trap cleanup_bootloader EXIT
+
+    QLOG="$LOGDIR/qemu-bootloader.log"
+    echo "launching Arch QEMU via UEFI (accel=$ACCEL, mem=$MEM MB, disk=$DISK_IMG)"
+    qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
+        -drive if=pflash,format=raw,readonly=on,file="$OVMF" \
+        -drive file="$DISK_IMG",format=raw,if=virtio \
+        -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+        -serial "pipe:$SPIPE" -display none -no-reboot >"$QLOG" 2>&1 &
+    QPID=$!
+
+    exec 9>"$SPIPE.in"
+    serial_send() { printf '%s\n' "$1" >&9; }
+    serial_wait_match() {
+        local pat="$1" to="$2"
+        local start=$(date +%s)
+        while true; do
+            if grep -q -a -E "$pat" "$SER" 2>/dev/null; then return 0; fi
+            if ! kill -0 "$QPID" 2>/dev/null; then return 2; fi
+            local now=$(date +%s)
+            if [ $((now - start)) -ge "$to" ]; then return 1; fi
+            sleep 0.5
+        done
+    }
+
+    echo "waiting for Arch boot / login trigger..."
+    serial_wait_match "archlinux login:|login:|# " "$TIMEOUT_SEC" || { echo "FAIL: login prompt never appeared (see $SER)" >&2; exit 1; }
+
+    if ! grep -q -a "login:" "$SER" 2>/dev/null; then
+        serial_wait_match "login:" 15 || true
+    fi
+
+    serial_send ""
+    sleep 1
+    if grep -q -a "login:" "$SER" 2>/dev/null; then
+        serial_send "root"
+        sleep 1
+        serial_send "root"
+        sleep 1
+    fi
+    serial_send ""
+
+    echo "verifying FUSE root mount..."
+    serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
+    serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
+    serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || { echo "FAIL: root check timed out" >&2; exit 1; }
+
+    if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
+        echo "FUSE root confirmed mounted on InvariantFS!"
+    else
+        echo "FAIL: root is not InvariantFS / FUSE" >&2
+        exit 1
+    fi
+
+    echo "triggering clean shutdown..."
+    serial_send "poweroff -f"
+
+    for _ in $(seq 1 60); do
+        kill -0 "$QPID" 2>/dev/null || break
+        sleep 1
+    done
+    if kill -0 "$QPID" 2>/dev/null; then
+        kill -KILL "$QPID" 2>/dev/null || true
+    fi
+
+    echo "PASS: Arch-on-InvariantFS OVMF+GRUB boot ($DISK_IMG) -- serial + root mount ok"
+    exit 0
 fi
 
 fail() { echo "FAIL($MODE): $*"; FAILED=$((FAILED+1)); }

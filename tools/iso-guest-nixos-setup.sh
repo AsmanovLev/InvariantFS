@@ -173,6 +173,12 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   boot.loader.grub.enable = false;
   boot.kernelModules = [ "fuse" ];
 
+  nix.settings = {
+    sandbox = false;
+    build-users-group = "";
+    trusted-users = [ "root" ];
+  };
+
   # Minimal headless system: strictly avoid docs, fonts, sound, desktop bloat
   # to guarantee fast installation using only pre-cached packages from ISO.
   documentation.enable = false;
@@ -192,10 +198,10 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   xdg.icons.enable = false;
 
   networking.hostName = "nixos-invfs";
-  security.audit.enable = false;
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
   networking.firewall.enable = false;
+  boot.initrd.secrets = { };
   boot.initrd.supportedFilesystems = [ "vfat" ];
   boot.initrd.checkJournalingFS = false;
 
@@ -205,7 +211,12 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
 }
 EOF
 
-    say "configuring nix-daemon with writable /etc/nix tmpfs..."
+    say "stopping systemd nix-daemon..."
+    systemctl stop nix-daemon.socket nix-daemon.service 2>/dev/null || true
+    pkill -9 -f nix-daemon 2>/dev/null || true
+    sleep 1
+
+    say "configuring nix with sandbox disabled on /etc/nix tmpfs..."
     mkdir -p /etc/nix
     mount -t tmpfs tmpfs /etc/nix 2>/dev/null || true
     cat > /etc/nix/nix.conf <<'EOF_NIX'
@@ -222,8 +233,11 @@ EOF_NIX
     export NIX_CONFIG="sandbox = false
 build-users-group =
 trusted-users = * root"
-    systemctl restart nix-daemon 2>/dev/null || true
-    sleep 1
+
+    say "starting standalone root nix-daemon without sandbox..."
+    nix-daemon --daemon &
+    DAEMON_PID=$!
+    sleep 2
 
     mkdir -p /mnt/tmp
     chmod 1777 /mnt/tmp 2>/dev/null || true
@@ -235,6 +249,8 @@ trusted-users = * root"
         --option connect-timeout 5 \
         --option max-jobs 2 \
         --option cores 2 || exit 1
+
+    kill "$DAEMON_PID" 2>/dev/null || true
 else
     say "nixos-generate-config not present, writing minimal root structure..."
     mkdir -p /mnt/etc /mnt/usr /mnt/bin /mnt/sbin /mnt/home /mnt/root

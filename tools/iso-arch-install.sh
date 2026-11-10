@@ -172,7 +172,7 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
         kill -KILL $QPIDE 2>/dev/null
         wait $QPIDE 2>/dev/null
     fi
-    if [ -x "$REPO/tools/boot-arch-qemu.sh" ]; then
+    if [ -x "$REPO/tools/boot-arch-qemu.sh" ] || [ -f "$REPO/tools/boot-arch-qemu.sh" ]; then
         note "verifying post-install UEFI boot via boot-arch-qemu.sh --bootloader"
         bash "$REPO/tools/boot-arch-qemu.sh" --bootloader "$VOL" || fail "UEFI boot verification failed"
     fi

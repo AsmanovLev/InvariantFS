@@ -473,18 +473,10 @@ jobs:
 
       - name: installed arch BOOTS on InvariantFS
         run: |
-          set +e
-          ARCH_WORK="$RUNNER_TEMP/archboot" \
-          ARCH_LOG=/tmp/invfs-archboot.log \
-          ARCH_SSH_LOG=/tmp/invfs-archboot.ssh.log \
-            bash tools/boot-arch-qemu.sh --bootloader "$RUNNER_TEMP/iso/vol.img" \
-              2>&1 | tee "$RUNNER_TEMP/archboot.log"
-          rc=${PIPESTATUS[0]}
-          set -e
           mkdir -p "$RUNNER_TEMP/artifacts"
-          cp /tmp/invfs-archboot.log /tmp/invfs-archboot.ssh.log \
-            "$RUNNER_TEMP/artifacts/" 2>/dev/null || true
-          exit $rc
+          ARCH_WORK="$RUNNER_TEMP/archboot" \
+          ARCH_LOGDIR="$RUNNER_TEMP/artifacts" \
+            bash tools/boot-arch-qemu.sh --bootloader "$RUNNER_TEMP/iso/vol.img"
 
       # The guest serial + serve log are the only evidence when the marker
       # never comes; without them a failed run is undebuggable (the driver
