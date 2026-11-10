@@ -167,11 +167,13 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
     device = "$P2";
     fsType = "invfs";
     options = [ "allow_other" ];
+    noCheck = true;
   };
 
   boot.loader.systemd-boot.enable = false;
   boot.loader.grub.enable = false;
   boot.kernelModules = [ "fuse" ];
+  boot.initrd.enable = false;
 
   nix.settings = {
     sandbox = false;
@@ -201,9 +203,6 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
   networking.firewall.enable = false;
-  boot.initrd.secrets = { };
-  boot.initrd.supportedFilesystems = [ "vfat" ];
-  boot.initrd.checkJournalingFS = false;
 
   users.users.root.initialPassword = "root";
   services.getty.autologinUser = "root";
@@ -229,8 +228,8 @@ build-users-group =
 trusted-users = * root
 substituters = https://cache.nixos.org
 connect-timeout = 5
-max-jobs = 1
-cores = 1
+max-jobs = 2
+cores = 2
 EOF_NIX
     mkdir -p /root/.config/nix
     cp -f /etc/nix/nix.conf /root/.config/nix/nix.conf 2>/dev/null || true
@@ -247,12 +246,12 @@ trusted-users = * root"
     chmod 1777 /mnt/tmp 2>/dev/null || true
 
     say "running nixos-install (no-root-passwd)..."
-    nixos-install --no-root-passwd --no-channel-copy \
+    nixos-install --no-root-passwd --no-channel-copy --no-bootloader \
         --option build-users-group "" \
         --option sandbox false \
         --option connect-timeout 5 \
-        --option max-jobs 1 \
-        --option cores 1 || exit 1
+        --option max-jobs 2 \
+        --option cores 2 || exit 1
 
     kill "$DAEMON_PID" 2>/dev/null || true
 else
@@ -333,10 +332,14 @@ if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; t
     rm -rf "$TMOD"
 fi
 
-# Ensure /mnt/sbin/init points to /init or NixOS system profile init
+# Ensure /mnt/sbin/init and /mnt/init point to NixOS system profile init
 mkdir -p /mnt/sbin
-[ -e /mnt/init ] || [ ! -e /mnt/nix/var/nix/profiles/system/init ] || ln -sf /nix/var/nix/profiles/system/init /mnt/init 2>/dev/null || true
-[ -e /mnt/sbin/init ] || ln -sf /init /mnt/sbin/init 2>/dev/null || true
+if [ -e /mnt/nix/var/nix/profiles/system/init ]; then
+    ln -sf /nix/var/nix/profiles/system/init /mnt/init
+    ln -sf /nix/var/nix/profiles/system/init /mnt/sbin/init
+elif [ -e /mnt/init ]; then
+    ln -sf /init /mnt/sbin/init 2>/dev/null || true
+fi
 
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
 say "running invf-boot-setup on /mnt/boot (ESP)..."
