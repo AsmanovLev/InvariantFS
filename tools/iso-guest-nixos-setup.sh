@@ -180,6 +180,9 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   documentation.man.enable = false;
   documentation.info.enable = false;
   documentation.doc.enable = false;
+  environment.extraOutputsToInstall = [ ];
+  environment.defaultPackages = [ ];
+  i18n.supportedLocales = [ "en_US.UTF-8/UTF-8" ];
   fonts.fontconfig.enable = false;
   programs.command-not-found.enable = false;
   services.openssh.enable = false;
@@ -193,6 +196,7 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   networking.useDHCP = false;
   networking.dhcpcd.enable = false;
   networking.firewall.enable = false;
+  boot.initrd.enable = false;
   boot.initrd.checkJournalingFS = false;
 
   users.users.root.initialPassword = "root";
@@ -208,8 +212,6 @@ EOF
 sandbox = false
 build-users-group =
 trusted-users = * root
-substituters = https://cache.nixos.org
-connect-timeout = 5
 max-jobs = 2
 cores = 2
 EOF_NIX
@@ -221,21 +223,16 @@ trusted-users = * root"
     systemctl restart nix-daemon 2>/dev/null || true
     sleep 1
 
-    ( while true; do
-        chmod 1777 /mnt/tmp* 2>/dev/null || true
-        chmod -R 777 /mnt/nix/store/*.chroot 2>/dev/null || true
-        sleep 0.1
-      done ) &
-    WATCH_TMP_PID=$!
+    mkdir -p /mnt/tmp
+    chmod 1777 /mnt/tmp 2>/dev/null || true
 
     say "running nixos-install (no-root-passwd)..."
     nixos-install --no-root-passwd --no-channel-copy \
+        --option substituters "" \
         --option build-users-group "" \
         --option sandbox false \
-        --option connect-timeout 5 \
         --option max-jobs 2 \
         --option cores 2 || exit 1
-    kill $WATCH_TMP_PID 2>/dev/null || true
 else
     say "nixos-generate-config not present, writing minimal root structure..."
     mkdir -p /mnt/etc /mnt/usr /mnt/bin /mnt/sbin /mnt/home /mnt/root
