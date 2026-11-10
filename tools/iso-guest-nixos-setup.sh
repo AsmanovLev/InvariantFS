@@ -174,9 +174,8 @@ if command -v nixos-generate-config >/dev/null 2>&1; then
   boot.loader.grub.enable = false;
   boot.kernelModules = [ "fuse" ];
   boot.initrd.enable = false;
-  system.build.initialRamdisk = lib.mkForce ((pkgs.runCommand "dummy-initrd" { } "mkdir -p \$out; touch \$out/initrd") // {
-    initialRamdiskSecretAppender = pkgs.writeShellScript "dummy-appender" "exit 0";
-  });
+  system.build.initialRamdisk = lib.mkForce (pkgs.runCommand "dummy-initrd" { } "mkdir -p \$out; touch \$out/initrd");
+  system.build.initialRamdiskSecretAppender = lib.mkForce (pkgs.writeShellScriptBin "append-initrd-secrets" "exit 0");
 
   nix.settings = {
     sandbox = false;
