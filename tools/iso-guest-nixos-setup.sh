@@ -249,13 +249,21 @@ trusted-users = * root"
     mount -t tmpfs -o exec,dev,suid tmpfs /mnt/tmp 2>/dev/null || true
     mount -t tmpfs -o exec,dev,suid tmpfs /mnt/var/tmp 2>/dev/null || true
     chmod 1777 /mnt/tmp /mnt/var/tmp 2>/dev/null || true
-    export TMPDIR=/mnt/tmp
+    export TMPDIR=/tmp
 
-    say "running nixos-install (no-root-passwd)..."
-    nixos-install --no-root-passwd --no-channel-copy --no-bootloader \
+    say "building NixOS system toplevel in native host store..."
+    SYS_PATH=$(nix-build '<nixpkgs/nixos>' -A system -I nixos-config=/mnt/etc/nixos/configuration.nix --no-out-link \
         --option build-users-group "" \
         --option sandbox false \
-        --option connect-timeout 5 \
+        --option max-jobs 2 \
+        --option cores 2) || exit 1
+    say "system built successfully: $SYS_PATH"
+
+    export TMPDIR=/mnt/tmp
+    say "installing prebuilt system closure onto /mnt (InvariantFS)..."
+    nixos-install --system "$SYS_PATH" --no-root-passwd --no-channel-copy --no-bootloader \
+        --option build-users-group "" \
+        --option sandbox false \
         --option max-jobs 2 \
         --option cores 2 || exit 1
 
