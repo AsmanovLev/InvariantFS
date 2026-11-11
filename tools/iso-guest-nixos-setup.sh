@@ -355,14 +355,25 @@ elif [ -e /mnt/init ]; then
     ln -sf /init /mnt/sbin/init 2>/dev/null || true
 fi
 
+# Pre-populate BOOTX64.EFI from host server if available
+mkdir -p /mnt/boot/EFI/BOOT
+if [ -n "${INVFS_SERVER:-}" ]; then
+    curl -fsSL -o /mnt/boot/EFI/BOOT/BOOTX64.EFI "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
+fi
+
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
 say "running invf-boot-setup on /mnt/boot (ESP)..."
 invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 invfs.init=/init" || true
 
 # ---- phase 5: clean unmount & validation ----
-say "unmounting /mnt/boot and /mnt..."
-umount /mnt/boot || exit 1
-umount /mnt || exit 1
+say "unmounting guest filesystems..."
+sync
+umount /mnt/tmp 2>/dev/null || true
+umount /mnt/var/tmp 2>/dev/null || true
+umount /mnt/boot 2>/dev/null || true
+fuser -km /mnt 2>/dev/null || true
+sleep 1
+umount -R /mnt 2>/dev/null || umount /mnt || exit 1
 udevadm settle 2>/dev/null || sleep 2
 
 say "verifying root filesystem with invf-fsck..."

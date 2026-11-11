@@ -167,21 +167,30 @@ grub_cfg_dir="$ESP_DIR/boot/grub"
 if [ "$DRY_RUN" = 0 ]; then
     mkdir -p "$efi_boot_dir" "$efi_grub_dir" "$grub_cfg_dir"
 
+    grub_ok=0
     if command -v grub-mkimage >/dev/null 2>&1; then
         info "generating GRUB EFI binary for x86_64-efi..."
-        grub-mkimage -O x86_64-efi \
+        if grub-mkimage -O x86_64-efi \
             -o "$efi_boot_dir/BOOTX64.EFI" \
             -p /boot/grub \
-            fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv
-    elif [ -f "$efi_boot_dir/BOOTX64.EFI" ]; then
-        info "using existing $efi_boot_dir/BOOTX64.EFI"
-    elif [ -f "/usr/lib/invfs/BOOTX64.EFI" ]; then
-        info "using /usr/lib/invfs/BOOTX64.EFI"
-        cp "/usr/lib/invfs/BOOTX64.EFI" "$efi_boot_dir/BOOTX64.EFI"
-    elif [ -n "${INVFS_SERVER:-}" ]; then
-        info "fetching BOOTX64.EFI from $INVFS_SERVER..."
-        curl -fsSL -o "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || \
-        wget -q -O "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
+            fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null; then
+            grub_ok=1
+        else
+            info "grub-mkimage failed (missing efi modules?), falling back to prebuilt/server..."
+        fi
+    fi
+
+    if [ "$grub_ok" = 0 ]; then
+        if [ -f "$efi_boot_dir/BOOTX64.EFI" ]; then
+            info "using existing $efi_boot_dir/BOOTX64.EFI"
+        elif [ -f "/usr/lib/invfs/BOOTX64.EFI" ]; then
+            info "using /usr/lib/invfs/BOOTX64.EFI"
+            cp "/usr/lib/invfs/BOOTX64.EFI" "$efi_boot_dir/BOOTX64.EFI"
+        elif [ -n "${INVFS_SERVER:-}" ]; then
+            info "fetching BOOTX64.EFI from $INVFS_SERVER..."
+            curl -fsSL -o "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || \
+            wget -q -O "$efi_boot_dir/BOOTX64.EFI" "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
+        fi
     fi
 
     if [ ! -f "$efi_boot_dir/BOOTX64.EFI" ]; then
