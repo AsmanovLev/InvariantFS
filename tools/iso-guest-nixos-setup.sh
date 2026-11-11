@@ -13,6 +13,7 @@
 exec >/dev/console 2>&1
 set -u
 SRV="${SRV:-http://10.0.2.2:8004}"
+export INVFS_SERVER="$SRV"
 VOL=""
 B=/root/pkg
 say() { echo "iso-setup: $*"; }

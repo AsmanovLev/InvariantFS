@@ -1769,30 +1769,20 @@ static di_sorted *di_sorted_this(void)
 static int di_sorted_build(const struct delta_index *di, di_sorted *s)
 {
     size_t i, n = 0;
+    size_t cap = di->used ? di->used : 1;
 
-    if (s->cap < di->used) {
-        di_skey *nv = (di_skey *)realloc(s->v,
-                                         (di->used ? di->used : 1) * sizeof *nv);
+    if (s->cap < cap) {
+        di_skey *nv = (di_skey *)realloc(s->v, cap * sizeof *nv);
         if (!nv)
             return -1;
         s->v = nv;
-        s->cap = di->used;
+        s->cap = cap;
     }
     for (i = 0; i < di->cap; i++) {
         const delta_slot *sl = &di->slot[i];
         if (!sl->key)
             continue;
-        /* WP633: delta reads are lock-free while writers append under
-         * g_delta_lock, so a concurrent di_put between the sizing above
-         * and (or during) this loop can make the occupied count exceed
-         * the buffer: without this check that store is a heap overflow
-         * (guest-boot killer: readdir storm + writer threads hit it in
-         * ~12s, every time). Grow the view instead of trusting the
-         * sampled count -- single-threaded the branch never fires.
-         * (A concurrent di_grow swapping the slot array under this loop
-         * is the older, explicitly accepted window; this does not
-         * widen it.) */
-        if (n == s->cap) {
+        if (n >= s->cap) {
             size_t ncap = s->cap ? s->cap * 2 : 32;
             di_skey *nv = (di_skey *)realloc(s->v, ncap * sizeof *nv);
             if (!nv)
@@ -1835,10 +1825,10 @@ int vol_delta_range(invfs_volume *v,
 /* One collected entry. Declared as a macro so the sorted-view path and
  * the linear-scan fallback cannot drift apart. */
 #define DI_EMIT(KEYV, KLENV, SLOTP) do {                                  \
-        if (n == cap) {                                                   \
+        if (n >= cap) {                                                   \
             size_t ncap_ = cap ? cap * 2 : 32;                            \
             dl_rentry *na_ = (dl_rentry *)realloc(arr, ncap_ * sizeof *na_); \
-            if (!na_) { free(arr); return -1; }                           \
+            if (!na_) { free(arr); vol_delta_unlock(); return -1; }       \
             arr = na_;                                                     \
             cap = ncap_;                                                   \
         }                                                                  \
@@ -1852,6 +1842,7 @@ int vol_delta_range(invfs_volume *v,
         n++;                                                               \
     } while (0)
 
+    vol_delta_lock();
     sv = di_sorted_this();
     if (sv && (sv->inst != di->inst || sv->epoch != di->epoch) &&
         di_sorted_build(di, sv) != 0)
@@ -1876,6 +1867,8 @@ int vol_delta_range(invfs_volume *v,
             if (hilen && vol_key_cmp(sv->v[i].key, sv->v[i].klen,
                                    hi, hilen) >= 0)
                 break;
+            if (sv->v[i].slot >= di->cap)
+                continue;
             s = &di->slot[sv->v[i].slot];
             DI_EMIT(sv->v[i].key, sv->v[i].klen, s);
         }
@@ -1892,6 +1885,7 @@ int vol_delta_range(invfs_volume *v,
             DI_EMIT(s->key, s->klen, s);
         }
     }
+    vol_delta_unlock();
 #undef DI_EMIT
     if (n > 1 && !presorted)
         qsort(arr, n, sizeof *arr, dl_rentry_cmp);

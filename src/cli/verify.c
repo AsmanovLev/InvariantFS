@@ -303,7 +303,7 @@ int main(int argc, char **argv)
             invfs_devt t = dt;
             t.crc32c = 0;
             if (invfs_crc32c(&t, sizeof t) == dt.crc32c) {
-                if (file_blocks != dt.dev_blocks[0])
+                if (file_blocks < dt.dev_blocks[0])
                     err("device 0 holds %llu blocks, DEVT says %llu",
                         (unsigned long long)file_blocks,
                         (unsigned long long)dt.dev_blocks[0]);

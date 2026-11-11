@@ -171,19 +171,21 @@ if [ "$DRY_RUN" = 0 ]; then
     if command -v grub-mkimage >/dev/null 2>&1; then
         info "generating GRUB EFI binary for x86_64-efi..."
         if grub-mkimage -O x86_64-efi \
-            -o "$efi_boot_dir/BOOTX64.EFI" \
+            -o "$efi_boot_dir/BOOTX64.EFI.tmp" \
             -p /boot/grub \
             fat part_gpt part_msdos normal linux configfile search search_label search_fs_uuid reboot echo test all_video loadenv 2>/dev/null; then
+            mv -f "$efi_boot_dir/BOOTX64.EFI.tmp" "$efi_boot_dir/BOOTX64.EFI"
             grub_ok=1
         else
+            rm -f "$efi_boot_dir/BOOTX64.EFI.tmp"
             info "grub-mkimage failed (missing efi modules?), falling back to prebuilt/server..."
         fi
     fi
 
     if [ "$grub_ok" = 0 ]; then
-        if [ -f "$efi_boot_dir/BOOTX64.EFI" ]; then
+        if [ -s "$efi_boot_dir/BOOTX64.EFI" ]; then
             info "using existing $efi_boot_dir/BOOTX64.EFI"
-        elif [ -f "/usr/lib/invfs/BOOTX64.EFI" ]; then
+        elif [ -s "/usr/lib/invfs/BOOTX64.EFI" ]; then
             info "using /usr/lib/invfs/BOOTX64.EFI"
             cp "/usr/lib/invfs/BOOTX64.EFI" "$efi_boot_dir/BOOTX64.EFI"
         elif [ -n "${INVFS_SERVER:-}" ]; then
@@ -193,7 +195,7 @@ if [ "$DRY_RUN" = 0 ]; then
         fi
     fi
 
-    if [ ! -f "$efi_boot_dir/BOOTX64.EFI" ]; then
+    if [ ! -s "$efi_boot_dir/BOOTX64.EFI" ]; then
         die "grub-mkimage not found and no BOOTX64.EFI available; please install grub (pacman -S grub / apt install grub-efi-amd64-bin)"
     fi
 
