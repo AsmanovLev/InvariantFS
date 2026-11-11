@@ -46,17 +46,17 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1735:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2040:SKIP
-src/cli/fuse_fs.c:2378:SKIP
-src/cli/fuse_fs.c:3087:SKIP
-src/cli/fuse_fs.c:3308:SKIP
-src/cli/fuse_fs.c:3363:SKIP
-src/cli/fuse_fs.c:3624:SKIP
-src/cli/fuse_fs.c:3829:SKIP
-src/cli/fuse_fs.c:3916:SKIP
-src/cli/fuse_fs.c:3951:SKIP
-src/cli/fuse_fs.c:3988:SKIP
+src/cli/fuse_fs.c:1736:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2041:SKIP
+src/cli/fuse_fs.c:2379:SKIP
+src/cli/fuse_fs.c:3088:SKIP
+src/cli/fuse_fs.c:3309:SKIP
+src/cli/fuse_fs.c:3364:SKIP
+src/cli/fuse_fs.c:3625:SKIP
+src/cli/fuse_fs.c:3830:SKIP
+src/cli/fuse_fs.c:3917:SKIP
+src/cli/fuse_fs.c:3952:SKIP
+src/cli/fuse_fs.c:3989:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row
@@ -136,18 +136,18 @@ src/core/vol_read.c:980:SKIP
 src/core/vol_read.c:997:SKIP
 src/core/vol_read.c:1057:SKIP
 src/core/vol_read.c:1132:SKIP
-src/core/vol_sweep.c:1936:SKIP
-src/core/vol_sweep.c:280:SKIP
-src/core/vol_sweep.c:585:ACTS
-src/core/vol_sweep.c:604:ACTS
-src/core/vol_sweep.c:624:ACTS
-src/core/vol_sweep.c:676:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_sweep.c:1935:SKIP
+src/core/vol_sweep.c:279:SKIP
+src/core/vol_sweep.c:584:ACTS
+src/core/vol_sweep.c:603:ACTS
+src/core/vol_sweep.c:623:ACTS
+src/core/vol_sweep.c:675:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
 src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
-src/core/volume.c:968:SKIP   # reserve scan: direct .ivpack file lookup
-src/core/volume.c:989:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1468:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1469:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:965:SKIP   # reserve scan: direct .ivpack file lookup
+src/core/volume.c:986:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1437:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1438:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

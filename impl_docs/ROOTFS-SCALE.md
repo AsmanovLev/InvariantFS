@@ -83,7 +83,7 @@ inode count, not its byte count.**
 
 ### It is deliberate — and it was deferred "until measured"
 
-`docs/adr/ADR-009--durability-contract.md`, Decision 3:
+`docs/adr/ADR-009-durability-contract.md`, Decision 3:
 
 > **The per-append delta barrier stays.** It is a durability ordering
 > (design §9) ... Relaxing it is deferred until measured, and would require a
@@ -416,7 +416,7 @@ the cap is the thing to raise.
    ADR-009 deferred it "until measured". It is now measured. Group commit —
    barrier once per batch of appends, with a `delta_durable` anchor so the
    acknowledged-write contract stays honest — is the obvious shape, and
-   `docs/adr/ADR-009--durability-contract.md` already names the
+   `docs/adr/ADR-009-durability-contract.md` already names the
    prerequisites. Without it, rootfs-scale ingest is a multi-day operation.
 2. **Raise `CPACK_MAX_MEMBERS` past 65,536.** This is the single thing that
    makes an 84,279-file container ingestible, and it is untouched by the

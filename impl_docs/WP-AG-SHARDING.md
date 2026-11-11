@@ -19,7 +19,7 @@ InvariantFS adopts exactly that split and nothing more:
 | Metadata namespace (inode + dirent + xattr, base B+-tree + delta keys) | **no** | one logical namespace |
 
 Namespace sharding stays rejected for the reasons already recorded in
-`impl_docs/design-meta-v3.md` §9: metadata is one logical namespace, and
+`impl_docs/design-meta.md` §9: metadata is one logical namespace, and
 partitioning it makes `rename`/`link` cross-domain and turns `fold` into a
 distributed transaction. AG shards **space and locks**, never ownership of a
 key.
@@ -154,7 +154,7 @@ distinct return code), not inferred.
 6. Failure paths keep today's shape: consume the span, doom the set, pad at
    the next fence.
 7. Tests: `tools/test-meta.sh`, `tools/test-meta-dirent.sh`,
-   `tools/test-fold-delta-read.sh`, plus a forced `pwrite` failure after a
+   `bin/invf-fold_delta_read_test`, plus a forced `pwrite` failure after a
    reservation (fault seam) asserting replay resumes past the pad and later
    records are still found.
 
@@ -218,7 +218,7 @@ that is the point.
 ## Validation
 
 * `make -j12`, `bin/invf-v2_open_test`, `tools/test-meta.sh`,
-  `tools/test-meta-dirent.sh`, `tools/test-fold-delta-read.sh` (the
+  `tools/test-meta-dirent.sh`, `bin/invf-fold_delta_read_test` (the
   fold/read interleave seam exists: `invfs_test_delta_read_hook`).
 * Deliberate-partial-window case: force a `pwrite` failure (fault seam) after
   a reservation and assert replay resumes past the padded hole and later

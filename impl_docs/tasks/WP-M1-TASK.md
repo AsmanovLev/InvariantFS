@@ -3,7 +3,7 @@
 **Branch:** `wp/m1-format-`
 **Worktree:** `/tmp/invfs-wp-m1`
 **Severity:** HIGH (format-breaking)
-**Source:** `impl_docs/design-meta-.md` §12 (on-disk format )
+**Source:** `impl_docs/design-meta.md` §12 (on-disk format )
 **Estimated effort:** large (first WP of the metadata store programme)
 
 ---

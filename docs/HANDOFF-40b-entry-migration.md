@@ -118,8 +118,8 @@ bash tools/test-meta-dirent.sh
 - Roadmap: пункт «Metadata Sharding & Partitioning (XFS-style AG & dcache
   hierarchy, v0.8 target)» **удалён из `README.md`** — фича выходит в v0.7,
   так что в отдалённом roadmap ей не место. Формулировка про AG осталась в
-  `impl_docs/design-meta-v3.md` §9 и §14 (там она точная).
-- Граница для v0.7 (чтобы не переоткрывать спор `design-meta-v3.md:187`):
+  `impl_docs/design-meta.md` §9 и §14 (там она точная).
+- Граница для v0.7 (чтобы не переоткрывать спор `design-meta.md:187`):
   шардируем **RAW/delta append-арены (AG)** и **FUSE-зеркало имён + локи**
   (per-directory бакеты вместо плоского `g_entries` и `sync_parents_locked`),
   а **on-disk namespace НЕ партиционируем** — иначе rename/link/fold

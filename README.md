@@ -18,7 +18,7 @@ is metadata store and metadata store only (a pre-v0.5 volume will not open; ther
 no conversion path). Durability contract: acknowledged writes are durable
 (`fsync` fences before it returns; a failed call leaves the pre-call
 state, never a torn prefix) --
-see `docs/adr/ADR-009--durability-contract.md`. Anything not yet
+see `docs/adr/ADR-009-durability-contract.md`. Anything not yet
 acknowledged may be absent after a crash, never torn. Pre-production
 status: keep reviewed snapshots and raw `dd` backups before storing
 anything you cannot re-import (see `INCIDENTS.md`).

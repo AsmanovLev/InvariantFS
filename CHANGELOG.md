@@ -162,7 +162,7 @@ Crash-consistency hardening release.
 
 ### Added
 - Durability contract: fsync on v3 + close barrier (WP80; see
-  `docs/adr/ADR-009-v3-durability-contract.md`) — acknowledged writes are
+  `docs/adr/ADR-009-durability-contract.md`) — acknowledged writes are
   durable, failures leave the pre-call state, never a torn prefix.
 - SPT0 savepoint capture wired into both sweep paths (WP77); every sweep
   (offline, watermark, `kill -USR1`, xattr) arms a rollback window.

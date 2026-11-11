@@ -1762,7 +1762,7 @@ there is nothing to test.
 **Not fixed here.** Giving SPT0 a read-only view is a design change, not a
 test port: it needs a way to open a volume against a pinned generation without
 truncating the delta (an overlay or a second root slot), which touches
-`vol_spt0.c` and the open path. `impl_docs/design-meta-v3.md:253` already
+`vol_spt0.c` and the open path. `impl_docs/design-meta.md:253` already
 records the intended shape (`| rollback | coarse CKP0 | single save point |`).
 It needs an owner and a WP.
 

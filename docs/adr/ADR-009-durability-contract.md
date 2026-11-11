@@ -58,7 +58,7 @@ The contract needed to be made explicit, correct, and testable.
      `delta_durable` anchor and the redefined acknowledged-write contract
      this decision already named.
    - `v3_publish` barriers the COW base pages before `mbuf_root_publish`
-     barriers the root, and `META-.md` §4.1 calls that ordering
+     barriers the root, and `design-meta.md` §4.1 calls that ordering
      load-bearing. Merging the two barriers is safe on the evidence (RT30's
      double slot plus CRC resolve a torn publish to the old root, so "root
      durable ⇒ its pages durable" holds either way) but it changes a
