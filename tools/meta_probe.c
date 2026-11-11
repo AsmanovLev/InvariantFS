@@ -27,7 +27,7 @@
 #include <string.h>
 #include <time.h>
 #include "invarifs.h"
-/* volume_internal.h instead of volume.h: meta_probe needs the v3 recipe and
+/* volume_internal.h instead of volume.h: meta_probe needs the  recipe and
  * AST loaders, and the two headers declare the same typedefs. */
 #include "volume_internal.h"
 
@@ -36,10 +36,10 @@
  * TLV (format v2: heat moved out of the journal pads into the record).
  * Read-only: nothing here touches the vol_read_* paths, so no heat
  * accrues and the volume closes clean. */
-/* WP-B1: a named-xattr dump. Meta-v3's inode row has no ext blob, so
- * everything v3 keeps per file outside the row (heat, the anchor mark)
+/* WP-B1: a named-xattr dump. metadata store's inode row has no ext blob, so
+ * everything  keeps per file outside the row (heat, the anchor mark)
  * lives in the named-xattr tree. --heat walks the v2 record stream, which
- * on v3 cannot see any of it, so this is the only way to observe the v3
+ * on  cannot see any of it, so this is the only way to observe the 
  * heat counters from a test. */
 static int xattr_dump(invfs_volume *v, const char *name, const char *xname)
 {
@@ -102,14 +102,14 @@ static int heat_dump(invfs_volume *v, const char *name)
         const invfs_ast_block_entry *ents = NULL;
         size_t n_ents = 0, k;
 
-        if (vol_inode_get(v, id, &in) != 1) { printf("v3 inode read FAIL\n"); return 1; }
+        if (vol_inode_get(v, id, &in) != 1) { printf(" inode read FAIL\n"); return 1; }
         if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
-            printf("v3 recipe load FAIL\n");
+            printf(" recipe load FAIL\n");
             return 1;
         }
         /* A symlink's blob is its target string, not an AST, so there is
          * nothing to iterate and nothing to report. Say so, rather than
-         * printing a false "v3 recipe parse FAIL" -- which reads as a
+         * printing a false " recipe parse FAIL" -- which reads as a
          * corrupt blob on a perfectly healthy volume and sends whoever
          * is debugging exactly the wrong thing. Same predicate the read
          * path dispatches on (src/core/volume.h); the LOAD above is kept
@@ -121,7 +121,7 @@ static int heat_dump(invfs_volume *v, const char *name)
             return 0;
         }
         if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0 || !ents) {
-            printf("v3 recipe parse FAIL\n");
+            printf(" recipe parse FAIL\n");
             free(blob);
             return 1;
         }

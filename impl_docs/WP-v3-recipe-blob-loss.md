@@ -1,7 +1,7 @@
-# WP — v3 recipe blob loss: the batch registry is a block owner
+# WP —  recipe blob loss: the batch registry is a block owner
 
-Branch: `wp/v3-recipe-blob-loss` · Worktree: `/srv/bench/worktrees/wt-v3-recipe-loss`
-Agent: `wp-v3-recipe-loss`
+Branch: `wp/-recipe-blob-loss` · Worktree: `/srv/bench/worktrees/wt--recipe-loss`
+Agent: `wp--recipe-loss`
 
 ## Scope
 
@@ -20,7 +20,7 @@ Agent: `wp-v3-recipe-loss`
 in which a file written by the last op could not be read:
 
 ```
-vol_read_inode: v3 inode 24: recipe blob missing/corrupt
+vol_read_inode:  inode 24: recipe blob missing/corrupt
   CORRUPT: f011.bin
 deep: 4 files ok, 1 corrupt, 260405 bytes verified
 ```
@@ -45,7 +45,7 @@ STEP fsck-f rc=3                  "root_slot[0] pba 14953 is torn"
 
 ## Design
 
-A v3 text/binary batch segment has **two owners**: the recipe of every member
+A  text/binary batch segment has **two owners**: the recipe of every member
 that points into it (its `zone == TEXT` entries), and the batch registry — the
 hidden `\x01tzb` file whose row is what `tz_v3_gc` frees the block through.
 The two owners do not die at the same time. A batch stops being named by any
@@ -157,12 +157,12 @@ the blocks' bytes) across the capture. Without the fix it reports
 
 ## Coordination notes
 
-- Subagent: `wp-v3-recipe-loss`. Branch `wp/v3-recipe-blob-loss`, **not**
+- Subagent: `wp--recipe-loss`. Branch `wp/-recipe-blob-loss`, **not**
   merged; the orchestrator squash-merges.
 - No e2e suite is required by this change: it touches the savepoint reclaim and
   the text-zone registry, and the new gate is a unit-level suite. If the
   orchestrator wants the sweep suites re-run, they are `tools/test-textzone.sh`
-  and `tools/test-binbatch.sh` via `INVFS_E2E_AGENT=wp-v3-recipe-loss bash
+  and `tools/test-binbatch.sh` via `INVFS_E2E_AGENT=wp--recipe-loss bash
   tools/run-e2e.sh <suite>`.
 - Cost note: one registry read (a name lookup plus a small blob) per savepoint
   capture. Captures happen once per sweep, not per write.

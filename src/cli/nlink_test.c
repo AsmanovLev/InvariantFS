@@ -153,9 +153,9 @@ int main(int argc, char **argv)
     invfs_inode in;
     int err = 0;
 
-    printf("nlink_test (WP118): nlink vs dirent fan-in on v3\n");
+    printf("nlink_test (WP118): nlink vs dirent fan-in on \n");
 
-    snprintf(g_img, sizeof g_img, "%s/invf-nlink-v3-test.img", dir);
+    snprintf(g_img, sizeof g_img, "%s/invf-nlink--test.img", dir);
     unlink(g_img);
     {
         char cmd[1024];
@@ -250,7 +250,7 @@ int main(int argc, char **argv)
     expect_balanced("leg F (8 names, 4 inodes)", 8, 4);
 
     /* F1: the name goes and the row's nlink is never decremented. A row
-     * that NO name resolves to is an ORPHAN ROW: the v3 write order is row
+     * that NO name resolves to is an ORPHAN ROW: the  write order is row
      * then dirent, so a crash between the two legitimately produces one and
      * no repair removes it -- it is reported loudly and is deliberately not
      * counted as damage (see vol_nlink_audit). */

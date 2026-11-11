@@ -1,5 +1,5 @@
 /*
- * dedupe_test.c — Meta-v3 segment deduplication unit test
+ * dedupe_test.c — metadata store segment deduplication unit test
  *
  * Tests:
  *   1. Intra-file duplicate segments (identical 64 KB blocks within the same file)
@@ -62,10 +62,10 @@ int main(int argc, char **argv)
     size_t read_len = 0;
     uint64_t id_a = 0, id_b = 0;
 
-    snprintf(img, sizeof img, "%s/invf-dedupe-v3-test.img", dir);
+    snprintf(img, sizeof img, "%s/invf-dedupe--test.img", dir);
     unlink(img);
 
-    printf("dedupe_test: Meta-v3 segment deduplication (intra- and inter-file)\n");
+    printf("dedupe_test: metadata store segment deduplication (intra- and inter-file)\n");
 
     pat_common = (uint8_t *)malloc(seg_sz);
     pat_unique = (uint8_t *)malloc(seg_sz);
@@ -103,7 +103,7 @@ int main(int argc, char **argv)
             file_b_data[s * seg_sz + i] = (uint8_t)((s * 137 + i) & 0xFF);
     }
 
-    /* 1. Format v3 volume */
+    /* 1. Format  volume */
     {
         char cmd[512];
         snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 64 >/dev/null 2>&1", img);

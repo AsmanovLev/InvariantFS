@@ -2054,7 +2054,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* shut; do not read the history below as a statement about the build. */
 /*                                                                   */
 /* The fix is to stop asking "is this block a base page?" about every   */
-/* block in the volume. A v3 base page is a page mbuf_alloc handed      */
+/* block in the volume. A  base page is a page mbuf_alloc handed      */
 /* out, so the collector keeps a CANDIDATE SET of the base pages this  */
 /* handle knows about, fed by exactly two sources:                     */
 /*                                                                   */
@@ -2087,7 +2087,7 @@ int btree_reclaim_pinned(invfs_volume *v, invfs_blkptr old_root,
 /* ------------------------------------------------------------------ */
 
 /* Deepest tree we will believe. A page claiming a deeper level than any  */
-/* real v3 tree is not a page we understand, and an un-understood page is */
+/* real  tree is not a page we understand, and an un-understood page is */
 /* never freed. */
 #define ORPHAN_MAX_LEVEL 32u
 
@@ -2208,7 +2208,7 @@ static void orph_seed_scan(invfs_volume *v, uint64_t budget, uint8_t *page)
 }
 
 /* Offset of invfs_blkptr recipe inside invfs_inode_row. The row is the */
-/* only leaf VALUE in the v3 base trees that can contain a blkptr (every   */
+/* only leaf VALUE in the  base trees that can contain a blkptr (every   */
 /* other value is a dirent child id or an opaque recipe chunk). Today       */
 /* every producer memsets it to zero -- vol_dirs.c:376,379,437,            */
 /* vol_png.c:1081,1190, vol_textzone.c:1237, vol_write.c:905 and            */
@@ -2578,7 +2578,7 @@ int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out)
 }
 
 /* ------------------------------------------------------------------ */
-/* WP-M5: v3 inode row codec + get/put/delete                          */
+/* WP-M5:  inode row codec + get/put/delete                          */
 /*                                                                    */
 /* The stable tier keeps one row per inode in the base B+-tree. The key */
 /* is inode_id as u64 big-endian so the tree's byte-lexicographic order  */
@@ -2653,7 +2653,7 @@ static int ino_decode(const uint8_t *buf, uint16_t len, invfs_inode *out)
     return 0;
 }
 
-/* Bring the v3 base engine up once per handle. mbuf_init resets the
+/* Bring the  base engine up once per handle. mbuf_init resets the
  * bootstrap cursor, so calling it per operation would re-hand out the
  * reserved root-area pages; the open path sets mbuf_ready after calling
  * it, and this guard covers callers that reach the API another way. */
@@ -2669,8 +2669,8 @@ static int ready(invfs_volume *v)
          * later session would let a COW write overwrite a page the current
          * root still references (an untouched sibling leaf, say). Base pages
          * come from the shared allocator instead, which is bitmap-tracked
-         * and durable across reopen. TODO(WP-M5/v3-mkfs): WP-M2 records that
-         * a v3 mkfs should leave a base-page region free; until then the
+         * and durable across reopen. TODO(WP-M5/-mkfs): WP-M2 records that
+         * a  mkfs should leave a base-page region free; until then the
          * reserved pair stays unused. */
         v->mb_boot_cursor = v->mb_boot_end;
         v->mbuf_ready = 1;
@@ -2707,7 +2707,7 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
 }
 
 /* Persist the dirty bitmap range. Base pages come from the shared allocator
- * (WP-M2 falls back to the shadow pool because a v3 mkfs still marks the
+ * (WP-M2 falls back to the shadow pool because a  mkfs still marks the
  * whole metadata zone allocated); their bits must land before RT30 names a
  * page, or a reopen could hand the same block out again. Mirrors the v2
  * partial-bitmap write in vol_flush. */
@@ -2768,7 +2768,7 @@ static int publish(invfs_volume *v, invfs_blkptr root, uint64_t old_gen)
      * bitmap are durable before RT30 points at the new root. */
     if (vol_bitmap_flush(v) != 0)
         return -1;
-    if (vmux_barrier(v, "v3 inode pages") < 0)
+    if (vmux_barrier(v, " inode pages") < 0)
         return -1;
     return mbuf_root_publish(v, root.pba, root.gen);
 }
@@ -2818,7 +2818,7 @@ static int base_get(invfs_volume *v, const uint8_t *key, uint16_t klen,
 /* ------------------------------------------------------------------ */
 /* WP-M11: overlay read primitive (delta first, then base)             */
 /*                                                                    */
-/* Every v3 point read resolves its key through the recent tier first: */
+/* Every  point read resolves its key through the recent tier first: */
 /* the delta coalescing index returns the single latest record for the */
 /* key (WP-M10), and only a miss falls through to the immutable base    */
 /* B+-tree. A delete record is a value at the overlay layer -- it       */
@@ -2857,7 +2857,7 @@ static int overlay_lookup(invfs_volume *v, const uint8_t *key, uint16_t klen,
 /* ------------------------------------------------------------------ */
 /* WP-M12: delta-backed mutations (the write half of the overlay)       */
 /*                                                                     */
-/* Every v3 namespace mutation appends a record to the recent tier      */
+/* Every  namespace mutation appends a record to the recent tier      */
 /* instead of COW-upserting the base B+-tree: the base stays immutable  */
 /* between folds (design §4/§13), so a create/unlink/rename/chmod/xattr */
 /* is O(1) append + index, never a base-root publish. The base-only     */
@@ -2940,7 +2940,7 @@ static int overlay_get_key(invfs_volume *v, const uint8_t *key, uint16_t klen,
 }
 
 /* ------------------------------------------------------------------ */
-/* WP-M7: v3 xattr tree (base B+-tree namespace)                       */
+/* WP-M7:  xattr tree (base B+-tree namespace)                       */
 /*                                                                    */
 /* Key (frozen by the WP-M7 doc):                                      */
 /*   0x03 || inode_id:u64 BE || name_len:u16 BE || name               */
@@ -3946,7 +3946,7 @@ int vol_inode_delta_put(invfs_volume *v, uint64_t inode_id,
         return -1;                        /* a zero-nlink row is deleted */
     if (ready(v) != 0)
         return -1;
-    /* WP pba-ref-v3-incremental: this is the ONLY place a v3 recipe_addr is
+    /* WP pba-ref-incremental: this is the ONLY place a  recipe_addr is
      * published, and it used to be invisible to the pba reference map --
      * the sole gate on every block free. A map built before the publish
      * counted a recipe that no longer exists and missed the one that does,
@@ -4274,7 +4274,7 @@ int vol_recipe_load(invfs_volume *v, const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                 memcpy(blob, dbuf, dlen);
             blake3_addr(blob, dlen, chk);
             if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
-                fprintf(stderr, "v3 recipe blob (delta): BLAKE3 mismatch "
+                fprintf(stderr, " recipe blob (delta): BLAKE3 mismatch "
                         "(corrupt or forged); refusing the read\n");
                 free(blob);
                 return -1;
@@ -4354,7 +4354,7 @@ static int recipe_base_blob(invfs_volume *v,
             }
             blake3_addr(blob, total_len, chk);
             if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
-                fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
+                fprintf(stderr, " recipe blob %p: BLAKE3 mismatch (corrupt or "
                         "forged); refusing the read\n", (const void *)addr);
                 free(blob);
                 blob = NULL;
@@ -4377,7 +4377,7 @@ static int recipe_base_blob(invfs_volume *v,
         memcpy(blob, val.p, val.n);
     blake3_addr(blob, val.n, chk);
     if (memcmp(chk, addr, INVFS_RECIPE_ADDR_LEN) != 0) {
-        fprintf(stderr, "v3 recipe blob %p: BLAKE3 mismatch (corrupt or "
+        fprintf(stderr, " recipe blob %p: BLAKE3 mismatch (corrupt or "
                 "forged); refusing the read\n", (const void *)addr);
         free(blob);
         blob = NULL;
@@ -4398,7 +4398,7 @@ out:
 
 
 /* ------------------------------------------------------------------ */
-/* WP-M6: v3 dirent tree (base B+-tree namespace)                      */
+/* WP-M6:  dirent tree (base B+-tree namespace)                      */
 /*                                                                    */
 /* Key layout (frozen here; WP-M7's delta keys must reuse it):        */
 /*   parent_inode_id:u64 BE || name_len:u16 BE || name bytes          */
@@ -4986,7 +4986,7 @@ int vol_name_of(invfs_volume *v, uint64_t inode_id,
  * parent inodes up to the root (vol_name_of gives one leaf + its
  * parent per hop). v2 record names are full relative paths and every
  * name-keyed consumer (vol_stat/vol_find/create_blob_file, the sweep
- * collector's dedupe table) expects that shape, while the v3 dirent
+ * collector's dedupe table) expects that shape, while the  dirent
  * tree only stores leaves. Returns 1 composed, 0 not found, -1 error
  * (too deep / cyclic / buffer too small).
  *
@@ -5362,7 +5362,7 @@ static int iter_base_cb(void *ctx_, bt_key k, bt_val val)
 
 /* WP-M21b: delta pass. Rows created (or recreated) since the last fold
  * live ONLY in the delta -- the base scan above never sees their keys,
- * so a fresh v3 volume (or any volume swept between folds) iterated as
+ * so a fresh  volume (or any volume swept between folds) iterated as
  * empty: measured, invf-cp of 5 files then sweep reported "live entries:
  * 0 (of 0 walked)". Visit every delta PUT in the inode range whose id
  * the base pass did not already report. */
@@ -5497,7 +5497,7 @@ int vol_iter_live_inodes(invfs_volume *v,
  *                    row claims -- the aliasing corruption
  *
  * One case is counted but NOT fatal: a live row that NO name resolves to
- * (fan-in 0, nlink > 0) is an orphan row. The v3 write order is row first,
+ * (fan-in 0, nlink > 0) is an orphan row. The  write order is row first,
  * dirent second (vol_create_content_node), so a crash between the two
  * legitimately leaves a row nobody names -- and nothing in the repair path
  * removes it, so making it fatal would leave a volume permanently DAMAGED
@@ -5774,7 +5774,7 @@ int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out)
 /* ------------------------------------------------------------------ */
 /* Recipe resolvability (fsck)                                         */
 /* ------------------------------------------------------------------ */
-/* A v3 inode row does not carry its content: it carries a 32-byte
+/* A  inode row does not carry its content: it carries a 32-byte
  * BLAKE3 content address, and the recipe blob lives under its own key
  * (0x04 || addr) in the SAME base tree the page walk already verified
  * (recipe_key, above). So the tree walk cannot find it -- not by
@@ -5837,7 +5837,7 @@ int vol_recipe_coherence(const char *name, const invfs_inode *in,
      * clamp". */
     if (ah.file_size != in->size)
         return INVFS_COH_SIZE;
-    /* WP639: converted v3 array dies with the coherence verdict. */
+    /* WP639: converted  array dies with the coherence verdict. */
     /* (freed at each exit below) */
     /* vol_decode_ast_entries: every entry inside the header size, no
      * wraparound, no overlap in entry order. */
@@ -5906,7 +5906,7 @@ static int recipe_audit_cb(invfs_volume *v, uint64_t inode_id, const char *name,
         /* A raw-blob type is readable once it LOADS: that is the whole of
          * what the read path demands of it (vol_read.c returns the blob
          * verbatim, with no vol_ast_recipe_parse at all). Parsing it as an
-         * AST anyway is what made every symlink on a v3 volume report as
+         * AST anyway is what made every symlink on a  volume report as
          * lost content and the volume report DAMAGED -- a checker stricter
          * than the path it audits, inventing damage on a healthy volume.
          * Only the PARSE is skipped, never the load above, so a genuinely

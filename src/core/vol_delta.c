@@ -1,4 +1,4 @@
-/* vol_delta.c — WP-M10: v3 delta log (append, in-memory index, replay).
+/* vol_delta.c — WP-M10:  delta log (append, in-memory index, replay).
  *
  * See vol_delta.h for the contract. File order:
  *   1. record + segment wire codecs (the frozen invarifs.h format),
@@ -1217,7 +1217,7 @@ int vol_delta_append(invfs_volume *v, const uint8_t *key, uint16_t klen,
         v->rt.delta_pba = pba;
         if (!v->rt_present) {
             /* First delta allocation on a handle whose RT30 was absent (a
-             * fresh synthetic volume, or a v3 image interrupted before its
+             * fresh synthetic volume, or a  image interrupted before its
              * descriptor write). Build the descriptor the way
              * mbuf_root_publish does; mbuf_rt30_store only stamps the CRC. */
             memset(&v->rt, 0, sizeof v->rt);

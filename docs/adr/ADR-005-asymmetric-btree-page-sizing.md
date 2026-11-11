@@ -4,7 +4,7 @@
 Proposed
 
 ## Context
-In Meta-v3, selecting a uniform page size presents a fundamental trade-off:
+In metadata store, selecting a uniform page size presents a fundamental trade-off:
 - **4 KiB pages**: Low fanout (~50–60 keys per internal node), requiring deeper tree levels (4–5 levels for large directory structures), increasing traversal latency. However, leaf COW rewrite cost on small metadata updates (e.g. `touch`, `chmod`, `rename`) is minimal (4 KiB per modified leaf).
 - **16 KiB pages**: High fanout (~200–250 keys per internal node), yielding a shallow tree (2–3 levels for hundreds of millions of keys). However, COW write amplification increases 4x: modifying a single 200-byte inode row rewrites an entire 16 KiB leaf page.
 

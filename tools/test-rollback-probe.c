@@ -1,8 +1,8 @@
-/* rbprobe — measure the v3 SPT0 rollback contract.
+/* rbprobe — measure the  SPT0 rollback contract.
  *
  *   rbprobe <img>
  *
- * Answers the questions the retired v2 CKP0 legs used to ask, on v3:
+ * Answers the questions the retired v2 CKP0 legs used to ask, on :
  *   D  retention fidelity: a delete issued AFTER the savepoint, then a
  *      restore -- does the file come back?
  *   G  overwrite under a live savepoint: are the pre-overwrite bytes

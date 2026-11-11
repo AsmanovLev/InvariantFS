@@ -68,13 +68,13 @@
  * (vol_fsck.c:25) and replay re-reserves every block a replayed segment
  * spans (dl_reserve_segment, vol_delta.c:409) before any allocator call can
  * hand it out again. The deferred window can therefore strand space, never
- * alias a live block. The v3 commit-point table is
+ * alias a live block. The  commit-point table is
  * docs/architecture/META.md 4.1; ADR-009 is the decision behind the
- * v3 fsync contract.
+ *  fsync contract.
  *
  * WP80: the barrier before CLEAN -- vol_close barriers before it writes the
  * CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented opt-out), and
- * vol_sync does the same on v3 as on v2.
+ * vol_sync does the same on  as on v2.
  */
 int vol_mark_dirty(invfs_volume *v)
 {
@@ -183,7 +183,7 @@ void vol_io_error_latch(invfs_volume *v, const char *what)
 {
     if (!v) return;
     /* WP80/A: io_latched is the "failed THIS session" flag. needs_recovery
-     * cannot gate the message on v3 -- vol_open sets it unconditionally for
+     * cannot gate the message on  -- vol_open sets it unconditionally for
      * the whole session, so the latch would be silent exactly where it is
      * most important. */
     if (!v->io_latched)

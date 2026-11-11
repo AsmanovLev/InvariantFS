@@ -1,4 +1,4 @@
-/* sweep_test.c — WP-M23 offline test for v3 id-keyed sweep publication
+/* sweep_test.c — WP-M23 offline test for  id-keyed sweep publication
  * and nested-corpus safety.
  *
  * Verifies:
@@ -8,7 +8,7 @@
  *   3. No stray root entries are created when sweeping nested files.
  *   4. Active write sessions on nested files are protected against sweep races
  *      via vol_write_active_id.
- *   5. vol_sweep_file functions correctly on v3 volumes (SIGUSR1 / manual sweep).
+ *   5. vol_sweep_file functions correctly on  volumes (SIGUSR1 / manual sweep).
  *   6. Bit-exact invariant preserved across all files through remount.
  *
  * exit 0 = pass, 1 = failure, 2 = setup error.
@@ -60,10 +60,10 @@ int main(int argc, char **argv)
 
     printf("sweep_test (WP-M23): id-keyed publication & nested corpus safety\n");
 
-    snprintf(img, sizeof img, "%s/invf-sweep-v3-test.img", dir);
+    snprintf(img, sizeof img, "%s/invf-sweep--test.img", dir);
     unlink(img);
 
-    /* 1. Format fresh v3 volume */
+    /* 1. Format fresh  volume */
     {
         char cmd[1024];
         snprintf(cmd, sizeof cmd,
@@ -147,7 +147,7 @@ int main(int argc, char **argv)
     }
     ok(v != NULL && v->raw_free > raw_free_before, "RAW zone reclaimed freed blocks after sweep");
 
-    /* 8. Assert all files left RAW for consolidated storage. WP78: v3 now
+    /* 8. Assert all files left RAW for consolidated storage. WP78:  now
      * batches text into the TEXT zone (PPMd) exactly like v2, so the
      * drained form is TEXT (not BINARY); the point is that RAW was
      * reclaimed and the file is no longer a set of raw segments. */
@@ -236,7 +236,7 @@ int main(int argc, char **argv)
         free(read_back);
     }
 
-    /* 12. Test vol_sweep_file on v3 (manual / SIGUSR1 sweep) */
+    /* 12. Test vol_sweep_file on  (manual / SIGUSR1 sweep) */
     {
         uint64_t id_man = vol_write_bulk(v, "dir1/manual.txt", buf_manual,
                                             sizeof buf_manual, NULL);

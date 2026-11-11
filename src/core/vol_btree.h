@@ -1,9 +1,9 @@
 /* vol_btree.h — WP-M3: immutable base B+-tree over the WP-M2 page format.
  *
- * The stable tier of the metadata-v3 design (design-meta-v3.md §3/§4/§5/§12)
+ * The stable tier of the metadata store design (design-meta-.md §3/§4/§5/§12)
  * is a B+-tree whose pages are WP-M2 base pages (4 KiB, 1:1 with blocks) and
  * whose nodes are addressed by invfs_blkptr. This header is the tree API the
- * other meta-v3 WPs build on: WP-M5 (inode rows), WP-M6 (dirents), WP-M11
+ * other meta- WPs build on: WP-M5 (inode rows), WP-M6 (dirents), WP-M11
  * (overlay reads), WP-M14 (fold), WP-M15 (reclaim).
  *
  * Invariants:
@@ -14,7 +14,7 @@
  *     WP-M6 well-defined.
  *   - `bt_key.n == 0` is the empty key. It is a real (smallest) key for
  *     search/upsert/delete; for btree_scan it doubles as "unbounded" on the
- *     low side and on the high side (keys in the v3 namespaces are never
+ *     low side and on the high side (keys in the  namespaces are never
  *     empty, so the two uses cannot collide).
  *   - The value returned by btree_search points into a per-thread buffer and
  *     is valid until the next btree_search on the same thread. The k/v passed
@@ -107,7 +107,7 @@ int btree_check(invfs_volume *v, invfs_blkptr root,
  * there were more bad pages than the range array can hold (the repair must
  * refuse in that case rather than excise part of the damage). */
 #define BT_QUARANTINE_MAX      64u
-/* The longest key any v3 namespace can produce: a dirent key is
+/* The longest key any  namespace can produce: a dirent key is
  * parent:u64 + name_len:u16 + name, an xattr key 0x03 + inode:u64 +
  * name_len:u16 + name -- 11 + INVFS_MAX_NAME(255) is the worst case. Anything
  * longer cannot come from this engine; a range whose bound exceeds it is
@@ -191,7 +191,7 @@ int btree_mark_reachable(invfs_volume *v, invfs_blkptr root, uint8_t *seen,
 
 /* WP121: the FULL-POOL orphan collector. Unlike btree_reclaim_pinned this
  * is not a generation diff -- it walks every allocated block in the volume
- * and frees each one that is a v3 base page (BPG3, CRC-valid) and is not
+ * and frees each one that is a  base page (BPG3, CRC-valid) and is not
  * reachable from ANY root named by the 2 RT30 slots, nor from
  * v->pinned_root. That "ANY of the 2 slots" is the whole safety argument:
  * mbuf_root_publish writes one slot per publish (vol_metabuf.c:349) and
@@ -252,7 +252,7 @@ int btree_collect_orphans_incr(invfs_volume *v, uint64_t *freed_out);
  * per-FOLD cost stays bounded. Same return contract. */
 int btree_collect_orphans_full(invfs_volume *v, uint64_t *freed_out);
 
-/* WP126: feed the candidate set. Every mbuf_alloc() that produces a v3 base
+/* WP126: feed the candidate set. Every mbuf_alloc() that produces a  base
  * page calls this with the pba it returned, so the collector knows about
  * that page without having to find it in the block space. A page that is
  * never announced simply is not a candidate yet -- a leak, never a

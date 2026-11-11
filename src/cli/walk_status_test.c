@@ -2,7 +2,7 @@
  * finished", at any of the five sites, and the receipt that says so must not
  * cry wolf on an empty volume.
  *
- * The class. A v3 walk is fallible: vol_inode_get() returns -1 for a
+ * The class. A  walk is fallible: vol_inode_get() returns -1 for a
  * quarantined or unreadable base page and the walk stops there, having
  * delivered a PREFIX. Every primitive returns a status for exactly that.
  * Five callers took the status and dropped it, and each turned a partial
@@ -300,7 +300,7 @@ int main(int argc, char **argv)
 
     setvbuf(stdout, NULL, _IONBF, 0);
     setenv("WST_SCRATCH", dir, 1);
-    printf("walk_status_test: a v3 walk that stopped must not read as a walk "
+    printf("walk_status_test: a  walk that stopped must not read as a walk "
            "that finished\n");
 
     snprintf(img, sizeof img, "%s/invf-walk-status-test.img", dir);
@@ -786,7 +786,7 @@ int main(int argc, char **argv)
     }
 
     /* SITE 4: the mutating sweep must ABORT, not warn and continue.
-     * WRONG ANSWER before the fix: "warning: v3 directory walk did not
+     * WRONG ANSWER before the fix: "warning:  directory walk did not
      * complete" on stderr, then stages 3-7 ran anyway and rewrote whatever
      * the partial collect had named. */
     {
@@ -866,7 +866,7 @@ int main(int argc, char **argv)
                    "admitted it could not read\n");
         ok(strstr(hit, "did not complete") != NULL,
            "4d. and it SAYS the walk did not complete, in words");
-        ok(strstr(hit, "warning: v3 directory walk did not complete") == NULL,
+        ok(strstr(hit, "warning:  directory walk did not complete") == NULL,
            "4e. the old warn-and-continue path is gone");
         /* "nothing was rewritten": the stages that rewrite. The free-block
          * count is deliberately NOT the assertion here -- prepare's

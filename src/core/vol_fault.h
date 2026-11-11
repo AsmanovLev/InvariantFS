@@ -81,7 +81,7 @@ static inline void invfs_vol_fault_reload(void)
  * here it is inert in production: nothing calls it unless a test does. */
 void invfs_vol_btree_fault_reload(void);
 
-/* WP135: the same door for src/core/vol_dirs.c, which owns the v3 walk's
+/* WP135: the same door for src/core/vol_dirs.c, which owns the  walk's
  * fault sites. Two files have needed it now, which is what a per-TU static
  * costs; a third would want the state hoisted into a tiny shared TU. */
 void invfs_vol_dirs_fault_reload(void);

@@ -19,7 +19,7 @@
  * run, after the dead-batch GC (vol_tz_gc). The author's sweep.c CLI is
  * Windows-only.
  *
- * WP201 (native v3 seal, par2-inspired, no compat): --seal [pct] seals
+ * WP201 (native  seal, par2-inspired, no compat): --seal [pct] seals
  * AFTER the sweep is fully flushed (full recompute, footer committed last,
  * verify-after-write before the run may claim success; see vol_seal).
  * pct picks the fixed (k,m) menu — 5->(20,1), 10->(9,1, default),
@@ -1375,8 +1375,8 @@ static void sw_insert(sw_bucket ***tabp, size_t *maskp, size_t *countp,
 }
 
 
-/* WP-M21b: v3 live-set collector, fed by vol_walk in a single O(n)
- * hierarchical pass. A v3 volume has no record stream to walk, so the
+/* WP-M21b:  live-set collector, fed by vol_walk in a single O(n)
+ * hierarchical pass. A  volume has no record stream to walk, so the
  * WP42 walker above finds nothing and the sweep silently no-ops; this
  * feeds the same arrays instead. Sizes come directly from the inode row;
  * record positions stay 0 (the fold replaces linear compaction). */
@@ -1848,7 +1848,7 @@ int main(int argc, char **argv)
      * vol_sweep_pending(), which this offline tool never reaches -- the
      * FUSE daemon path, and the only one that drains. An earlier version
      * of this comment claimed the fold "always runs as part of a normal
-     * sweep"; that was false for the offline path and hid a v3 COW base
+     * sweep"; that was false for the offline path and hid a  COW base
      * page leak (see docs/adr/ for the root-stack design). */
 
     if (!log_path) log_path = getenv("INVFS_SWEEP_LOG");
@@ -2223,7 +2223,7 @@ int main(int argc, char **argv)
              * the summary deserves to know the volume was never walked
              * rather than believed to be empty. */
             fprintf(stderr,
-                    "invf-sweep: the v3 namespace walk did not complete. %s\n"
+                    "invf-sweep: the  namespace walk did not complete. %s\n"
                     "Refusing to %s: a partial live set is not a smaller "
                     "sweep, it is the wrong one. Run invf-fsck on the image "
                     "first.\n",
@@ -2606,8 +2606,8 @@ progress:
      * counts come from the accumulators themselves: parts deferred at
      * container-explode time (WP14b) never produced a walk line.
      * --fast deferred nothing, so the GC/flush are skipped with it.
-     * WP78: v3 volumes now defer too (TEXT/BATCHED_BIN batches published as
-     * v3 recipe deltas), and vol_tz_gc/vol_tz_flush dispatch to the v3
+     * WP78:  volumes now defer too (TEXT/BATCHED_BIN batches published as
+     *  recipe deltas), and vol_tz_gc/vol_tz_flush dispatch to the 
      * registry path, so the pass runs on both formats. */
     if (!dry && !fast) {
         int gcrc;
@@ -2909,9 +2909,9 @@ progress:
         uint64_t orphans = 0;
         if (vol_reclaim_orphans_full(vol, &orphans) < 0) {
             sw_progress_suspend();
-            fprintf(stderr, "warning: v3 orphan reclaim failed\n");
+            fprintf(stderr, "warning:  orphan reclaim failed\n");
         } else if (orphans && !invfs_sweep_ui_active()) {
-            printf("[reclaim] %llu orphaned v3 base page(s) collected\n",
+            printf("[reclaim] %llu orphaned  base page(s) collected\n",
                    (unsigned long long)orphans);
         }
     }

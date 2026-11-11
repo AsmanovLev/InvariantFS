@@ -138,7 +138,7 @@ static int orph_gated(invfs_volume *v, uint64_t *freed_out, int full)
     if (freed_out)
         *freed_out = freed;
     if (freed)
-        fprintf(stderr, "vol_reclaim: collected %llu orphaned v3 base page(s)\n",
+        fprintf(stderr, "vol_reclaim: collected %llu orphaned  base page(s)\n",
                 (unsigned long long)freed);
     if (orph_stats_wanted()) {
         struct invfs_orphan_stats st;

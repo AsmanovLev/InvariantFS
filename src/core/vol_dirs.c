@@ -38,9 +38,9 @@ static int dirent_cmp(const void *a, const void *b)
 
 
 /* ================================================================== */
-/* WP-M6: metadata-v3 namespace (dirent-tree path layer)              */
+/* WP-M6: metadata store namespace (dirent-tree path layer)              */
 /*                                                                    */
-/* A v3 volume has no v2 name index and no anchor records: the name   */
+/* A  volume has no v2 name index and no anchor records: the name   */
 /* lives in the base B+-tree's dirent keys (see vol_btree.c). These   */
 /* helpers resolve mount-relative paths componentwise and back the    */
 /* public vol_* namespace API so FUSE keeps calling by name.          */
@@ -434,7 +434,7 @@ int vol_path_list_dir(invfs_volume *v, const char *dir,
 /* Create (or replace as an empty node) `name`, putting the inode row before
  * the dirent (a dirent must never point at a missing inode). `meta` may be
  * NULL (REG defaults). Returns the inode id, 0 on failure. Data payloads are
- * WP-M8 (recipes), so a v3 node created here is always empty.
+ * WP-M8 (recipes), so a  node created here is always empty.
  *
  * WP135: NO '!' CHECK HERE, DELIBERATELY. This is not the user-name boundary:
  * the containerpack lane creates its member inodes through vol_create_file
@@ -445,7 +445,7 @@ int vol_path_list_dir(invfs_volume *v, const char *dir,
  * time it was tried here. The reservation belongs at the places a USER name
  * enters: vol_replace_file, vol_replace_file_with_meta,
  * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
- * vol_mkdir, vol_rename, vol_v3_hardlink, vol_write_begin, plus
+ * vol_mkdir, vol_rename, vol_hardlink, vol_write_begin, plus
  * invf-cp's vol_create_file call and the six FUSE name-introducing ops
  * (fuse_fs.c, fuse_reserved_name). */
 uint64_t vol_create_node(invfs_volume *v, const char *name,
@@ -1161,7 +1161,7 @@ static int walk_dir(invfs_volume *v, const char *dir,
          * `continue`.
          *
          * WP135: this branch is now the whole of the "which caller asked"
-         * question, and the answer is that four of the six callers of a v3
+         * question, and the answer is that four of the six callers of a 
          * walk still ask for the LENIENT one -- see vol_walk_strict's
          * own comment, which names pba_ref_ensure as "the one caller whose
          * answer must not be a partial view of the namespace". A file list
@@ -1271,7 +1271,7 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
 uint64_t vol_replace_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
-    /* WP-M6: a v3 namespace node is the dirent tree + inode row. Content
+    /* WP-M6: a  namespace node is the dirent tree + inode row. Content
      * goes through the WP-M9 session path (WP-M21b glue).
      *
      * WP135: a USER-name boundary -- FUSE's invf_create (fuse_fs.c:1892) and
@@ -1314,7 +1314,7 @@ int vol_unlink_name(invfs_volume *v, const char *name)
 
 /* ---- rename / move ---- */
 
-/* WP-M17: hard link on the v3 namespace. A second (parent, name) dirent
+/* WP-M17: hard link on the  namespace. A second (parent, name) dirent
  * points at the SAME inode id; the shared row's nlink is incremented so
  * unlinking one name leaves the row (and its xattrs) for the survivors,
  * and only the last unlink frees it. No block refcounts: the data plane is

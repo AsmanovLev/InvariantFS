@@ -131,7 +131,7 @@ int main(int argc, char **argv)
     snprintf(img, sizeof img, "%s/invf-readdir-error-test.img", dir);
     unlink(img);
 
-    /* a real v3 volume with a real directory in it: the control only means
+    /* a real  volume with a real directory in it: the control only means
      * something if the directory HAS entries when the listing is failed */
     {
         char cmd[1024];

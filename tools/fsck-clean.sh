@@ -6,9 +6,9 @@
 # WHY THIS IS NOT JUST `grep orphans: 0`
 #
 # The v2 report's `orphans:` counter is "blocks marked allocated in the bitmap
-# that no live record references". Meta-v3 has no L2P mapper, so the v3 checker
+# that no live record references". metadata store has no L2P mapper, so the  checker
 # cannot compute that number at all -- and it deliberately does not fake one.
-# What v3 DOES verify, and prints, is:
+# What  DOES verify, and prints, is:
 #   - pages walked / base keys: the whole base tree was read
 #   - bad pages / torn slots:   nothing in it is unreadable or ambiguous
 #   - cycles/shared:            the tree is not cyclic or over-shared
@@ -21,9 +21,9 @@
 #                               hardlinks passes, so it belongs in the gate
 #                               every suite already uses.
 #   - ^OK:                      the scan found nothing at all
-# The v3 scan checks allocated-vs-reachable in ONE direction only (a reachable
+# The  scan checks allocated-vs-reachable in ONE direction only (a reachable
 # page must be allocated). The other direction -- an allocated page nothing
-# references, i.e. a leak -- is not something the v3 scan looks for, so
+# references, i.e. a leak -- is not something the  scan looks for, so
 # printing a hardcoded `orphans: 0` would assert something unchecked. Assert
 # instead what each format actually verifies.
 #

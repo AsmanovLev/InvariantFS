@@ -219,7 +219,7 @@ int vol_rsz0_apply(invfs_volume *v, const invfs_rsz0 *rz)
 
     /* -- the gap: staged bytes verbatim, then a fresh terminator (the
      *    vol_flush convention) so nothing can run into the stale bytes the
-     *    overlapping old areas left behind. On a v3 volume the gap holds no
+     *    overlapping old areas left behind. On a  volume the gap holds no
      *    staged bytes at all, so this is the terminator alone. -- */
     {
         uint64_t left = rz->j_bytes, off = sbase + rz->bm_bytes;

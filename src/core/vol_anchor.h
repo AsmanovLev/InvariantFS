@@ -1,5 +1,5 @@
 /* vol_anchor.h — the ANC0 tail anchor: a redundant LOCATION for the two
- * block-0 descriptors that decide whether a v3 volume can be opened.
+ * block-0 descriptors that decide whether a  volume can be opened.
  *
  * The reasoning, and the reason it is a location and not parity, is in
  * invarifs.h next to the descriptor. This header is the API.

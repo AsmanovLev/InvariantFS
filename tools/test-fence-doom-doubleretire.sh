@@ -4,7 +4,7 @@
 # double bitmap free; with a live dedupe sharer: EIO on live data).
 #
 # Leg 1 (accounting, deterministic): unlink A -> vol_delta_doom (exactly the
-#   function the fence-failure paths call: volume.c flush "v3 bitmap" barrier
+#   function the fence-failure paths call: volume.c flush " bitmap" barrier
 #   refusal, sync drain/barrier refusals) -> unlink A again -> sync. Both
 #   retires name the SAME blocks (nothing was rewritten). The harness wraps
 #   vol_free_blocks (ld --wrap) and fails if any pba is freed twice.

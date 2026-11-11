@@ -1,14 +1,14 @@
 #!/bin/bash
-# test-rollback.sh — the v3 rollback window (SPT0 save point) end-to-end.
+# test-rollback.sh — the  rollback window (SPT0 save point) end-to-end.
 #
-# v3 has no CKP0 and no \x01reten registry: WP-M21 retired both with the v2
+#  has no CKP0 and no \x01reten registry: WP-M21 retired both with the v2
 # metadata machinery. The rollback window is the SPT0 save point
 # {base_root, delta_end} recorded in src/core/vol_spt0.c, and
 # tools/invf-sweep.c arms it BEFORE the walk -- so the live window is always
 # the LAST sweep, and a rollback undoes exactly that run. The legs below
 # were rewritten against that engine; the v2 CKP0 choreography (the
 # checkpoint-clear crash legs, the v2 seal refusals) is gone with the code
-# it drove, and its remaining v3 gaps are tracked in impl_docs/AUDIT.md.
+# it drove, and its remaining  gaps are tracked in impl_docs/AUDIT.md.
 #
 #   [H] WP85 (INCIDENTS.md:734): a write session held open across a restore
 #   is anchored to a generation the rollback retired -- its append is
@@ -321,7 +321,7 @@ class_of() { $B/meta_probe "$1" --heat "$2" 2>/dev/null | sed -n 's/^class=\([0-
 
 echo
 echo "== [H] WP85: an append held across a rollback is refused (ESTALE) =="
-# INCIDENTS.md:734. The v3 rollback is the SPT0 save point (WP-M16), so this
+# INCIDENTS.md:734. The  rollback is the SPT0 save point (WP-M16), so this
 # leg speaks that dialect: capture a save point, open an append handle, write
 # through it, roll the volume back, then keep writing through the SAME handle.
 # The handle is anchored to a generation the restore retired -- SPT0 records
@@ -380,8 +380,8 @@ check_all "H post-rollback" "$IMGH" || fail "H: bit-exact check failed"
 rm -f "$IMGH"
 
 echo
-echo "== [A1] sweep arms a v3 save point (SPT0), classes stamped =="
-# v3 has no CKP0 (WP-M21 retired it). The rollback window is the SPT0 save
+echo "== [A1] sweep arms a  save point (SPT0), classes stamped =="
+#  has no CKP0 (WP-M21 retired it). The rollback window is the SPT0 save
 # point: tools/invf-sweep.c drops the previous window and captures a fresh
 # {base_root, delta_end} BEFORE the walk, so the live window is always the
 # LAST sweep and a rollback undoes exactly that run.
@@ -613,7 +613,7 @@ echo
 echo "== [S] a volume that holds a SYMLINK =="
 # This leg exists because of the gap it closes, not because it re-tests the
 # unit test's finding at the CLI level: no leg in this suite, and no e2e
-# anywhere, combined a symlink with a rollback. A v3 symlink's content is
+# anywhere, combined a symlink with a rollback. A  symlink's content is
 # its target string, stored content-addressed EXACTLY like a recipe
 # (vol_create_node -> vol_recipe_store), so its row carries a real
 # non-zero recipe_addr. The restore's per-inode data check filtered only

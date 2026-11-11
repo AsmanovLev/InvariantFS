@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-orphan-reclaim.sh — WP121: safety proof for the v3 orphan collector.
+# test-orphan-reclaim.sh — WP121: safety proof for the  orphan collector.
 #
 # The collector (btree_collect_orphans) frees base pages that no live root
 # can reach. A wrong answer to that question is SILENT DATA LOSS, not a
@@ -263,7 +263,7 @@ mkvol fold.img
 OUT=$(INVFS_RECLAIM_ORPHANS=1 "$T" fold fold.img "$NFILES" "$NGENS" 2>"$WORK/fold.err") \
     || { echo "$OUT"; cat "$WORK/fold.err"; fail "fold leg failed"; }
 echo "$OUT"
-grep -q "collected .* orphaned v3 base page" "$WORK/fold.err" \
+grep -q "collected .* orphaned  base page" "$WORK/fold.err" \
     || { cat "$WORK/fold.err"; fail "the fold path never reached the collector -- the production chain is not wired"; }
 sed 's/^/  | /' "$WORK/fold.err" | grep collected
 F_ORPHAN=$(field "$OUT" PAGES_ORPHAN)
@@ -373,7 +373,7 @@ echo "  the fold path collected what it could and the volume is still byte-exact
 # walk has to read the page. That is the whole reason this leg exists and
 # the reason the previous legs did not catch the defect.
 #
-# Asserted: the sweep exits 0, does NOT print "warning: v3 orphan reclaim
+# Asserted: the sweep exits 0, does NOT print "warning:  orphan reclaim
 # failed", DOES report a non-zero [reclaim] count on that same run, and every
 # file still reads back byte-identical afterwards.
 # ---------------------------------------------------------------------------
@@ -406,10 +406,10 @@ SWEEP_RC=$?
 [ "$SWEEP_RC" -eq 0 ] || { tail -20 sw.err; fail "leg 9: the sweep exited $SWEEP_RC"; }
 sed -n 's/^/  | /p' sw.err | grep -E "save point captured|reclaim|warning" || true
 
-if grep -q "warning: v3 orphan reclaim failed" sw.err; then
+if grep -q "warning:  orphan reclaim failed" sw.err; then
     cat >&2 <<'EOF'
 FAIL: THE COLLECTOR ABORTED ON THE SWEEP THAT DID TRANSFORM WORK.
-"warning: v3 orphan reclaim failed" means btree_collect_orphans returned -1
+"warning:  orphan reclaim failed" means btree_collect_orphans returned -1
 and the sweep freed nothing. The sweep still exits 0, so nothing treats it
 as a failure. This is the defect leg 9 exists for.
 EOF
@@ -475,4 +475,4 @@ echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "leg 9: fsck not OK after 
 echo "  8/8 files byte-identical after the collect, volume clean"
 rm -f "sw.out".[0-9]
 
-echo "ALL V3 ORPHAN RECLAIM LEGS PASS"
+echo "ALL  ORPHAN RECLAIM LEGS PASS"

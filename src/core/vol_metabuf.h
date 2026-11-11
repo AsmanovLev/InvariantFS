@@ -1,7 +1,7 @@
-/* vol_metabuf.h — WP-M2: v3 metadata base-page format + block allocator.
+/* vol_metabuf.h — WP-M2:  metadata base-page format + block allocator.
  *
- * The v3 stable tier is built from fixed-size base pages addressed by
- * invfs_blkptr (design-meta-v3.md §12). This module owns exactly three
+ * The  stable tier is built from fixed-size base pages addressed by
+ * invfs_blkptr (design-meta-.md §12). This module owns exactly three
  * things and nothing else:
  *
  *   1. the page wire format — serialize/parse + CRC32C over a 4 KiB page,

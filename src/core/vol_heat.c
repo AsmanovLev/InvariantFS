@@ -226,9 +226,9 @@ static int heat_id_live(invfs_volume *v, uint64_t inode)
 }
 
 /* stored heat of an inode (0/0 when the TLV is absent). WP78: read it
- * through the xattr API so it works on both the v2 INO2 ext and the v3
+ * through the xattr API so it works on both the v2 INO2 ext and the 
  * named-xattr tree (meta_read_record_by_id is a v2-only lookup and made
- * every v3 file read as cold). */
+ * every  file read as cold). */
 static int heat_get(invfs_volume *v, uint64_t inode, uint16_t *r, uint8_t *w)
 {
     uint8_t val[4];
@@ -431,7 +431,7 @@ uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
  * WP-heat-table-concurrent-safe: the walk below is now split in three, and
  * the reason is lock ordering, not style. The per-record work calls
  * heat_id_live -> vol_inode_get and heat_write -> vol_set_xattr, and those
- * descend into the v3 tree, whose locks (vol_btree, vol_delta) sit ABOVE
+ * descend into the  tree, whose locks (vol_btree, vol_delta) sit ABOVE
  * heat_mu. So heat_mu is held only across (a) copying the pending
  * (inode, count) pairs out of the table and (b) the reset memset -- both
  * straight-line table work -- and is NOT held across the xattr I/O. A touch
@@ -580,7 +580,7 @@ static int heat_decay_push(heat_decay_ctx *c, uint64_t ino, uint16_t r,
 
 
 
-/* WP78: v3 decay body -- one pass over the live inode set, reading the
+/* WP78:  decay body -- one pass over the live inode set, reading the
  * heat xattr through the format-agnostic xattr API. Reads and RECORDS; it
  * does not write (see heat_decay_ctx above). */
 static int heat_decay_cb(invfs_volume *v, uint64_t inode_id,
@@ -702,7 +702,7 @@ typedef struct {
 
 
 
-/* WP78: v3 promotion candidate collection -- one pass over the live inode
+/* WP78:  promotion candidate collection -- one pass over the live inode
  * set, class TEXT and read-hot. */
 static int heat_promote_cb(invfs_volume *v, uint64_t inode_id,
                               const char *name, void *ctx_)
@@ -739,12 +739,12 @@ static int heat_promote_cb(invfs_volume *v, uint64_t inode_id,
     return 0;
 }
 
-/* WP78: extract one read-hot v3 TEXT member to a standalone whole-file
- * ZSTD blob (the v3 analogue of vol_store_generic's promotion), with the
+/* WP78: extract one read-hot  TEXT member to a standalone whole-file
+ * ZSTD blob (the  analogue of vol_store_generic's promotion), with the
  * same decode+memcmp bit-exactness guard. The batch segment is left for
  * tz_gc (vol_free_recipe_blocks skips TEXT entries). 1 = promoted,
  * 0 = no gain/refused (member stays batched), -1 = hard error. */
-static int heat_extract_v3(invfs_volume *v, uint64_t inode_id,
+static int heat_extract(invfs_volume *v, uint64_t inode_id,
                            const char *name)
 {
     uint8_t *data = NULL, *enc = NULL, *back = NULL;
@@ -857,7 +857,7 @@ int vol_heat_promote(invfs_volume *v)
         if (zc && zc->dec_mem_bytes > vol_get_dec_mem_limit(v))
             continue;
         {
-            int pr = heat_extract_v3(v, ctx.cand[i].inode, ctx.cand[i].name);
+            int pr = heat_extract(v, ctx.cand[i].inode, ctx.cand[i].name);
             if (pr <= 0) {
                 if (pr < 0)
                     fprintf(stderr, "[heat] %s: promotion failed (member left "

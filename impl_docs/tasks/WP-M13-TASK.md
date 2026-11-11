@@ -11,16 +11,16 @@ at mount time, building the in-memory index. WP-M14 (fold) calls `vol_delta_moun
 during `vol_v3_fold_request` to rebuild the empty index after a fold reset.
 
 The question is whether `vol_delta_mount` is called at ordinary (non-fold) vol_open 
-for v3 volumes. Verify this and complete the wiring if needed.
+for  volumes. Verify this and complete the wiring if needed.
 
 ## Scope (from WP-M13 spec, impl_docs/WP-M13-mount-replay.md)
 
-**At vol_open for v3: read base root from RT30 double-slot, replay delta into 
+**At vol_open for : read base root from RT30 double-slot, replay delta into 
 in-memory index, truncate torn tail. Mount cost = O(1) base + O(delta). 
-Drop the O(N) v2 scan from the v3 branch.**
+Drop the O(N) v2 scan from the  branch.**
 
 Files:
-- `src/core/volume.c` — v3 open path; ensure delta replay at mount
+- `src/core/volume.c` —  open path; ensure delta replay at mount
 - `src/core/vol_delta.c` — `vol_delta_mount` (already exists from WP-M10)
 - `src/core/vol_btree.c` — RT30 root slot read
 - `src/core/volume_internal.h` — delta/replay state fields if needed
@@ -31,12 +31,12 @@ repair of corrupt base tree (WP-M4: detect only).
 
 ## Implementation steps
 
-1. **Verify delta replay at mount**: In the v3 `vol_open` path, confirm that
-   `vol_delta_mount()` is called after the RT30 base root is loaded. If the v3 
+1. **Verify delta replay at mount**: In the  `vol_open` path, confirm that
+   `vol_delta_mount()` is called after the RT30 base root is loaded. If the  
    open skips this (e.g., goes straight to empty namespace), wire it in.
 
-2. **Verify no O(N) v2 scan on v3**: The v2 mount scans the inode area building
-   `nbuck`/`dbuck`/`ibuck` hash indexes. For v3 (`VOLF_V3`), this scan must NOT
+2. **Verify no O(N) v2 scan on **: The v2 mount scans the inode area building
+   `nbuck`/`dbuck`/`ibuck` hash indexes. For  (`VOLF_V3`), this scan must NOT
    run. Confirm this is gated on `!(sb.vol_flags & VOLF_V3)`.
 
 3. **Torn tail handling**: `vol_delta_mount` (WP-M10) already truncates torn 
@@ -47,7 +47,7 @@ repair of corrupt base tree (WP-M4: detect only).
    (replay from scratch = same result). Verify this.
 
 5. **Add e2e leg**: In `tools/test-meta.sh`, add a leg that:
-   - Creates files on a v3 volume
+   - Creates files on a  volume
    - Unmounts
    - Remounts
    - Verifies all files still present and bit-exact
@@ -86,5 +86,5 @@ Remaining TODOs: (list)
 ## Key source touchpoints
 - `vol_delta.c:vol_delta_mount` — already exists (WP-M10)
 - `vol_fold.c` — calls `vol_delta_mount` after fold reset (WP-M14)
-- `volume.c:vol_open` — v3 open path
+- `volume.c:vol_open` —  open path
 - `volume_internal.h:331-337` — nbuck/dbuck/ibuck (v2 only)

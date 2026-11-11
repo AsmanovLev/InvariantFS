@@ -27,7 +27,7 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+# the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
 B=$REPO/bin
@@ -155,21 +155,21 @@ $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log"
 fsck_require_clean "$WORK/fsck1.log" "leg1" || exit 1
 
 echo
-# Leg 2 covers the two heat counters that Meta-v3 CANNOT store: the create-time
+# Leg 2 covers the two heat counters that metadata store CANNOT store: the create-time
 # read-heat seeding (INVFS_HEAT_INIT) and the write-heat carry on a rewrite
 # both go through heat_ext_merge(), which builds the INO2 ext blob -- and
 # invfs_inode_row has no ext field (WP-M7 kept only the fixed 114-byte row
-# plus xattr bytes), so on v3 the value is computed and then dropped. Read heat
+# plus xattr bytes), so on  the value is computed and then dropped. Read heat
 # survives because WP78 moved it to the invfs.heat named xattr, which is why
 # leg 1 runs here. Until the write path persists heat through the xattr too,
 # this leg can only assert anything on a v2 volume -- so say so loudly instead
 # of failing on a feature the format does not have.
 vol_is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v0"; }
 if vol_is_meta "$IMG"; then
-    echo "== leg 2: SKIP (v3) -- write-heat + INVFS_HEAT_INIT are not persisted =="
-    echo "   both are carried in the INO2 ext blob; the v3 inode row has no ext"
+    echo "== leg 2: SKIP () -- write-heat + INVFS_HEAT_INIT are not persisted =="
+    echo "   both are carried in the INO2 ext blob; the  inode row has no ext"
     echo "   field, so the value is dropped at commit. Read heat (leg 1) works:"
-    echo "   WP78 moved it to the invfs.heat xattr. Gap tracked for a v3 fix."
+    echo "   WP78 moved it to the invfs.heat xattr. Gap tracked for a  fix."
     SKIP_LEG2=1
 else
     SKIP_LEG2=0

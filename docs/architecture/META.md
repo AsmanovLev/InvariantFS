@@ -1,6 +1,6 @@
-# Meta-v3 Specification: B+ Tree & Delta Log
+# metadata store Specification: B+ Tree & Delta Log
 
-Meta-v3 replaces the legacy v2 linear inode records, tombstone kills, and flat mapper tables with a B+ tree base and an append-only delta log.
+metadata store replaces the legacy v2 linear inode records, tombstone kills, and flat mapper tables with a B+ tree base and an append-only delta log.
 
 ---
 
@@ -11,7 +11,7 @@ In legacy Meta-v2:
 - Mount required an $O(N)$ sequential scan of every metadata block to rebuild name and inode indexes.
 - Deletions accumulated as dead records until expensive compaction rewrites.
 
-In Meta-v3:
+In metadata store:
 - **Base tier**: Immutable Copy-on-Write (COW) B+ tree indexed by 64-bit Big-Endian keys.
 - **Recent tier**: Append-only Delta Log capturing real-time mutations with minimal latency.
 - **Overlay**: Readers look up the Delta Log first; if absent, they read the immutable B+ tree base.
@@ -148,7 +148,7 @@ never what is on disk (`src/core/vol_fold.c:50-52`).
 
 ## 4. Durability Contract (WP80)
 
-Meta-v3 has three persistence tiers with distinct guarantees. This section
+metadata store has three persistence tiers with distinct guarantees. This section
 is the normative contract: what `fsync(2)`, `vol_close`, and crash recovery
 actually promise. The engine-side entry points are `vol_sync` (FUSE
 `.fsync`/`.fdatasync`), `vol_flush`, and `vol_close` in `src/core/volume.c`.
@@ -216,7 +216,7 @@ drift from the code.
 
 ### 4.3 `fsync` / `fdatasync`
 
-`vol_sync` = `vol_flush` + one `vmux_barrier`. On v3 that means:
+`vol_sync` = `vol_flush` + one `vmux_barrier`. On  that means:
 
 - `vol_flush` persists the dirty block bitmap (`vol_v3_bitmap_flush`);
 - the barrier flushes the backing store — everything written since the
@@ -224,19 +224,19 @@ drift from the code.
   storage only to the extent the host filesystem and device honour
   `fsync(2)` (§4.2);
 - a failure latches the volume (`vol_io_error_latch`): later mutations are
-  refused (`vol_write_enabled` consults `io_latched` even on v3) and
+  refused (`vol_write_enabled` consults `io_latched` even on ) and
   `vol_close` will not write CLEAN.
 
 Because the delta append stages behind its group's fence (WP602, §4.4),
 the metadata of a mutation is durable at the latest when `fsync` returns:
 `vol_sync` drains the staged group before its barrier
 (`src/core/volume.c:1930`), so the acknowledgement still means what it
-says. What `fsync` adds on v3 beyond the drain is the **bitmap**: the
+says. What `fsync` adds on  beyond the drain is the **bitmap**: the
 allocation map is a derived cache persisted only on flush/publish, so
 `fsync` is the point that pins it. Data blocks are covered by the barrier
 that follows them.
 
-**What `fsync` does not cover, on v3:** the bitmap is *not* made durable
+**What `fsync` does not cover, on :** the bitmap is *not* made durable
 before a delta record. The record is fenced with its group
 (`src/core/vol_delta.c:1284-1318`); the bitmap is only written at `vol_flush`
 (`src/core/volume.c:1837`). A crash inside that window leaves a durable
@@ -314,8 +314,8 @@ wrong side of the ordering it was meant to provide.
 ### 4.6 Failure injection
 
 `INVFS_SYNC_FAIL_AT=N` makes the Nth `vol_sync` of the process latch the
-volume and report EIO (`tools/test-flushfail.sh`). On v3 the delta tail is
+volume and report EIO (`tools/test-flushfail.sh`). On  the delta tail is
 already barriered, so the hook's v2 inode-area zeroing is a no-op; what it
-exercises on v3 is the latch, the refused later mutations, and the
+exercises on  is the latch, the refused later mutations, and the
 no-CLEAN close. The fsync-durability crash test is
 `tools/test-fsync-crash.sh`.

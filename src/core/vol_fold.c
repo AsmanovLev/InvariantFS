@@ -1,6 +1,6 @@
 /* vol_fold.c — WP-M14: fold (merge the delta into the base).
  *
- * The design (design-meta-v3.md §5) is a lazy compaction: apply every live
+ * The design (design-meta-.md §5) is a lazy compaction: apply every live
  * delta record to a COW copy of the base B+-tree, publish the new root
  * atomically through the WP-M2 double slot, then reset the delta. It bounds
  * the recent tier (the D1 mount-latency risk) and is what turns unlink into
@@ -422,7 +422,7 @@ int vol_fold(invfs_volume *v)
     if (!v)
         return -1;
     if (!(v->sb.vol_flags & VOLF_META))
-        return -1;                       /* fold is a v3-only operation */
+        return -1;                       /* fold is a -only operation */
     if (v->sb.vol_flags & VOLF_READONLY)
         return -1;
     if (vol_delta_count(v) == 0)

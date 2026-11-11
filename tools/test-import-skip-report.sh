@@ -236,8 +236,8 @@ echo "== leg 5: --fail-on-skip =="
 mkvol "$WORK/v2.img"
 "$B/invf-import" --fail-on-skip "$WORK/v2.img" "$R" >/dev/null 2>&1
 [ $? -eq 3 ] || fail "leg 5: --fail-on-skip exit was $?, want 3"
-mkvol "$WORK/v3.img"
-"$B/invf-import" "$WORK/v3.img" "$R" >/dev/null 2>&1
+mkvol "$WORK/.img"
+"$B/invf-import" "$WORK/.img" "$R" >/dev/null 2>&1
 [ $? -eq 0 ] || fail "leg 5: plain import exit was $?, want 0 (the fix must not break existing callers)"
 ok "--fail-on-skip exits 3; plain import still exits 0"
 

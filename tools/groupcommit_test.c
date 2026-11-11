@@ -399,7 +399,7 @@ static void t7_broken_fd_still_reports_failure(const char *dir)
 /* WP602 T8-T10 -- the delta layer stages bounded groups behind one fence */
 /* ================================================================== */
 
-/* mkfs a scratch v3 image through the built tool (the spn_walk_tear_test
+/* mkfs a scratch  image through the built tool (the spn_walk_tear_test
  * shape) and open it. Prints a FAIL and returns NULL on setup failure. */
 static invfs_volume *t8_mkfs_open(const char *dir, const char *imgname)
 {

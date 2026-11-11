@@ -8,7 +8,7 @@ Worktree: `/srv/bench/worktrees/wt-dupaudit`
 Audit only, plus one fix for the one site that diverges with a demonstrable
 red control.
 
-* Audited read-only: every parallel/serial pair, every v2/v3 fork, every
+* Audited read-only: every parallel/serial pair, every v2/ fork, every
   near-duplicate helper, every length-vs-buffer `memcpy` in `src/` and
   `tools/`. Verdict per site is reported to the orchestrator, not filed here.
 * Fixed:

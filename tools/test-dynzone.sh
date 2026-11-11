@@ -332,18 +332,18 @@ echo
 echo "== [5] seal: stripes over the shadow extent cover overflow blocks =="
 $B/invf-mkfs "$IMG2" 0.5 > "$WORK/mkfs2.log"
 
-# Meta-v3: native seal (WP201, par2-inspired, no compat). vol_seal() seals
+# metadata store: native seal (WP201, par2-inspired, no compat). vol_seal() seals
 # standalone -- no sweep walk needed -- so leg 5 asserts the seal LANDED
 # (rc=0, stripes reported) rather than the old v2 refusal. What is NOT
 # asserted here is the corrupt->heal path below: self-healing reads are
 # S-remainder scope (not in WP201), so the healing block stays skipped
 # with reason while the seal/unseal mechanics are exercised for real.
-if grep -q "v3" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v0"; then
+if grep -q "" "$WORK/mkfs2.log" || $B/invf-fsck "$IMG2" 2>/dev/null | grep -q "format:.*v0"; then
     rc=0; $DZ "$IMG2" seal > "$WORK/seal-b.log" 2>&1 || rc=$?
-    [ "$rc" -eq 0 ] || { cat "$WORK/seal-b.log"; fail "leg5: seal failed on v3 (rc=$rc)"; }
+    [ "$rc" -eq 0 ] || { cat "$WORK/seal-b.log"; fail "leg5: seal failed on  (rc=$rc)"; }
     grep -q "sealed: .* stripes" "$WORK/seal-b.log" \
         || { cat "$WORK/seal-b.log"; fail "leg5: seal left no stripe report"; }
-    echo "  seal landed on v3 ($(grep -o "sealed: .*" "$WORK/seal-b.log" | head -n 1))"
+    echo "  seal landed on  ($(grep -o "sealed: .*" "$WORK/seal-b.log" | head -n 1))"
     SEALS=on
 else
     SEALS=on
@@ -372,7 +372,7 @@ fi   # [ "$SEALS" = on ]
 
 echo
 echo "== [6] resize: the advisory RAW share persists, shadow absorbs growth =="
-# unseal only when a seal was actually written; on v3 the seal never landed
+# unseal only when a seal was actually written; on  the seal never landed
 if [ "$SEALS" = on ]; then
     $DZ "$IMG2" unseal >/dev/null || fail "leg6: unseal failed"
 fi

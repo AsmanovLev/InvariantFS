@@ -1,11 +1,11 @@
-/* orphan_test.c — WP121: the safety test for the v3 orphan collector.
+/* orphan_test.c — WP121: the safety test for the  orphan collector.
  *
  * The collector (btree_collect_orphans, src/core/vol_btree.c) frees base
  * pages that no live root can reach. A wrong answer to "can this page be
  * reached" is SILENT DATA LOSS, not a crash, so this driver is built to
  * fail on the wrong answer rather than to pass on an empty run.
  *
- * Subcommands (the image is a v3 volume made by `invf-mkfs`):
+ * Subcommands (the image is a  volume made by `invf-mkfs`):
  *
  *   build <img> <nfiles> <ngen>
  *       Write nfiles files with deterministic content through the public

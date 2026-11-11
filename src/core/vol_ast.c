@@ -7,11 +7,11 @@
 
 
 /* ---- WP-M8: immutable recipe blob serialize / deserialize -----------
- * A v3 recipe blob is exactly the bytes a v2 inode record carries after
+ * A  recipe blob is exactly the bytes a v2 inode record carries after
  * its name: the AST header (v1 or v2) followed by the block entries. The
  * writer builds it from the session's entry table; the reader parses it
  * and hands the entries to the shared segment decoder. Children blobs are
- * v2 container metadata and are not part of a v3 recipe (WP-M8 scope:
+ * v2 container metadata and are not part of a  recipe (WP-M8 scope:
  * plain per-segment files); num_children is always 0 here. */
 
 int vol_ast_recipe_serialize(uint64_t file_size,
@@ -61,19 +61,19 @@ int vol_ast_recipe_serialize_tail(uint64_t file_size,
                                   uint32_t n_chld,
                                   uint8_t **blob_out, size_t *blen_out)
 {
-    uint8_t hdr[INVFS_AST_HDR_V3_LEN];
+    uint8_t hdr[INVFS_AST_HDR_LEN];
     size_t hlen, total, wlen = 0;
     uint8_t *blob;
-    /* WP639: v3 emission is test-forced only (INVFS_RECIPE_FORCE_V3=1).
+    /* WP639:  emission is test-forced only (INVFS_RECIPE_FORCE_V3=1).
      * No in-tree writer can produce wide fields (the in-memory entry is
      * still 24-bit block_id / 6-bit algo / 2-bit zone), so production
-     * output stays v1/v2 byte-identical; the v3 path is proved by the
+     * output stays v1/v2 byte-identical; the  path is proved by the
      * unit test and the forced e2e leg until a producer needs it. */
-    int force_v3 = 0;
+    int force_meta = 0;
     size_t esz = sizeof(*ents);
     const char *f3 = getenv("INVFS_RECIPE_FORCE_V3");
     if (f3 && f3[0] == '1' && f3[1] == '\0')
-        force_v3 = 1;
+        force_meta = 1;
 
     if (!blob_out || !blen_out || (n && !ents) || (n_wins && !wins) ||
         (n_chld && !chld))
@@ -86,7 +86,7 @@ int vol_ast_recipe_serialize_tail(uint64_t file_size,
                 (unsigned long long)file_size, (unsigned long long)MAX_FILE_SIZE);
         return -1;
     }
-    if (force_v3) {
+    if (force_meta) {
         hlen = invfs_ast_hdr_write_v3(hdr, file_size, n, 0);
         esz = 40;
     } else {
@@ -116,18 +116,18 @@ int vol_ast_recipe_serialize_tail(uint64_t file_size,
     if (!blob)
         return -1;
     memcpy(blob, hdr, hlen);
-    if (force_v3) {
+    if (force_meta) {
         /* 32 B in-memory -> 40 B on-disk + CRC, then self-verify: the
          * verify loop catches pack bugs before the blob is attested. */
         size_t i;
         for (i = 0; i < n; i++)
-            invfs_ast_entry_v3_pack(blob + hlen + i * 40,
+            invfs_ast_entry_pack(blob + hlen + i * 40,
                                     ents[i].file_offset, ents[i].length,
                                     ents[i].zone, ents[i].algo,
                                     ents[i].block_id, ents[i].block_offset,
                                     ents[i].pba);
         for (i = 0; i < n; i++)
-            if (invfs_ast_entry_v3_verify(blob + hlen + i * 40, 40) != 0) {
+            if (invfs_ast_entry_verify(blob + hlen + i * 40, 40) != 0) {
                 free(blob);
                 return -1;
             }
@@ -239,10 +239,10 @@ int vol_ast_recipe_children(const uint8_t *blob, size_t blen,
 
 /* Parse a recipe blob. On success *hdr_out is filled. For v1/v2 *ents_out
  * points INTO `blob` (valid while the caller keeps it, freed with it).
- * For v3 the 40 B images are verified (CRC + zero rsv) and converted into
+ * For  the 40 B images are verified (CRC + zero rsv) and converted into
  * a HEAP 32 B array (values that do not fit the in-memory widths refuse
  * loudly); the caller frees it with vol_ast_recipe_parsed_free (no-op for
- * v1/v2). With ents_out == NULL no conversion happens, but v3 entries are
+ * v1/v2). With ents_out == NULL no conversion happens, but  entries are
  * still all verified. 0 = ok, -1 = malformed/truncated. */
 int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
@@ -274,8 +274,8 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
             if (!conv)
                 return -1;
             for (i = 0; i < n; i++) {
-                if (invfs_ast_entry_v3_verify(base + i * 40, 40) != 0 ||
-                    invfs_ast_entry_v3_unpack(base + i * 40, &conv[i]) != 0) {
+                if (invfs_ast_entry_verify(base + i * 40, 40) != 0 ||
+                    invfs_ast_entry_unpack(base + i * 40, &conv[i]) != 0) {
                     free(conv);
                     return -1;
                 }
@@ -283,7 +283,7 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
             *ents_out = conv;
         } else {
             for (i = 0; i < n; i++)
-                if (invfs_ast_entry_v3_verify(base + i * 40, 40) != 0)
+                if (invfs_ast_entry_verify(base + i * 40, 40) != 0)
                     return -1;
         }
         if (nents_out)
@@ -383,7 +383,7 @@ static void free_recipe_level(invfs_volume *v,
 /* vol_ast_recipe_parsed_free lives in volume_internal.h (static inline:
  * partial core links such as cpack_map_conc_* resolve it without vol_ast.o). */
 
-/* WP201: free every data block a v3 recipe names. 0 = the recipe parsed and
+/* WP201: free every data block a  recipe names. 0 = the recipe parsed and
  * every block it named is now free (or it named none); -1 = nothing was
  * freed because the recipe could not be loaded OR did not parse.
  *

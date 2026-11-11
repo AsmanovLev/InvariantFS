@@ -1,8 +1,8 @@
 /*
- * btree_repair_test.c — WP86: a torn metadata-v3 base page must be
+ * btree_repair_test.c — WP86: a torn metadata store base page must be
  * survivable, not fatal.
  *
- * Meta-v3 keeps the namespace in an immutable COW B+-tree anchored by the
+ * metadata store keeps the namespace in an immutable COW B+-tree anchored by the
  * RT30 double slot. Before WP86 a single unreadable base page was reported by
  * invf-fsck and repaired by nothing: `fsck -f` was a no-op, invf-rollback
  * could not help, and -- far worse -- a torn *root* page made
@@ -541,7 +541,7 @@ static int build_and_fold(void)
         return -1;
     }
     if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "btree_repair_test: %s is not a v3 volume\n", g_img);
+        fprintf(stderr, "btree_repair_test: %s is not a  volume\n", g_img);
         return -1;
     }
 
@@ -685,7 +685,7 @@ int main(int argc, char **argv)
              dir, (long)getpid());
     unlink(g_img);
 
-    printf("WP86: a torn v3 base page must be survivable (btree_repair_test)\n");
+    printf("WP86: a torn  base page must be survivable (btree_repair_test)\n");
 
     g_phase = "A: build + fold";
     /* ---- A: build + fold ---- */
@@ -1627,7 +1627,7 @@ int main(int argc, char **argv)
     g_phase = "G: a save point on a damaged base tree";
     /* ---- G: a save point on a damaged base tree ---- */
     {
-        invfs_volume *v3;
+        invfs_volume *;
         invfs_spt0 sp;
         int sp_rc, restore_rc;
 
@@ -1635,10 +1635,10 @@ int main(int argc, char **argv)
                  g_bin, g_img);
         if (system(cmd) != 0)
             return 2;
-        v3 = vol_open(g_img, &err_open);
-        if (!v3)
+         = vol_open(g_img, &err_open);
+        if (!)
             return 2;
-        g_v = v3;
+        g_v = ;
         {
             uint8_t k[8], val[INVFS_INODE_ROW_FIXED];
             invfs_inode_row row;
@@ -1653,17 +1653,17 @@ int main(int argc, char **argv)
                 ino_key(k, FIRST_ID + (uint64_t)j);
                 row.size = (uint64_t)j;
                 memcpy(val, &row, sizeof row);
-                if (vol_delta_append(v3, k, sizeof k, val,
+                if (vol_delta_append(, k, sizeof k, val,
                                      (uint16_t)sizeof row, 0) != 0) {
                     fprintf(stderr, "btree_repair_test: spt0 seed failed\n");
                     return 2;
                 }
             }
-            if (vol_fold(v3) != 0)
+            if (vol_fold() != 0)
                 return 2;
         }
-        sp_rc = spt0_capture(v3);
-        ok(sp_rc == 0 && spt0_info(v3, &sp) == 1, "save point captured");
+        sp_rc = spt0_capture();
+        ok(sp_rc == 0 && spt0_info(, &sp) == 1, "save point captured");
         if (sp_rc != 0)
             return 1;
         memset(&g_lp, 0, sizeof g_lp);
@@ -1671,41 +1671,41 @@ int main(int argc, char **argv)
         g_best_rows = 0;
         g_want_files = 0;      /* this image has no named files */
         g_pages = 0;
-        if (vol_base_root(v3, &root) != 0)
+        if (vol_base_root(, &root) != 0)
             return 2;
         scan_rec(root);
         if (!g_lp.victim) {
             fprintf(stderr, "btree_repair_test: no leaf for the spt0 case\n");
             return 2;
         }
-        vol_close(v3);
+        vol_close();
         g_v = NULL;
         if (tear_page(g_img, g_lp.victim) != 0)
             return 2;
-        v3 = vol_open(g_img, &err_open);
-        ok(v3 != NULL, "vol_open succeeds with a live save point on a "
+         = vol_open(g_img, &err_open);
+        ok( != NULL, "vol_open succeeds with a live save point on a "
                        "damaged base");
-        if (!v3)
+        if (!)
             return 1;
-        g_v = v3;
-        ok(spt0_info(v3, &sp) == 1, "the save point is still live");
-        if (vol_base_root(v3, &root) == 0)
+        g_v = ;
+        ok(spt0_info(, &sp) == 1, "the save point is still live");
+        if (vol_base_root(, &root) == 0)
             ok(1, "base root readable before the rollback attempt");
         else
             return 2;
-        restore_rc = spt0_restore(v3);
+        restore_rc = spt0_restore();
         printf("  spt0_restore on a damaged save point: rc=%d\n", restore_rc);
         ok(restore_rc != 0, "spt0_restore refuses a damaged save point base");
         {
             invfs_blkptr after;
-            int same = (vol_base_root(v3, &after) == 0) &&
+            int same = (vol_base_root(, &after) == 0) &&
                        after.pba == root.pba && after.gen == root.gen;
             ok(same, "the refused rollback published nothing (the volume is "
                      "exactly as it was)");
         }
-        ok(spt0_info(v3, &sp) == 1, "the refused rollback kept the save point "
+        ok(spt0_info(, &sp) == 1, "the refused rollback kept the save point "
                                     "for a later, explicit decision");
-        vol_close(v3);
+        vol_close();
         g_v = NULL;
     }
 

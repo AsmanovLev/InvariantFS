@@ -1,6 +1,6 @@
 #!/bin/bash
-# test-entry-v3.sh — WP639 recipe entry v3 e2e: a forced-v3 volume lives
-# a full lifecycle, and mixed v1/v2+v3 volumes read back bit-exact.
+# test-entry-.sh — WP639 recipe entry  e2e: a forced volume lives
+# a full lifecycle, and mixed v1/v2+ volumes read back bit-exact.
 #
 #   Leg A (forced): mkfs + invf-cp a small corpus (text, random binary,
 #   3-segment file) with INVFS_RECIPE_FORCE_V3=1, offline sweep, invf-fsck
@@ -12,7 +12,7 @@
 #   surface as EIO/fsck-DAMAGED, which is what the legs assert against.)
 #
 #   Leg B (mixed): the same volume gets a second file written through a
-#   NON-forced mount (v1/v2 recipe) next to the forced-v3 files. Every
+#   NON-forced mount (v1/v2 recipe) next to the forced files. Every
 #   file reads back byte-identical and fsck stays CLEAN -- old and new
 #   strides coexist in one volume, and the dual-stride parse serves both.
 #
@@ -20,8 +20,8 @@
 #   the same corpus through cp + sweep + cat + fsck. Nothing about the
 #   production path changed (v1/v2 byte-identical output).
 #
-# Run from the repo root after `make`:  bash tools/test-entry-v3.sh
-# Under e2e rules via: bash tools/run-e2e.sh tools/test-entry-v3.sh
+# Run from the repo root after `make`:  bash tools/test-entry-.sh
+# Under e2e rules via: bash tools/run-e2e.sh tools/test-entry-.sh
 # with INVFS_E2E_AGENT=wp639 (AGENTS.md 1.5). Uses /dev/shm workdirs and
 # RELATIVE image paths (blkio treats /dev/* as raw devices).
 set -e
@@ -61,7 +61,7 @@ fsck_ok() {  # <img>
 }
 
 # deterministic corpus: text (sweepable), random binary (verbatim lane),
-# 3-segment file (multi-entry recipe: the v3 conversion walks > 1 entry).
+# 3-segment file (multi-entry recipe: the  conversion walks > 1 entry).
 python3 - "$WORK/ref" <<'EOF'
 import sys, os
 d = sys.argv[1]
@@ -70,7 +70,7 @@ open(os.path.join(d, "rand.bin"), "wb").write(os.urandom(100000))
 open(os.path.join(d, "three.bin"), "wb").write(os.urandom(3 * 65536 + 100))
 EOF
 
-echo "== [A] forced-v3 volume lifecycle =="
+echo "== [A] forced volume lifecycle =="
 $B/invf-mkfs wp639-a.img 64 >/dev/null || fail "mkfs A"
 INVFS_RECIPE_FORCE_V3=1 $B/invf-cp wp639-a.img "$WORK/ref/hello.txt" hello.txt >/dev/null || fail "cp hello"
 INVFS_RECIPE_FORCE_V3=1 $B/invf-cp wp639-a.img "$WORK/ref/rand.bin" rand.bin >/dev/null || fail "cp rand"
@@ -79,9 +79,9 @@ INVFS_RECIPE_FORCE_V3=1 $B/invf-sweep wp639-a.img >/dev/null 2>&1 || fail "sweep
 fsck_ok wp639-a.img
 for f in hello.txt rand.bin three.bin; do
     $B/invf-cat wp639-a.img "$f" > "$WORK/out-$f" || fail "cat $f"
-    cmp "$WORK/ref/$f" "$WORK/out-$f" || fail "$f not bit-exact after forced-v3 sweep"
+    cmp "$WORK/ref/$f" "$WORK/out-$f" || fail "$f not bit-exact after forced sweep"
 done
-ok "A: forced-v3 cp + sweep + cat bit-exact, fsck OK"
+ok "A: forced cp + sweep + cat bit-exact, fsck OK"
 
 echo "== [B] mixed strides coexist =="
 mnt_up wp639-a.img
@@ -101,7 +101,7 @@ mnt_up wp639-a.img
 [ ! -e "$MNT/rand.bin" ] || fail "unlinked file still present"
 cmp "$WORK/ref/three.bin" "$MNT/three.bin" || fail "post-unlink survivor not exact"
 mnt_down
-ok "B: mixed v1/v2+v3 volume reads exact, unlink reclaims, fsck OK"
+ok "B: mixed v1/v2+ volume reads exact, unlink reclaims, fsck OK"
 
 echo "== [C] unforced regression =="
 $B/invf-mkfs wp639-c.img 64 >/dev/null || fail "mkfs C"
@@ -113,4 +113,4 @@ $B/invf-cat wp639-c.img hello.txt > "$WORK/out-c-hello" || fail "cat C"
 cmp "$WORK/ref/hello.txt" "$WORK/out-c-hello" || fail "unforced round-trip changed"
 ok "C: knob-off path unchanged and green"
 
-echo "PASS: test-entry-v3 (all legs green)"
+echo "PASS: test-entry- (all legs green)"

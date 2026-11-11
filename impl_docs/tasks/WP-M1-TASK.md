@@ -1,36 +1,36 @@
-# WP-M1 — v3 format skeleton: superblock, root area, mkfs, open
+# WP-M1 —  format skeleton: superblock, root area, mkfs, open
 
-**Branch:** `wp/m1-format-v3`
+**Branch:** `wp/m1-format-`
 **Worktree:** `/tmp/invfs-wp-m1`
 **Severity:** HIGH (format-breaking)
-**Source:** `impl_docs/design-meta-v3.md` §12 (on-disk format v3)
-**Estimated effort:** large (first WP of the metadata-v3 programme)
+**Source:** `impl_docs/design-meta-.md` §12 (on-disk format )
+**Estimated effort:** large (first WP of the metadata store programme)
 
 ---
 
 ## Scope
 
-Land the **on-disk v3 skeleton** only: the format marker, the root-area
-descriptor, and the `mkfs` / `vol_open` handling for a **v3, empty**
+Land the **on-disk  skeleton** only: the format marker, the root-area
+descriptor, and the `mkfs` / `vol_open` handling for a **, empty**
 volume. No trees, no delta, no metadata operations yet.
 
 Files in scope:
-- `src/core/invarifs.h` — v3 constants + descriptor structs (additive).
-- `src/cli/mkfs.c` — write a v3 volume (marker + zeroed root area).
-- `src/core/volume.c` — `vol_open`/`vol_close` accept v3 and mount an
-  empty namespace; `vol_sync`/`vol_flush` stay no-ops on empty v3.
-- `src/core/vol_fsck.c` / `src/cli/fsck.c` — minimal v3 accept.
+- `src/core/invarifs.h` —  constants + descriptor structs (additive).
+- `src/cli/mkfs.c` — write a  volume (marker + zeroed root area).
+- `src/core/volume.c` — `vol_open`/`vol_close` accept  and mount an
+  empty namespace; `vol_sync`/`vol_flush` stay no-ops on empty .
+- `src/core/vol_fsck.c` / `src/cli/fsck.c` — minimal  accept.
 - `tools/test-meta.sh` — new e2e leg 0 (mkfs/open/close/fsck).
 
-Do **not** delete v2 yet (that is WP-M21). v3 lands alongside; the default
-`mkfs` may keep writing v2 until WP-M2 wires the v3 engine, but the v3
+Do **not** delete v2 yet (that is WP-M21).  lands alongside; the default
+`mkfs` may keep writing v2 until WP-M2 wires the  engine, but the 
 path must be reachable via `INVFS_V3=1` (env) on mkfs and must round-trip.
 
 ---
 
 ## Why
 
-Everything in the programme depends on a stable v3 on-disk interface
+Everything in the programme depends on a stable  on-disk interface
 (design §12). This WP freezes that interface so later WPs (page format,
 trees, delta) can proceed independently.
 
@@ -38,7 +38,7 @@ trees, delta) can proceed independently.
 
 ## Design
 
-- `INVFS_VERSION` stays 3 for v3 volumes; keep the 8-byte `"InvariFS\0"`
+- `INVFS_VERSION` stays 3 for  volumes; keep the 8-byte `"InvariFS\0"`
   magic. Add `VOLF_V3 0x00000010` in `sb.vol_flags` (outside the
   superblock checksum, per the existing convention).
 - Add a **root-area descriptor** in block 0 at the first free
@@ -56,9 +56,9 @@ uint64_t seq             root generation (monotone; higher = newer)
 uint32_t crc32c          over the descriptor with this field read as 0
 ```
 
-- Add **v3 base-page and block-pointer structs** (`invfs_page_hdr`,
+- Add ** base-page and block-pointer structs** (`invfs_page_hdr`,
   `invfs_blkptr`) to `invarifs.h` as the frozen wire format for WP-M2/M3.
-- `mkfs` v3 path (`INVFS_V3=1`): set `format_version=3` and `VOLF_V3`,
+- `mkfs`  path (`INVFS_V3=1`): set `format_version=3` and `VOLF_V3`,
   allocate a small root area (e.g. 2 pages) in the metadata zone, zero it,
   write the RT30 descriptor with `seq=0`, empty root slots, no delta.
 - `vol_open`: if `VOLF_V3`, skip the v2 record scan; present an empty
@@ -93,6 +93,6 @@ uint32_t crc32c          over the descriptor with this field read as 0
 
 ## Coordination notes
 
-- Subagent ID: `wp-m1-format-v3`; pass `INVFS_E2E_AGENT=wp-m1-format-v3`.
-- Dependencies: none (base = `wp/meta-v3-design`).
+- Subagent ID: `wp-m1-format-`; pass `INVFS_E2E_AGENT=wp-m1-format-`.
+- Dependencies: none (base = `wp/meta--design`).
 - Blocks: WP-M2 (page format + allocator), WP-M4 (fsck).

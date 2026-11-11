@@ -1,4 +1,4 @@
-/* vol_seal.c — native v3 content seal (WP201). Par2-inspired, no compat.
+/* vol_seal.c — native  content seal (WP201). Par2-inspired, no compat.
  *
  * WHAT SEALED MEANS HERE. At seal time the engine walks the live namespace
  * (vol_walk_strict + receipt — a short walk fails the seal, never a partial
@@ -106,7 +106,7 @@ void seal_dirty_mark(invfs_volume *v, uint64_t pba, uint64_t n)
 }
 
 /* WP404: clear the bitmap after a successful seal (allocate first when
- * this session never had one — the v3 open leaves it NULL). From here to
+ * this session never had one — the  open leaves it NULL). From here to
  * the next seal every mark is proof of a post-seal write, which is what
  * makes the next reseal's incremental gate honest. */
 static void seal_dirty_clear(invfs_volume *v)

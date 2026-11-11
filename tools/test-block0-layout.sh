@@ -10,7 +10,7 @@
 #   0x3C4  PCK0   codec-policy table   (ends at or before 0x9D0)
 #   0x9D0  RT30   base-tree root       (48 B -> 0xA00)
 #   0xA00  ..     reserved-zero        (32 B, deliberately not a slot)
-#   0xA20  SPN0   the only v3 savepoint (56 B -> 0xA58); ABSENT until a capture
+#   0xA20  SPN0   the only  savepoint (56 B -> 0xA58); ABSENT until a capture
 #   last   ANC0   the tail anchor
 #
 # SPN0 is written by the first capture, not by mkfs, so the gate asserts the

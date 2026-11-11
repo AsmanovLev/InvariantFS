@@ -3,7 +3,7 @@
  * ---------------------------------------------------------------------------
  * WHAT THIS IS THE RED CONTROL FOR
  *
- * A v3 sweep transform that allocates and writes replacement segments and
+ * A  sweep transform that allocates and writes replacement segments and
  * then CANNOT publish the recipe that would name them must give every one of
  * those blocks back. `vol_recipe_store` is the single point at which the
  * new recipe becomes reachable and the one step in the pass that can fail for
@@ -20,7 +20,7 @@
  * stayed allocated under no reachable name.
  *
  * Measured through tools/test-sweep-publish-rollback.sh, 36 files / 1 MiB of
- * incompressible data on a 0.07 GiB v3 image, one sweep, identical corpus on
+ * incompressible data on a 0.07 GiB  image, one sweep, identical corpus on
  * both trees:
  *
  *                      free before -> after        unclaimed       outcome
@@ -324,7 +324,7 @@ int main(int argc, char **argv)
     fill_incompressible(piece,  target, 0xC0FFEE02ull);
     fill_incompressible(step,   65536,  0xC0FFEE03ull);
 
-    printf("leg 1-5: a v3 sweep transform that cannot publish must roll back\n");
+    printf("leg 1-5: a  sweep transform that cannot publish must roll back\n");
     printf("        corpus: 1 x %zu bytes incompressible = %zu segments\n",
            target, target / SEG_BYTES);
 

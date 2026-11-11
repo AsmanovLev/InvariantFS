@@ -343,7 +343,7 @@ static int dedup_remap_file(invfs_volume *v, uint64_t inode,
 }
 
 
-static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+static int dedup_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                             uint32_t type, uint64_t size, int64_t mtime)
 {
     dedup_hash_ctx *ctx = (dedup_hash_ctx *)ctx_;
@@ -368,7 +368,7 @@ static int dedup_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * recipe over the link. Stated through the predicate the READ path
      * dispatches on (src/core/volume.h) so the two cannot drift again.
      *
-     * Today this is redundant: every v3 symlink writer takes strlen() over a
+     * Today this is redundant: every  symlink writer takes strlen() over a
      * NUL-terminated buffer and both version words carry a NUL at offset 1,
      * so the blob is one byte long and hdr_parse rejects it before it reads
      * the version. Redundant is not harmless -- it is a property of the
@@ -489,7 +489,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
          ctx.progress_user = report_user;
          ctx.stop = 0;
         ctx.err = 0;
-        wrc = vol_walk(v, dedup_v3_walk_cb, &ctx);
+        wrc = vol_walk(v, dedup_walk_cb, &ctx);
         segs = ctx.segs;        /* the callback may have grown the array */
         blob = ctx.blob;
         n = ctx.n;

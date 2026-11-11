@@ -3,11 +3,11 @@
  *
  * Exercises point search, COW upsert, split/merge, ordered scan, CRC/gen
  * verification, the structural check, and the reachability-diff reclaim
- * primitive over a synthetic v3 volume (a real blkio over a scratch file).
+ * primitive over a synthetic  volume (a real blkio over a scratch file).
  *
  *   invf-btree_test [scratch-dir]
  *
- * No vol_open/mkfs: the v3 write path is not wired yet (WP-M3 scope), so the
+ * No vol_open/mkfs: the  write path is not wired yet (WP-M3 scope), so the
  * harness builds the minimum WP-M2 geometry it needs, exactly like
  * metabuf_test.c.
  */
@@ -382,7 +382,7 @@ static invfs_blkptr empty_root(void)
  *
  * bt_split_point() can only cut an overflowing node in two, and for a
  * variable-width run there are orderings with NO cut index at which both
- * halves fit a 4 KiB page. The production trigger was a v3 recipe leaf: a
+ * halves fit a 4 KiB page. The production trigger was a  recipe leaf: a
  * 3072-byte Q2R3 recipe chunk (36-byte chunk key) between narrower recipe
  * blobs (33-byte keys). Encoded, that leaf is
  *
@@ -486,7 +486,7 @@ static void test_wide_records(invfs_volume *v)
  * an already-split internal page -- never runs.
  *
  * The production trigger was exactly one level up. The sweep's dedupe pass
- * stores a fresh recipe per merged file, so the v3 base tree's root is an
+ * stores a fresh recipe per merged file, so the  base tree's root is an
  * internal page with a dozen-odd leaf children; one of those leaves then
  * three-way splits under a wide Q2R3 chunk and the splice ran. The loop
  *

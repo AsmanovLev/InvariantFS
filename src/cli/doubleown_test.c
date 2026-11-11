@@ -24,7 +24,7 @@
  *   A  two sound files (different sizes) + empty + dir + symlink
  *      -> audit clean (checked=2: only content files count), fsck clean
  *   B  a second inode published on A's blob with a DIFFERENT row size
- *      (the real v3 publish pair, as in pbaref_test's hookctl)
+ *      (the real  publish pair, as in pbaref_test's hookctl)
  *      -> audit DETECTS (bad=1, kind INCOHERENT, id+name), fsck DAMAGED
  *   B2 the audit tracks the read path: C unreadable, A bit-exact
  *   C  unlink the sharer -> clean again (detection, not a sticky verdict)

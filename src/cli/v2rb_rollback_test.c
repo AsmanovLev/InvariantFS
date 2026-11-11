@@ -1,4 +1,4 @@
-/* v2rb_rollback_test.c — the two v2-era paths that kept running on v3.
+/* v2rb_rollback_test.c — the two v2-era paths that kept running on .
  *
  * Both bugs are the same shape: a retired v2 mechanism that was correct in
  * its own time is still being driven on Meta, where it is either a
@@ -6,27 +6,27 @@
  * that is right and the current implementation diverged.
  *
  * ---------------------------------------------------------------------------
- * LEG A — a v2 rollback reached on v3, and it writes into v3's shared pool.
+ * LEG A — a v2 rollback reached on , and it writes into 's shared pool.
  *
  * src/core/vol_cpack.c's MAP branch commits with vol_create_blob_file()
  * (:3292) and, on the two failure paths after that commit, rolls back with
- * an UNGUARDED vol_delete_inode(v, newino, name) (:3307, :3318). On v3,
+ * an UNGUARDED vol_delete_inode(v, newino, name) (:3307, :3318). On ,
  * vol_create_blob_file supersedes the inode row IN PLACE (newino ==
  * inode_id), so the old row the rollback exists to retire is already gone:
  * the call cannot undo the commit it was written to undo.
  *
  * It is not a no-op while failing to. vol_retire_inode (vol_records.c:623)
- * has no v3 guard, so it calls vol_mark_dirty (a superblock rewrite) and
+ * has no  guard, so it calls vol_mark_dirty (a superblock rewrite) and
  * then appends a v2 TOMBSTONE_MAGIC record through vol_append_slot into the
- * ACTIVE METADATA EXTENT. On v3 that extent is the shared base-page / data
+ * ACTIVE METADATA EXTENT. On  that extent is the shared base-page / data
  * pool the COW B+ tree allocates from — and where the metadata zone ran
  * short it is physically in the shadow pool (AGENTS.md 2.7). MEASURED HERE:
  * the record landed at pba 2680775 in the shadow zone, over a block that was
- * ALLOCATED. That is a v2-shaped record written over a live v3 block: a
+ * ALLOCATED. That is a v2-shaped record written over a live  block: a
  * bit-exactness violation, not a bookkeeping one.
  *
  * What it does NOT do is lose the file: the v2 tombstone and the idx_del
- * beside it are invisible to v3 resolution, so the committed row survives.
+ * beside it are invisible to  resolution, so the committed row survives.
  * The damage is the pool overwrite plus the superblock rewrite — and the
  * lane then reports "declined", so the operator sees a clean sweep log over
  * a volume that just had a live block overwritten. This test asserts on the
@@ -42,7 +42,7 @@
  * vol_free_recipe_blocks() (vol_ast.c:125) returns -1 when the recipe
  * LOAD fails but 0 when it does not PARSE, having freed nothing. Its v2
  * twin bails on parse failure too (vol_records.c:551-557). So unlinking a
- * v3 inode whose recipe does not parse makes vol_unlink report SUCCESS,
+ *  inode whose recipe does not parse makes vol_unlink report SUCCESS,
  * the row is deleted, and every block the recipe named is allocated,
  * referenced by nothing, and reachable by no name.
  *
@@ -131,7 +131,7 @@ static const char *err_capture_end(void)
 /* Count the v2-shaped records ("DELT" tombstones) sitting in the SHARED
  * METADATA ZONE right now. The assertion is made against the bytes on the
  * device, not against a flag or an in-memory cursor: the claim that matters
- * is "a v2 record landed in the pool v3's COW B+ tree allocates from", and
+ * is "a v2 record landed in the pool 's COW B+ tree allocates from", and
  * anything cheaper would only prove the test agrees with itself.
  *
  * Scanned on a CLOSED volume (a reopened handle), because the record stream
@@ -213,9 +213,9 @@ static uint64_t write_file(const char *name, const uint8_t *body, size_t n)
 
 /* ---------------------------------------------------------------- LEG A -- */
 
-/* What the MAP branch's rollback must NOT do on v3. Called through
+/* What the MAP branch's rollback must NOT do on . Called through
  * cpack_rollback_commit() in src/core/vol_cpack.c, i.e. the shipped line. */
-static void leg_a_map_rollback_on_v3(void)
+static void leg_a_map_rollback_on(void)
 {
     static uint8_t body[96 * 1024];
     static uint8_t container[40 * 1024];
@@ -229,7 +229,7 @@ static void leg_a_map_rollback_on_v3(void)
     const char *log;
     size_t i;
 
-    printf("leg A: containerpack MAP-branch rollback on a v3 volume\n");
+    printf("leg A: containerpack MAP-branch rollback on a  volume\n");
     for (i = 0; i < sizeof body; i++)   body[i] = (uint8_t)(i * 7 + 3);
     for (i = 0; i < sizeof container; i++) container[i] = (uint8_t)(i * 11 + 5);
 
@@ -247,7 +247,7 @@ static void leg_a_map_rollback_on_v3(void)
      * rollback would be harmless and this test would be testing nothing --
      * so it is asserted rather than assumed. */
     ok(newino == old_id,
-       "leg A: on v3 the commit supersedes the row IN PLACE "
+       "leg A: on  the commit supersedes the row IN PLACE "
        "(newino == inode_id) -- so the row the rollback exists to retire is "
        "already gone and the rollback cannot undo its own commit");
 
@@ -282,7 +282,7 @@ static void leg_a_map_rollback_on_v3(void)
     clobbered_allocated = block_allocated(pos_before / INVFS_BLOCK_SIZE);
 
     /* the exact byte the v2 record stream would append at: the ACTIVE
-     * metadata extent's base plus its append offset. On v3 that extent is
+     * metadata extent's base plus its append offset. On  that extent is
      * the shared base-page / data pool the COW B+ tree allocates from, and
      * on a volume where the metadata zone ran short the allocator falls
      * back to the shadow pool (AGENTS.md 2.7) -- so this is the pool the
@@ -350,7 +350,7 @@ static void leg_a_map_rollback_on_v3(void)
     ok(tomb_after == tomb_before,
        "leg A: NO v2 TOMBSTONE record reaches the shared metadata extent");
     ok(tomb_before == 0,
-       "leg A: a sound v3 volume holds no v2 tombstone records at all "
+       "leg A: a sound  volume holds no v2 tombstone records at all "
        "(the positive control: a counter stuck at zero would pass the "
        "check above vacuously)");
 
@@ -363,7 +363,7 @@ static void leg_a_map_rollback_on_v3(void)
     {
         /* BIT-EXACTNESS, asserted as "the committed recipe is byte-identical
          * to what the commit wrote". The rollback's whole job is to undo the
-         * commit; on v3 it cannot, and the damage it does instead is to the
+         * commit; on  it cannot, and the damage it does instead is to the
          * committed row. So the pinned invariant is that the bytes the
          * commit published are still exactly those bytes afterwards.
          *
@@ -425,7 +425,7 @@ static int poison_recipe(uint64_t id, uint8_t new_addr[INVFS_RECIPE_ADDR_LEN],
         pbas[n++] = ents[i].pba;
     if (npbas) *npbas = n;
 
-    /* the AST version word: neither V1, V2 nor V3, so invfs_ast_hdr_parse
+    /* the AST version word: neither V1, V2 nor , so invfs_ast_hdr_parse
      * refuses and vol_ast_recipe_parse returns -1. Everything else about
      * the blob is untouched, so it still hashes to a valid address and
      * still names the same segments. */
@@ -451,7 +451,7 @@ static void leg_d_unparseable_recipe(void)
     const char *log;
     size_t i, n_held = 0;
 
-    printf("leg D: unparseable v3 recipe -- what the caller is told vs what "
+    printf("leg D: unparseable  recipe -- what the caller is told vs what "
            "happened to the blocks\n");
     for (i = 0; i < sizeof body; i++) body[i] = (uint8_t)(i * 31 + 17);
 
@@ -537,7 +537,7 @@ int main(int argc, char **argv)
 
     snprintf(g_tmpdir, sizeof g_tmpdir, "%s", dir);
 
-    printf("v2rb_rollback_test: v2 rollback paths must not run on v3\n");
+    printf("v2rb_rollback_test: v2 rollback paths must not run on \n");
 
     snprintf(g_img, sizeof g_img, "%s/invf-v2rb-test.img", dir);
     unlink(g_img);
@@ -557,11 +557,11 @@ int main(int argc, char **argv)
         return 2;
     }
     if (!(g_v->sb.vol_flags & VOLF_META)) {
-        printf("  volume is not v3 -- this test is meaningless on it\n");
+        printf("  volume is not  -- this test is meaningless on it\n");
         return 2;
     }
 
-    leg_a_map_rollback_on_v3();
+    leg_a_map_rollback_on();
     leg_d_unparseable_recipe();
 
     vol_close(g_v);

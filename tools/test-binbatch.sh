@@ -19,7 +19,7 @@ set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 
-# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+# the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
 B=$REPO/bin

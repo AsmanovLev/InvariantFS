@@ -14,7 +14,7 @@
 # What survives, and why it is worth its own suite:
 #
 #   [A] a corpus built through a real RW FUSE mount; fsck clean.
-#   [B] the sweep arms the v3 rollback window (SPT0 save point) — the v2
+#   [B] the sweep arms the  rollback window (SPT0 save point) — the v2
 #       CKP0 arm, restated against the code that exists. fsck reports it live.
 #   [C] the present moves on: overwrite one file, delete another, add a third.
 #   [L] THE SINGLE-WRITER LOCK. While a mount holds the image, every other
@@ -146,10 +146,10 @@ mnt_down
 fsck_ok "$IMG"
 
 echo
-echo "== [B] the sweep arms the v3 rollback window (SPT0 save point) =="
+echo "== [B] the sweep arms the  rollback window (SPT0 save point) =="
 # The v2 leg here grepped the sweep log for "checkpoint: #1 armed" and "N
 # retained blocks held for rollback". Neither string is in the tree: the sweep's
-# v3 branch is tools/invf-sweep.c:1661-1700 (drop the previous window, capture
+#  branch is tools/invf-sweep.c:1661-1700 (drop the previous window, capture
 # a fresh one before the walk) and the registry write is gated on !VOLF_META
 # (tools/invf-sweep.c:2085). What it must print now is the save point.
 $B/invf-sweep "$IMG" > "$WORK/sweep.log" 2>&1 || { cat "$WORK/sweep.log"; exit 1; }

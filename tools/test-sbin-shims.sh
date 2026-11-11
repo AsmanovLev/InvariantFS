@@ -9,7 +9,7 @@
 #   under -a and exits 4 (fsck(8) "errors left uncorrected"), never 0.
 # Leg 4 (operational): garbage file exits 8; no args / bad flag /
 #   --discard-reachable exit 16.
-# Leg 5 (mkfs refusals): -L/-U refused (no label field in format v0);
+# Leg 5 (mkfs refusals): -L/-U refused (no label field in format v1);
 #   non-numeric size refused. -V exits 0.
 # Leg 6 (mount fake): mount.invfs -f prints the daemon command, mounts
 #   nothing, exits 0. Bare usage exits 1.

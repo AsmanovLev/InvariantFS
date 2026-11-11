@@ -1044,7 +1044,7 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
 }
 
 
-/* WP-M23: supersede an existing v3 inode's recipe address with a newly
+/* WP-M23: supersede an existing  inode's recipe address with a newly
  * packed blob in Shadow, completely by inode id. Dirents, attributes, and
  * hardlinks are untouched. */
 uint64_t vol_publish_blob_inode(invfs_volume *v, uint64_t inode_id,

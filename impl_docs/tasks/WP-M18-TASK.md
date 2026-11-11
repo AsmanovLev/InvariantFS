@@ -6,11 +6,11 @@
 - Base: `main` @ `26ef748`
 
 ## Context from compressed orchestration (b6)
-WP-M14 merged: fold works, `fold_reclaim_hook` is a no-op stub (M15 fills it). WP-M11: overlay reads delta-first over base. WP-M17: hardlinks via nlink (shared inodes visited once). The DATA plane is UNCHANGED — RAW appends, Shadow sweep, codecs, seals, heat counters all work exactly as before. What changes: the sweep's metadata enumeration switches from v2 record scan (O(live + dead + tombstones)) to v3 base+delta overlay iteration (O(live only)).
+WP-M14 merged: fold works, `fold_reclaim_hook` is a no-op stub (M15 fills it). WP-M11: overlay reads delta-first over base. WP-M17: hardlinks via nlink (shared inodes visited once). The DATA plane is UNCHANGED — RAW appends, Shadow sweep, codecs, seals, heat counters all work exactly as before. What changes: the sweep's metadata enumeration switches from v2 record scan (O(live + dead + tombstones)) to  base+delta overlay iteration (O(live only)).
 
 ## Scope (from WP-M18 spec, impl_docs/WP-M18-sweep-integration.md)
 
-**Reconnect the sweep to the metadata-v3 live set. DATA plane unchanged. Changes: iterate base tree + delta overlay (WP-M11) instead of v2 record scan, request a fold (WP-M14), schedule metadata reclaim (WP-M15).**
+**Reconnect the sweep to the metadata store live set. DATA plane unchanged. Changes: iterate base tree + delta overlay (WP-M11) instead of v2 record scan, request a fold (WP-M14), schedule metadata reclaim (WP-M15).**
 
 Files:
 - `src/core/vol_sweep.c` — `vol_sweep_one`, `vol_sweep_file`, `vol_sweep_name_of`, `vol_compute_stats`
@@ -37,8 +37,8 @@ Files:
    - nlink tracking: use a simple `uint64_t *visited` array with linear probe (small for test volumes); clear on each sweep pass
    - Return error from callback to stop iteration
 
-2. **Wire into `vol_sweep_name_of` (vol_sweep.c:1389)** for v3:
-   - On v3, use the new iterator to find name from inode id (reverse dirent lookup)
+2. **Wire into `vol_sweep_name_of` (vol_sweep.c:1389)** for :
+   - On , use the new iterator to find name from inode id (reverse dirent lookup)
    - On v2, keep existing path unchanged
 
 3. **Sweep pass driver** — modify the sweep daemon loop (`tools/invf-sweep.c` or the embedded daemon in `vol_sweep.c`):
@@ -48,7 +48,7 @@ Files:
 
 4. **`fold_request`** already exists in `vol_fold.c` — verify it's wired for external callers.
 
-5. **`vol_compute_stats`** (vol_sweep.c) for v3: use base tree size + delta index size instead of v2 inode area scan.
+5. **`vol_compute_stats`** (vol_sweep.c) for : use base tree size + delta index size instead of v2 inode area scan.
 
 6. **Keep all existing DATA semantics unchanged**: RAW→Shadow draining, codec/class clustering, seals, heat counters, containerpack dispatch all work exactly as before — only the metadata enumeration changes.
 

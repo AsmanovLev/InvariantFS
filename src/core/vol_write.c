@@ -28,8 +28,8 @@ struct invfs_wsession {
     uint32_t mat_upto;       /* highest contiguously materialized seg +1 */
     uint64_t logical_size;
     int      dirty;          /* any write/truncate landed */
-    uint64_t *old_pbas;      /* WP-M8 v3: pbas owned by the old recipe */
-    uint32_t old_n_ents;     /* WP-M8 v3: old entry count */
+    uint64_t *old_pbas;      /* WP-M8 : pbas owned by the old recipe */
+    uint32_t old_n_ents;     /* WP-M8 : old entry count */
     /* WP660: CHLD producer tree state */
     uint32_t child_segs;     /* span in segments per child (default INVFS_CHILD_SEGS_DEFAULT) */
     uint32_t cur_child;      /* child index currently held in ents (0..) */
@@ -102,7 +102,7 @@ uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
      * that is how the data on such a volume gets copied off it. Creation is
      * refused at vol_replace_file, vol_replace_file_with_meta,
      * vol_create_file_with_meta, vol_create_symlink, vol_create_special,
-     * vol_mkdir, vol_rename, vol_v3_hardlink, invf-cp's own site, and
+     * vol_mkdir, vol_rename, vol_hardlink, invf-cp's own site, and
      * the six FUSE name-introducing ops. */
     if (!vol_write_enabled(v)) return 0;
     s = calloc(1, sizeof *s);
@@ -682,7 +682,7 @@ static uint32_t wsession_filled(const invfs_wsession *s)
 }
 
 
-/* WP-M8: load a v3 file's previous content into the session from its
+/* WP-M8: load a  file's previous content into the session from its
  * content-addressed recipe blob. Mirrors wsession_load_old's contract:
  * entries are copied into s->ents and aliased (their pbas stay owned by the
  * old recipe until commit, which frees the dropped ones). A missing/empty
@@ -702,7 +702,7 @@ static int wsession_load_old_v3(invfs_wsession *s)
     if (vol_inode_get(s->v, s->old_id, &in) != 1)
         return -1;
     s->old_size = in.size;
-    s->wheat_carry = 1;   /* heat is not part of the v3 row (WP-M9) */
+    s->wheat_carry = 1;   /* heat is not part of the  row (WP-M9) */
     if (in.size == 0 ||
         memcmp(in.recipe_addr, zero_addr, INVFS_RECIPE_ADDR_LEN) == 0)
         return 0;         /* empty old content: nothing to alias */
@@ -721,10 +721,10 @@ static int wsession_load_old_v3(invfs_wsession *s)
 
     /* Does the file being replaced own "name!..." siblings? The v2 loader
      * answers the same question off the old record (vol_write.c:583) and
-     * the v2 commit retires them (:1131); on v3 they are real dirents, so
+     * the v2 commit retires them (:1131); on  they are real dirents, so
      * the answer has to come from the recipe blob instead -- off the SAME
      * ast_owns_siblings rule, or the two formats answer differently for
-     * the same file and the v3 one strands the siblings. Asked BEFORE the
+     * the same file and the  one strands the siblings. Asked BEFORE the
      * row is republished: this is the old content's recipe. */
     s->owns_siblings = ast_owns_siblings(&ah, ents, nents);
 
@@ -797,7 +797,7 @@ static int wsession_load_old(invfs_wsession *s)
 {
     if (s->loaded) return 0;
     s->loaded = 1;
-    /* WP-M8: a v3 file's previous content lives in an immutable recipe
+    /* WP-M8: a  file's previous content lives in an immutable recipe
      * blob, not a record. Load it into the session's entry table so
      * ranged writes/truncate alias and re-encode the way they always did. */
     return wsession_load_old_v3(s);
@@ -1038,7 +1038,7 @@ int vol_write_read(invfs_wsession *ws, uint64_t offset,
 }
 
 
-/* WP-M8: commit a v3 write session. The session's segment table becomes an
+/* WP-M8: commit a  write session. The session's segment table becomes an
  * immutable, content-addressed recipe blob; the inode row behind the name
  * gets the new address + size (same inode id, so the dirent is untouched).
  * Data segments already landed through the normal write path. No delta,
@@ -1204,11 +1204,11 @@ static int vol_write_commit_v3(invfs_wsession *s)
 
     /* Retire the superseded content's "name!..." siblings -- the leg the v2
      * commit has always had (vol_write_commit:1131, gated on the same
-     * ast_owns_siblings answer the v3 loader now takes at wsession_load_old_v3).
+     * ast_owns_siblings answer the  loader now takes at wsession_load_old_v3).
      *
-     * A decomposed container keeps its payload in sibling INODES on v3 too
+     * A decomposed container keeps its payload in sibling INODES on  too
      * (vol_create_tar_file -> vol_create_blob_file("%s!part%u")), so without
-     * this a v3 overwrite of a swept a.tar leaves a.tar!part0..N live for
+     * this a  overwrite of a swept a.tar leaves a.tar!part0..N live for
      * ever: the sweep walks but never retires an internal '!' name, and
      * spn_reclaim cannot free a block a live recipe names -- unlike the
      * old recipe's own segments, which the loop above does free. The new
@@ -1246,9 +1246,9 @@ int vol_write_commit(invfs_wsession *ws)
     if (rc != 0) return rc;
     rc = wsession_load_old(s);
     if (rc != 0) return rc;
-    /* WP-M8: v3 content lives in a recipe blob + inode row, not a record.
+    /* WP-M8:  content lives in a recipe blob + inode row, not a record.
      * The guard is a precondition on the session, not a format choice: vol_open
-     * refuses a non-v3 volume, so this only fires on a malformed session. */
+     * refuses a non- volume, so this only fires on a malformed session. */
     if (v && (v->sb.vol_flags & VOLF_META))
         return vol_write_commit_v3(s);
     return -1;
@@ -1288,11 +1288,11 @@ void vol_write_abort(invfs_wsession *ws)
 }
 
 
-/* WP-M21b: bulk content write on a v3 volume through the WP-M9 session
+/* WP-M21b: bulk content write on a  volume through the WP-M9 session
  * path. This is the missing glue between the offline CLI tools (invf-cp,
  * invf-import -- they call the whole-buffer vol_create_file/replace_file
- * family) and the v3 metadata model: the WP-M6 stubs answered 0 for
- * "content on v3", so every offline write failed with a misleading
+ * family) and the  metadata model: the WP-M6 stubs answered 0 for
+ * "content on ", so every offline write failed with a misleading
  * "write failed (volume full?)". Order mirrors the FUSE create+write
  * pattern the M9 legs exercised: node first (dirent + inode row), then
  * the streaming session (begin/range/commit). meta, when given, is
@@ -1329,7 +1329,7 @@ uint64_t vol_write_bulk(invfs_volume *v, const char *name,
      *
      * and vol_find returns a uint64_t, so "there is no such name" and "the
      * lookup could not be COMPLETED" are both the value 0. On the second one
-     * this takes the CREATE branch -- and create-on-v3 is not "add a name",
+     * this takes the CREATE branch -- and create-on- is not "add a name",
      * it is "install an EMPTY node over whatever was there": same inode id,
      * recipe address zeroed, old recipe's blocks freed
      * (src/core/vol_dirs.c:340-344 and :365-367). So if vol_write_begin
@@ -1373,7 +1373,7 @@ uint64_t vol_write_bulk(invfs_volume *v, const char *name,
         return 0;
     rc = len ? vol_write_range(ws, 0, data, len) : 0;
     if (rc != 0) {
-        fprintf(stderr, "invarifs: %s: v3 write session failed (rc=%d%s)\n",
+        fprintf(stderr, "invarifs: %s:  write session failed (rc=%d%s)\n",
                 name, rc, rc == -2 ? ", ENOSPC" : "");
         vol_write_abort(ws);
         return 0;

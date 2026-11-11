@@ -6,7 +6,7 @@ Task spec: `/home/user/InvariantFS/impl_docs/WP-M21-legacy-deletion.md`
 ## Status
 
 DELETIONS COMPLETE in working tree (pending commit). The full v2 metadata
-machinery is now gone; v3 is the only model.
+machinery is now gone;  is the only model.
 
 - ALREADY COMMITTED (6b9a593): Makefile (migrate-v2 removed from CLI_MAINS),
   tools/migrate-v2.c deleted, tools/test-astv2.sh deleted,
@@ -15,13 +15,13 @@ machinery is now gone; v3 is the only model.
 
 ## Deletion rationale
 
-The programme is v3-only. WP-M21 collapses two metadata models into one.
+The programme is -only. WP-M21 collapses two metadata models into one.
 Stubs are kept only where the data plane's signature contract requires
 them (idx_* in volume.c are no-op stubs so vol_ast.c / vol_records.c /
 vol_cpack.c / vol_read.c / vol_tier.c / vol_heat.c compile unchanged;
 vol_rollback.c's CKP0 entry points are stubs returning "no checkpoint";
 vol_seal.c's reten-shard loop is gone because reten records never
-exist on v3).
+exist on ).
 
 ## Files changed (this commit)
 

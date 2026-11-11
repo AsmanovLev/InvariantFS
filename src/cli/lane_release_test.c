@@ -1,10 +1,10 @@
 /* lane_release_test.c — WP202: a builtin container lane that supersedes a file
- * on v3 must give the superseded recipe's data blocks back.
+ * on  must give the superseded recipe's data blocks back.
  *
  * ---------------------------------------------------------------------------
  * THE FINDING.
  *
- * vol_create_blob_file's v3 branch publishes through
+ * vol_create_blob_file's  branch publishes through
  * vol_create_content_node (src/core/vol_dirs.c:397), which REUSES the
  * dirent's inode id and replaces the row in place. So the instant a sweep lane
  * lands, the recipe that named the ORIGINAL file's segments is unreachable —
@@ -16,15 +16,15 @@
  * The builtin container lanes in sweep_dispatch (src/core/vol_sweep.c: FLAC /
  * TAR / GZIP / PNG / MP3) are the ones that did not ask. Each ended in
  *
- *     if (!v3 && vol_delete_inode(v, inode_id, name) != 0) return -1;
+ *     if (! && vol_delete_inode(v, inode_id, name) != 0) return -1;
  *
- * — correct on v2, and on v3 a no-op that leaves every block the original file
+ * — correct on v2, and on  a no-op that leaves every block the original file
  * occupied allocated under no reachable name. The containerpack lane, which
  * supersedes a file the same way, has released them since WP201. Two
  * implementations of "a lane replaces a file"; one of them hands the space
  * back. This is a fork, not a gap.
  *
- * MEASURED (v3 image, 8 x 500 KB incompressible members in one tar, 4.1 MiB,
+ * MEASURED ( image, 8 x 500 KB incompressible members in one tar, 4.1 MiB,
  * invf-mkfs + invf-import + ONE invf-sweep, then invf-fsck free-block counts):
  *
  *     before the sweep .................... 16502558 free
@@ -154,7 +154,7 @@ static int block_allocated(uint64_t pba)
 }
 
 /* Every data PBAs the recipe at `addr` names, loaded the way the read path
- * loads it (a v3 recipe is a content-addressed blob, not a record). */
+ * loads it (a  recipe is a content-addressed blob, not a record). */
 #define MAX_ENTS 4096
 static int recipe_pbas(const uint8_t addr[INVFS_RECIPE_ADDR_LEN],
                        uint64_t *out, size_t cap, size_t *n_out)
@@ -215,7 +215,7 @@ int main(int argc, char **argv)
 
     tar = build_tar(&tar_len);
     if (!tar) { fprintf(stderr, "setup: tar build failed\n"); return 2; }
-    printf("leg 1+2: a builtin container lane that supersedes a file on v3\n");
+    printf("leg 1+2: a builtin container lane that supersedes a file on \n");
     printf("  corpus: 1 tar, %d members x %d bytes = %zu bytes\n",
            TAR_MEMBERS, TAR_MEMBER_BYTES, tar_len);
 

@@ -16,8 +16,8 @@ the documentation that asserts things the code does not do. Files:
 - `src/codecs/codec.c` + `Makefile` (`INVFS_CODECPACKS_SYS=0` makes the
   unit suite hermetic)
 - `src/cli/fuse_fs.c` (`fallocate`: honest EOPNOTSUPP for punch/zero)
-- `tools/invf-rollback.c` (stop calling a clean v3 volume dirty)
-- `tools/test-sweepboot.sh`, `tools/fuzz/bitflip.py` (assert the v3
+- `tools/invf-rollback.c` (stop calling a clean  volume dirty)
+- `tools/test-sweepboot.sh`, `tools/fuzz/bitflip.py` (assert the 
   `--seal` refusal instead of a success that can no longer happen)
 - `docs/SECURITY.md`, `docs/adr/ADR-007-plugin-architecture-ivpack.md`,
   `docs/ARCH-INSTALL.md` (doc claims that outran the code)
@@ -83,16 +83,16 @@ Mode 0 keeps returning 0 (journald's preallocation). `PUNCH_HOLE` and
 `ZERO_RANGE` now return `EOPNOTSUPP` instead of a success that released
 nothing.
 
-### 6. v3 rollback message (`invf-rollback.c`)
+### 6.  rollback message (`invf-rollback.c`)
 
-`vol_open` sets `needs_recovery = 1` unconditionally on v3
+`vol_open` sets `needs_recovery = 1` unconditionally on 
 (`volume.c:1552`), so the "was not closed cleanly" line fired on *every*
 successful rollback. Replaced with the real `sb.state` and a statement of
 what the pass does (restore a save point, not crash recovery).
 
 ### 7. Stale `--seal` expectations
 
-`tools/test-seal.sh` was migrated to assert the v3 refusal;
+`tools/test-seal.sh` was migrated to assert the  refusal;
 `test-sweepboot.sh` and `tools/fuzz/bitflip.py` were missed and have been
 brought in line. A refusal is an expected outcome there, not a failure.
 

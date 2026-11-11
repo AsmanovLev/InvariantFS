@@ -1,7 +1,7 @@
 /*
- * vol_walk.h -- the status of a v3 walk is not optional.
+ * vol_walk.h -- the status of a  walk is not optional.
  *
- * A v3 walk is FALLIBLE. vol_inode_get() returns -1 for a quarantined or
+ * A  walk is FALLIBLE. vol_inode_get() returns -1 for a quarantined or
  * unreadable base page, walk_dir() stops there, and the walk returns -1
  * having delivered a PREFIX of the namespace. The primitives are all honest
  * about it: vol_walk, vol_iter_live_inodes, vol_dirent_scan and

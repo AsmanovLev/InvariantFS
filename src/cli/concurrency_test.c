@@ -194,7 +194,7 @@ int main(int argc, char **argv)
 
     snprintf(img, sizeof img, "%s/invf-concurrency_test.img", dir);
 
-    /* build a minimal v3 volume using mkfs */
+    /* build a minimal  volume using mkfs */
     {
         char cmd[1024];
         snprintf(cmd, sizeof cmd,

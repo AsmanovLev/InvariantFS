@@ -1,6 +1,6 @@
-# design-meta-v3 — Two-tier metadata: immutable B+-tree base + append-only delta (LST)
+# design-meta- — Two-tier metadata: immutable B+-tree base + append-only delta (LST)
 
-**Branch:** `wp/meta-v3-design` (design only; no code)
+**Branch:** `wp/meta--design` (design only; no code)
 **Severity:** HIGH (format-breaking; replaces the on-disk metadata model)
 **Source:** metadata-layout study; WP58 measurements; `impl_docs/AUDIT.md`;
 `INCIDENTS.md`; AGENTS.md §2.3–§2.5, §2.7, §2.11
@@ -8,7 +8,7 @@
 COW-snapshot draft of this file (see §11 Rejected alternatives).
 
 > InvariantFS is treated as **unreleased** here: the format is not frozen, there
-> is **no migration** and **no v2 reader**. Cutover is v3-only (§10 Legacy
+> is **no migration** and **no v2 reader**. Cutover is -only (§10 Legacy
 > deletion).
 
 ---
@@ -223,7 +223,7 @@ recipe is one record whose segment list can span RAW and Shadow simultaneously
 data at all. The meaningful split is **recent vs stable**, not zone. The
 data-zone split remains, correctly, a DATA-plane property.
 
-## 12. On-disk format v3 sketch
+## 12. On-disk format  sketch
 
 - `INVFS_VERSION = 3`; root area holds the base root (double-slot, seq + CRC).
 - **Base pages**: fixed size (default 4 KiB; 16 KiB variant evaluated), header
@@ -243,7 +243,7 @@ data-zone split remains, correctly, a DATA-plane property.
 Removes the two biggest rootfs blockers (metadata bloat/ENOSPC, mount scan) and
 adds hardlinks:
 
-| Daily operation | Today (v2) | v3 |
+| Daily operation | Today (v2) |  |
 |---|---|---|
 | Boot/mount | full record scan | O(1) base + bounded delta replay |
 | `stat`/lookup | RAM hashes rebuilt by scan | delta index + O(log N) base |
@@ -271,7 +271,7 @@ field maturity. Profile: read-mostly / immutable / archive.
 
 ## 15. Staging
 
-1. **v3 skeleton**: descriptors, root area, base page format + CRC, bootstrap
+1. ** skeleton**: descriptors, root area, base page format + CRC, bootstrap
    allocator, base B+-tree (inode) + unit tests.
 2. **Namespace**: inode + dirent + xattr; recipes as content-addressed blobs.
 3. **Delta + overlay + fold**; mount replay; bump-allocator for delta.
@@ -312,4 +312,4 @@ field maturity. Profile: read-mostly / immutable / archive.
 ## 19. Coordination
 
 - Review artifact only; implementation WPs cut from §15.
-- Supersedes `WP58-meta-record-v3.md` (deleted; recoverable from git history).
+- Supersedes `WP58-meta-record-.md` (deleted; recoverable from git history).

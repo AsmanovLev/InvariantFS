@@ -212,10 +212,10 @@ int main(int argc, char **argv)
      * works (every structure reads from the dev1 mirror), but -f mutates:
      * the mirror would diverge with dev0 absent. Reattach dev0 first.
      *
-     * WP98: this check sat BELOW the v3 branch, so on a Meta-v3 volume the
-     * v3 return skipped it and `invf-fsck -f` happily ran its repair pass
+     * WP98: this check sat BELOW the  branch, so on a metadata store volume the
+     *  return skipped it and `invf-fsck -f` happily ran its repair pass
      * against a read-only, degraded mount -- writing to the dev1 mirror
-     * alone, which on v3 nothing detects or repairs (no DEVT sync_seq bump
+     * alone, which on  nothing detects or repairs (no DEVT sync_seq bump
      * and no mirror_resync: vol_flush returns before that tail for VOLF_META,
      * volume.c:2435). Hoisted above both branches, so the refusal is format
      * independent. Report mode is unaffected. */
@@ -226,8 +226,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* WP-M4: a format-v3 volume uses the metadata-v3 base tree, not the v2
-     * inode-record stream. vol_fsck_scan dispatches to the v3 checker (RT30
+    /* WP-M4: a format- volume uses the metadata store base tree, not the v2
+     * inode-record stream. vol_fsck_scan dispatches to the  checker (RT30
      * root double-slot + base-tree walk).
      *
      * WP86: that walk CONTAINS an unreadable base page instead of stopping at
@@ -271,7 +271,7 @@ int main(int argc, char **argv)
         const char *mwhy = NULL, *mwhy_after = NULL;
         (void)vol_mirror_compare(v, &mstale, &mwhy);
         if (vol_fsck_scan_ex(v, &rep, fix, discard_reachable) != 0) {
-            fprintf(stderr, "invf-fsck: v3 scan failed\n");
+            fprintf(stderr, "invf-fsck:  scan failed\n");
             vol_close(v);
             return 1;
         }
@@ -407,8 +407,8 @@ int main(int argc, char **argv)
                        rep.excise_partial ? ", PARTIAL walk" : "");
             printf("  cycles/shared: %llu\n",
                    (unsigned long long)rep.cycles);
-            /* WP75: the v3 branch used to return before the v2 free-block
-             * line, so free-block accounting was invisible on v3 volumes. */
+            /* WP75: the  branch used to return before the v2 free-block
+             * line, so free-block accounting was invisible on  volumes. */
             printf("  free blocks:  %llu\n",
                    (unsigned long long)vol_free_blocks_cached(v));
             if (rep.reachable_free)

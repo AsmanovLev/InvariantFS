@@ -1,28 +1,28 @@
-# ADR-009: Meta-v3 Durability Contract (fsync, close, per-append barrier)
+# ADR-009: metadata store Durability Contract (fsync, close, per-append barrier)
 
 ## Status
 Accepted
 
 ## Context
 
-Meta-v3 became the default (and only) format in v0.5.0, but its durability
+metadata store became the default (and only) format in v0.5.0, but its durability
 contract was implicit and partly wrong:
 
 - `vol_sync()` returned 0 immediately for `VOLF_V3` behind a stale
-  "v3 skeleton is empty/read-only" comment, so FUSE `.fsync` neither flushed
-  the dirty bitmap nor issued a barrier on v3.
+  " skeleton is empty/read-only" comment, so FUSE `.fsync` neither flushed
+  the dirty bitmap nor issued a barrier on .
 - `vol_close()` wrote the CLEAN superblock before any barrier; the only
   barrier was an opt-in `INVFS_FSYNC` that ran *after* the CLEAN write.
 - `vol_delta_append()` barriers after **every** record, which makes each
   metadata mutation durable by construction and masks the no-op `fsync`.
-- The v3 io-error latch (`io_latched`) was ignored by `vol_write_enabled()`
-  on v3, so a latched v3 volume kept accepting mutations.
+- The  io-error latch (`io_latched`) was ignored by `vol_write_enabled()`
+  on , so a latched  volume kept accepting mutations.
 
 The contract needed to be made explicit, correct, and testable.
 
 ## Decision
 
-1. **`fsync` is a real durability point on v3.** `vol_sync` performs
+1. **`fsync` is a real durability point on .** `vol_sync` performs
    `vol_flush` (which persists the dirty bitmap via `vol_v3_bitmap_flush`)
    followed by one `vmux_barrier`, and latches the volume on failure, exactly
    as the v2 path does.
@@ -58,7 +58,7 @@ The contract needed to be made explicit, correct, and testable.
      `delta_durable` anchor and the redefined acknowledged-write contract
      this decision already named.
    - `v3_publish` barriers the COW base pages before `mbuf_root_publish`
-     barriers the root, and `META-V3.md` §4.1 calls that ordering
+     barriers the root, and `META-.md` §4.1 calls that ordering
      load-bearing. Merging the two barriers is safe on the evidence (RT30's
      double slot plus CRC resolve a torn publish to the old root, so "root
      durable ⇒ its pages durable" holds either way) but it changes a
@@ -70,12 +70,12 @@ The contract needed to be made explicit, correct, and testable.
    win is on the concurrent path — 8 threads x 64 barrier rounds fall from
    503 physical flushes to 64. The 84,279-file projection moves from
    65,377 s to ~55,900 s.
-4. **The io latch applies to v3.** `vol_write_enabled` refuses mutations on a
-   v3 volume once `io_latched` is set, and `vol_io_error_latch` logs the
-   latch using `io_latched` (v3 sets `needs_recovery` for the whole session,
+4. **The io latch applies to .** `vol_write_enabled` refuses mutations on a
+    volume once `io_latched` is set, and `vol_io_error_latch` logs the
+   latch using `io_latched` ( sets `needs_recovery` for the whole session,
    so it cannot gate the message).
-5. **Failure injection works on v3.** `INVFS_SYNC_FAIL_AT=N` now reaches the
-   v3 path; on v3 the v2 inode-area zeroing is a no-op, so the latch, the
+5. **Failure injection works on .** `INVFS_SYNC_FAIL_AT=N` now reaches the
+    path; on  the v2 inode-area zeroing is a no-op, so the latch, the
    refused mutations, and the no-CLEAN close are what is exercised.
 
 The full contract, including the commit-point table and the
@@ -97,7 +97,7 @@ structure-before-reference rule, is in `docs/architecture/META.md` §4.
   completed flush costs no flush at all.
 
 ### Negative / Trade-offs
-- Two barriers on a v3 close/fsync (`vol_flush` already barriers the bitmap,
+- Two barriers on a  close/fsync (`vol_flush` already barriers the bitmap,
   then `vol_sync`/`vol_close` barriers again). This is deliberate redundancy
   for ordering clarity; it can be folded later if measurement shows it
   matters. (Group commit now makes the second one free when the first
@@ -165,5 +165,5 @@ latch. What it adds to the operator-visible contract: `df`/free-block
 counts converge at fences and close, not at the mutating call; a failed
 mutating call leaves the pre-call state (never a torn prefix); post-soak
 terminal damage that is fully named is an accepted proven-exhausted state,
-not a failure to repair (the v3 checker never learned the content cut and
+not a failure to repair (the  checker never learned the content cut and
 the bitmap carries no CRC -- both recorded gaps, neither silent).

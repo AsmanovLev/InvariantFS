@@ -1,5 +1,5 @@
 /*
- * metabuf_test.c -- WP-M2 unit harness for the v3 base-page format, the
+ * metabuf_test.c -- WP-M2 unit harness for the  base-page format, the
  * blkptr verification rules and the metadata block allocator.
  *
  * Pure/format cases run with no backing store (CRC, header validation,
@@ -11,7 +11,7 @@
  *   invf-metabuf_test [scratch-dir]
  *
  * Deliberately does NOT use vol_open/mkfs: this is the substrate unit tier,
- * and the v3 write path is not wired yet (see WP-M2 scope).
+ * and the  write path is not wired yet (see WP-M2 scope).
  */
 #define _CRT_SECURE_NO_WARNINGS
 
@@ -81,7 +81,7 @@ static int image_make(const char *path, uint64_t blocks)
     return 0;
 }
 
-/* Construct the synthetic v3 geometry on an already-made image. Mirrors
+/* Construct the synthetic  geometry on an already-made image. Mirrors
  * mkfs: block 0 + the whole metadata zone are allocated; the map/raw/
  * shadow fields are advisory. */
 static int fake_vol_open(invfs_volume *v, const char *path)

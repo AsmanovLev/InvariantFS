@@ -1,4 +1,4 @@
-/* vol_metabuf.c — WP-M2: v3 metadata base-page format + block allocator.
+/* vol_metabuf.c — WP-M2:  metadata base-page format + block allocator.
  *
  * See vol_metabuf.h for the contract. Three concerns, in file order:
  *   1. page wire format / CRC,
@@ -246,7 +246,7 @@ void mbuf_init(invfs_volume *v)
  * against meta_free_blocks. TODO(WP-M2): current mkfs marks the whole
  * metadata zone allocated (bitmap+journal+inode area), so in practice
  * this finds nothing and mbuf_alloc falls through to the shared pool.
- * Keeping the scan here means a future v3 mkfs that leaves the base-page
+ * Keeping the scan here means a future  mkfs that leaves the base-page
  * region free is picked up without touching alloc_blocks' zone counters
  * (which have no metadata branch); the free path is symmetric in
  * mbuf_free. */
@@ -321,7 +321,7 @@ uint64_t mbuf_alloc(invfs_volume *v, uint64_t gen)
          * metadata extents use (alloc_blocks has no metadata-zone branch,
          * so routing the metadata pool through the shadow zone keeps the
          * per-zone free counters honest). TODO(WP-M2): a dedicated dev0
-         * base pool lands with the WP that wires the v3 write path. */
+         * base pool lands with the WP that wires the  write path. */
         pba = alloc_blocks(v, v->sb.shadow_zone_start,
                            v->sb.shadow_zone_blocks, 1, 0, INVFS_ALLOC_META);
     }

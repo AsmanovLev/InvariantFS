@@ -49,7 +49,7 @@
 #     z.qcow2   32 MiB, qemu-img convert -c -o compression_type=zlib.
 #               ~135 reproducible clusters -> ~135 REPRO map entries.
 #     s.qcow2   the same bytes through -o compression_type=zstd: the twin
-#               that MUST stay declined, at pack gate 1 (the qcow2 v3
+#               that MUST stay declined, at pack gate 1 (the qcow2 
 #               incompatible_features "compression type" bit), which is a
 #               header-parse check and is nowhere near the map.
 #   The raw source is a multiple of the 64 KiB cluster on purpose: the pack
@@ -245,7 +245,7 @@ echo "  Q2R3 rebuild (every REPRO range re-deflated) == source"
 echo "  member 1 (diskimg) == qemu-img convert -O raw: $(sha256sum "$WORK/out/mbr/1" | cut -d' ' -f1)"
 
 echo "== pack-level: the zstd twin is declined AT GATE 1 =="
-# Gate 1 is the qcow2 v3 header's incompatible_features "compression type"
+# Gate 1 is the qcow2  header's incompatible_features "compression type"
 # bit (qcow2.c: ***** GATE 1 -- THE ZSTD GATE *****, the `incompat != 0`
 # refusal at header parse). The two fixtures are the same bytes through the
 # same converter and differ in exactly that field, so: the twin sets it and

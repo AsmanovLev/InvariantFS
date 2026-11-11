@@ -1,7 +1,7 @@
-/* vol_delta.h — WP-M10: v3 delta log (the recent-changes tier).
+/* vol_delta.h — WP-M10:  delta log (the recent-changes tier).
  *
  * The stable tier (WP-M5/M6/M7) is the immutable base B+-tree. This module
- * owns the other half of the metadata-v3 design (design-meta-v3.md §2/§4/
+ * owns the other half of the metadata store design (design-meta-.md §2/§4/
  * §7/§12, decision D1): an append-only, coalescing on-disk log of namespace
  * mutations plus the in-memory index that makes the latest record per key a
  * single probe. Mount replay rebuilds that index from the durable segment

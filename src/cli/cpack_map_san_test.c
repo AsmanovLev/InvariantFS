@@ -196,7 +196,7 @@ static invfs_volume *mkvol(void)
 {
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof *v);
     if (!v) return NULL;
-    v->sb.vol_flags |= VOLF_META;      /* take cpack_recipe_seg's v3 branch */
+    v->sb.vol_flags |= VOLF_META;      /* take cpack_recipe_seg's  branch */
     v->sb.total_blocks = 100000;
     /* Fixed tree: take the lock down properly. Unfixed tree: the weak symbol
      * is NULL and this is exactly the pre-fix state. */
@@ -656,7 +656,7 @@ int vol_read_file(invfs_volume *v, uint64_t inode, uint8_t **out, size_t *out_le
     return -1;
 }
 
-/* cpack_recipe_seg's v3 branch: vol_inode_get -> vol_recipe_load ->
+/* cpack_recipe_seg's  branch: vol_inode_get -> vol_recipe_load ->
  * vol_ast_recipe_parse -> seg_read_checked. */
 int vol_inode_get(invfs_volume *v, uint64_t inode_id, invfs_inode *out)
 {

@@ -1,4 +1,4 @@
-/* vol_spt0.h — WP-M16: v3 save point (SPT0 descriptor).
+/* vol_spt0.h — WP-M16:  save point (SPT0 descriptor).
  *
  * The save point anchors a persistent view of the volume at capture time:
  * {base_root, delta_end}. base_root is the pinned RT30 root pba; delta_end
@@ -63,7 +63,7 @@ int spt0_store(invfs_volume *v);
 
 /* Capture a save point: record current base_root + delta_end, write SPT0,
  * set pinned_root. K=1: refuses if savepoint_live is already set.
- * 0 = ok, -1 = error, 1 = refused (K=1 violation or not a v3 volume),
+ * 0 = ok, -1 = error, 1 = refused (K=1 violation or not a  volume),
  * SPT0_RC_DAMAGED (WP86) = the base tree is damaged; nothing is pinned. */
 int spt0_capture(invfs_volume *v);
 

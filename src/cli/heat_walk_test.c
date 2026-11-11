@@ -357,7 +357,7 @@ int main(int argc, char **argv)
         }
         nmade++;
     }
-    ok(nmade == NFILES, "fixture: %d files written to a v3 volume", nmade);
+    ok(nmade == NFILES, "fixture: %d files written to a  volume", nmade);
 
     for (i = 0; i < NFILES; i++) {
         char nm[64];

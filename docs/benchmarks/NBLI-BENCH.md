@@ -206,7 +206,7 @@ before it) refuses every stock photo by name and keeps it RAW. The
 numbers above are TOOL-level (what the codec does); what the lane
 does with a wrapped PNG is nothing, safely. A framing-aware recipe
 (range check: recipe version byte already exists, `ver` 1/2 accepted
-in `pngx_parse_recipe`, so a v3 with one framing bit refuses cleanly
+in `pngx_parse_recipe`, so a  with one framing bit refuses cleanly
 on old readers) would admit them to BOTH lanes -- proposed as a
 follow-up WP, deliberately not folded into this one (one WP per
 logical change; PNGR behavior must not move under an NBLI WP).

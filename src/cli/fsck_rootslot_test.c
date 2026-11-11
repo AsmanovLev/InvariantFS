@@ -26,7 +26,7 @@
  * closed image and refuses to run if they are not what the mode claims.
  *
  *   build <img> <nfiles>
- *       A v3 volume written through the public write path and folded. Prints
+ *       A  volume written through the public write path and folded. Prints
  *       ROOT=<pba>:<gen> SLOT0=<pba>:<gen> SLOT1=<pba>:<gen>.
  *
  *   republish <img>

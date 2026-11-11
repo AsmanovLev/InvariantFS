@@ -1,7 +1,7 @@
-/* vol_cut.c — WP613: v3 content-cut recovery for torn data segments.
+/* vol_cut.c — WP613:  content-cut recovery for torn data segments.
  *
  * PROBLEM. A torn data segment (power-loss mid-write, dm chaos) has no
- * recovery path on v3: the read path fails the whole file with EIO and
+ * recovery path on : the read path fails the whole file with EIO and
  * fsck could not even name the shape (the recipe audit stopped at
  * load+parse+coherence; a CRC-dead segment underneath a sound recipe was
  * silent -- the volume.h ledger comment said so out loud). The file is an

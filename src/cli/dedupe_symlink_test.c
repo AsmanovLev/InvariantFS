@@ -1,7 +1,7 @@
 /*
  * dedupe_symlink_test.c -- the dedupe pass must not parse a symlink as an AST.
  *
- * THE SITE. dedup_v3_walk_cb (src/core/vol_dedupe.c) hashes every segment of
+ * THE SITE. dedup_walk_cb (src/core/vol_dedupe.c) hashes every segment of
  * every live inode by PARSING its blob with vol_ast_recipe_parse. A symlink's
  * blob is its TARGET STRING, stored content-addressed exactly like a recipe
  * (vol_create_node, src/core/vol_dirs.c), so it is indistinguishable from
@@ -12,7 +12,7 @@
  * SYNTHESISED recipe over the link and moves refcounts.
  *
  * THE TRIGGER IS NOT REACHABLE TODAY, and leg R proves it rather than
- * asserting it. Every v3 symlink writer takes strlen() over a NUL-terminated
+ * asserting it. Every  symlink writer takes strlen() over a NUL-terminated
  * buffer (src/core/volume.h: invfs_meta_pub.target is
  * `char target[INVFS_META_TARGET_MAX]`, documented NUL-terminated), and both
  * AST version words are 01 00 00 00 / 02 00 00 00 -- NUL at offset 1, and a
@@ -250,7 +250,7 @@ static void leg_reachability(const char *img)
     printf("LEG R  reachability control: no symlink target string false-parses\n");
 
     /* R1 -- all 256 possible leading bytes, at the string level. What the
-     * v3 writers do with a target is `strlen(target)` bytes of it
+     *  writers do with a target is `strlen(target)` bytes of it
      * (src/core/vol_dirs.c), and R2 below proves that end to end on a real
      * volume, so this sweep is the same computation the reader sees:
      * invfs_ast_hdr_parse over a strlen-delimited prefix. b == 1 and
@@ -273,7 +273,7 @@ static void leg_reachability(const char *img)
        "leg R1: ZERO of 256 leading bytes false-parse as an AST");
     printf("  note: R1 swept 256 leading bytes, %d false-parsed\n", parsed);
 
-    /* R2 -- the bytes that matter, through the ONLY v3 symlink writer, on a
+    /* R2 -- the bytes that matter, through the ONLY  symlink writer, on a
      * real volume: what comes back is exactly the strlen-delimited bytes
      * and nothing more. This is the half R1 assumes, so it is measured
      * rather than taken from the source.

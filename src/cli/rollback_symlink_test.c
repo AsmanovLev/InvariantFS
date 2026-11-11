@@ -2,7 +2,7 @@
  *
  * THE DEFECT. invf-rollback is the documented recovery path (AGENTS.md 2.6):
  * "an operator whose sweep mis-clustered data reaches for invf-rollback".
- * On v3 the restore first runs spt0_data_ok(), which walks every inode row
+ * On  the restore first runs spt0_data_ok(), which walks every inode row
  * of the pinned generation and verifies the segments its recipe names
  * (src/core/vol_spt0.c). The walk's callback filtered only recipe_addr == 0,
  * so a symlink -- whose content is its target string, stored
@@ -121,7 +121,7 @@ static void fill(uint8_t *b, size_t n, unsigned seed)
     }
 }
 
-/* Format a fresh v3 image, by the same $PWD/bin/invf-mkfs convention the
+/* Format a fresh  image, by the same $PWD/bin/invf-mkfs convention the
  * other volume tests in this tree use (the Makefile runs them from the repo
  * root). */
 static int mkfs_image(const char *img)

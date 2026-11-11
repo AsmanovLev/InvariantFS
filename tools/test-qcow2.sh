@@ -4,17 +4,17 @@
 # WP16b seekable (map) flow over QEMU qcow2 disk images.
 #
 #   fixtures (inline python3 for the HAND-BUILT ones — spec-correct qcow2
-#   v2/v3 incl. refcounts, cross-checked against qemu-img check/info; plus
+#   v2/ incl. refcounts, cross-checked against qemu-img check/info; plus
 #   qemu-img/qemu-io-generated ones as external ground truth):
-#     diska.qcow2 — hand-built v3, 64K clusters, 8 of 256 guest clusters
+#     diska.qcow2 — hand-built , 64K clusters, 8 of 256 guest clusters
 #       allocated (text/ELF/zeros/random), slot-scrambled, junk-filled free
 #       clusters inside the file, trailing junk. Guest cluster 0 is text so
 #       the member stream batches (the member-batching leg).
-#     diskb.qcow2 — hand-built v3: the virtual disk's first 4 MiB are a
+#     diskb.qcow2 — hand-built : the virtual disk's first 4 MiB are a
 #       coherent raw disk image (GPT + one 2 MiB Linux partition; no 55AA
 #       protective MBR on purpose — see the fixture comment), clusters 0-63
 #       allocated, so the member stream IS that disk (the composition leg).
-#     disks.qcow2 — hand-built v3 with 512-BYTE clusters (cluster_bits 9),
+#     disks.qcow2 — hand-built  with 512-BYTE clusters (cluster_bits 9),
 #       clusters spread over many L2 tables (multi-L1-entry coverage).
 #     diskv2.qcow2 — hand-built v2 (72-byte header, 4K clusters).
 #     qgen.qcow2  — qemu-img/qemu-io generated, contiguous writes + marker:
@@ -288,7 +288,7 @@ assert elf, "no x86-64 ELF fixture found"
 
 zeros = bytes(MB)
 
-# --- diska.qcow2: v3, 64K clusters, 8 of 256 guest clusters allocated,
+# --- diska.qcow2: , 64K clusters, 8 of 256 guest clusters allocated,
 #     slot-scrambled, junk-filled free clusters, trailing junk. Guest
 #     cluster 0 is TEXT so the member stream head-sniffs as text (the
 #     member-batching leg). 6 junk slots push the file past 1 MiB (the
@@ -359,7 +359,7 @@ img, member, info = build_qcow2(16, 16 * MB, bclu, version=3, seed=23)
 open(os.path.join(d, "diskb.qcow2"), "wb").write(img)
 open(os.path.join(d, "member-b.ref"), "wb").write(member)
 
-# --- disks.qcow2: v3, 512-byte clusters (cluster_bits 9, the minimum),
+# --- disks.qcow2: , 512-byte clusters (cluster_bits 9, the minimum),
 #     clusters spread over many L2 tables (multi-L1 coverage) ------------
 CS9 = 512
 sclu = {g: rnd.randbytes(CS9) for g in

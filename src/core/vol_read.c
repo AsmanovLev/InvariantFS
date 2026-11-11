@@ -291,7 +291,7 @@ typedef struct {
 
 /* WP-M8: decode a parsed AST recipe (header + entries) into a caller-
  * allocated `data` of ast_h->file_size bytes. Shared verbatim by the v2
- * record path and the v3 content-addressed recipe-blob path so both
+ * record path and the  content-addressed recipe-blob path so both
  * reconstruct with exactly the same segment codecs (bit-exactness).
  * 0 = complete, -1 = corrupt/unreadable. `data` is caller-owned; on
  * error its contents are undefined and the caller frees it. */
@@ -413,7 +413,7 @@ static void *decode_thread_worker(void *arg_) {
  * batches and ZSTD binary batches -- the lanes that carry essentially every
  * byte a sweep or a read touches -- never look at it.
  *
- * On a v3 volume, though, OBTAINING it is not free: vol_path_of() is a
+ * On a  volume, though, OBTAINING it is not free: vol_path_of() is a
  * reverse walk of the whole dirent tree, one vol_dirent_scan() per
  * directory, each of which runs a vol_delta_range() and one
  * vol_delta_read_value() pread per delta-resident child (see the note on
@@ -1431,7 +1431,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     int rc;
     static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
 
-    /* WP-M8: a v3 volume has no append-only record stream. The inode row in
+    /* WP-M8: a  volume has no append-only record stream. The inode row in
      * the base tree carries a content-addressed recipe *reference*; fetch
      * and BLAKE3-verify the immutable blob, then decode its segments with
      * the exact same codec code (vol_decode_ast_entries).
@@ -1470,12 +1470,12 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
         return 0;
     }
     if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0) {
-        fprintf(stderr, "vol_read_inode: v3 inode %llu: recipe blob "
+        fprintf(stderr, "vol_read_inode:  inode %llu: recipe blob "
                 "missing/corrupt\n", (unsigned long long)inode_id);
         return -1;
     }
     if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &n_ents) != 0) {
-        fprintf(stderr, "vol_read_inode: v3 inode %llu: corrupt recipe "
+        fprintf(stderr, "vol_read_inode:  inode %llu: corrupt recipe "
                 "blob\n", (unsigned long long)inode_id);
         free(blob);
         return -1;
@@ -1483,7 +1483,7 @@ int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
     /* the row's size and the blob's header must agree; a disagreement
      * is corruption, not something to paper over with a clamp */
     if (ah.file_size != in.size) {
-        fprintf(stderr, "vol_read_inode: v3 inode %llu: row size %llu != "
+        fprintf(stderr, "vol_read_inode:  inode %llu: row size %llu != "
                 "recipe size %llu\n", (unsigned long long)inode_id,
                 (unsigned long long)in.size,
                 (unsigned long long)ah.file_size);
@@ -1680,7 +1680,7 @@ static int algo_is_whole_file(invfs_volume *v, uint32_t algo)
 }
 
 
-/* WP-M9: ranged read of a v3 file. Fetch + BLAKE3-verify the recipe blob
+/* WP-M9: ranged read of a  file. Fetch + BLAKE3-verify the recipe blob
  * once (O(segments), never O(filesize)), then decode only the entries that
  * overlap [offset, offset+len). A plain per-segment codec (NONE/LZ4/ZSTD)
  * decodes one bounded segment; a shared text batch is sliced through
@@ -2052,10 +2052,10 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                 }
                 memcpy(segbuf, sblob, e->length);
             } else {
-                /* the v3 recipe writer emits only the plain codecs; any
+                /* the  recipe writer emits only the plain codecs; any
                  * other algo here is corruption -- fail loudly, never serve
                  * unverified bytes */
-                fprintf(stderr, "v3 ranged read: inode %llu seg %u: "
+                fprintf(stderr, " ranged read: inode %llu seg %u: "
                         "unexpected algo %u\n",
                         (unsigned long long)inode_id, e->block_id,
                         (unsigned)e->algo);
@@ -2092,7 +2092,7 @@ static int read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
 int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
                    size_t len, void *buf)
 {
-    /* WP-M9: a v3 file resolves through its content-addressed recipe blob
+    /* WP-M9: a  file resolves through its content-addressed recipe blob
      * and decodes only the segments the window needs. The v2 alternative
      * located the inode record in the append-only inode area and walked it;
      * vol_open no longer admits a volume that has one. */

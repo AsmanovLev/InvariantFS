@@ -1,10 +1,10 @@
-/* stat_v3_counts_test — invf-stat's file counts must agree with invf-ls.
+/* stat_counts_test — invf-stat's file counts must agree with invf-ls.
  *
- * WP stat-counts-v3: the red control.
+ * WP stat-counts-: the red control.
  *
  * The defect: invf-stat populated its file table from vol_records_walk(), the
- * v2 inode-area scan, which finds nothing on a v3 volume. Every volume this
- * build opens is v3 (vol_open refuses anything without VOLF_META), so the tool
+ * v2 inode-area scan, which finds nothing on a  volume. Every volume this
+ * build opens is  (vol_open refuses anything without VOLF_META), so the tool
  * printed
  *
  *     files : 0 live of 0 names (0 tombstones), 0.0 B logical, largest 0.0 B
@@ -37,7 +37,7 @@
  * count, not after it. They come out of the same table, so a fix that repaired
  * only the count would still print 0.0 B for a volume with content in it.
  *
- * Directories are in the table too (a v3 dirent tree yields them, and invf-ls
+ * Directories are in the table too (a  dirent tree yields them, and invf-ls
  * prints them), so the fixture has one: a directory is a NAME but not a FILE,
  * and each tool has to make that distinction the same way or they disagree.
  */
@@ -100,7 +100,7 @@ static int parse_ls(const char *text, ls_model *m)
 
 /* ---- invf-stat output model ------------------------------------------
  *   "  files : 3 live of 8 names (5 directories), 4.9 KiB logical, largest 4.9 KiB"
- * Only the v3 form is parsed; the v2 form carries "(0 tombstones)" instead,
+ * Only the  form is parsed; the v2 form carries "(0 tombstones)" instead,
  * and the sizes are printed through stat's own human(), which rounds to one
  * decimal -- so the byte figures are compared through the SAME human() the tool
  * prints, not re-derived from ls's raw bytes. */
@@ -113,7 +113,7 @@ static void human(uint64_t bytes, char *buf, size_t cap)
     snprintf(buf, cap, "%.1f %s", v, u[i]);
 }
 
-/* The parenthesised word is "tombstones" on v2 and "directories" on v3, so it
+/* The parenthesised word is "tombstones" on v2 and "directories" on , so it
  * is suppressed, not captured: this control parses BOTH forms. Bailing out on
  * the unfixed build because the line did not parse would make the failure a
  * parse error, not the disagreement between the two oracles -- which is the
@@ -192,10 +192,10 @@ int main(int argc, char **argv)
     stat_model st;
     uint64_t want_sum = 0, want_max = 0;
 
-    printf("stat_v3_counts_test: invf-stat and invf-ls must agree about the "
+    printf("stat_counts_test: invf-stat and invf-ls must agree about the "
            "same volume\n");
 
-    snprintf(img, sizeof img, "%s/invf-stat-v3-counts.img", dir);
+    snprintf(img, sizeof img, "%s/invf-stat--counts.img", dir);
     unlink(img);
 
     /* mkfs's own chatter is not worth parsing; vol_open below is the real check

@@ -12,7 +12,7 @@
 #   at the last barriered position, and after a clean close + reopen the
 #   barriered file is present and bit-exact while the un-barriered one is
 #   absent on v2 (complete-or-absent, never silently lost after an ack).
-#   WP80: v3 is the only format mkfs writes now. Its delta append is
+#   WP80:  is the only format mkfs writes now. Its delta append is
 #   itself barriered (see docs/architecture/META.md), so the second
 #   create is durable BEFORE the failing sync; the failure still latches
 #   and refuses later mutations, and the file comes back bit-exact
@@ -121,18 +121,18 @@ static void assert_file(invfs_volume *v, const char *name, size_t len,
     free(buf);
 }
 
-/* WP80: the leg-A post-crash assertion depends on the format. On v3 the
+/* WP80: the leg-A post-crash assertion depends on the format. On  the
  * delta append is barriered, so an un-fsync'd create is already durable;
  * on v2 it is not. Read the on-disk format marker directly. */
 static int img_is_meta(const char *img)
 {
     FILE *f = fopen(img, "rb");
     invfs_superblock sb;
-    int v3 = 0;
+    int  = 0;
     if (f && fread(&sb, sizeof sb, 1, f) == 1)
-        v3 = (sb.vol_flags & VOLF_META) != 0;
+         = (sb.vol_flags & VOLF_META) != 0;
     if (f) fclose(f);
-    return v3;
+    return ;
 }
 
 static uint64_t create_pattern(invfs_volume *v, const char *name,
@@ -184,7 +184,7 @@ static int cmd_f1check(const char *img)
     if (!v) die("open");
     assert_file(v, "pin1.bin", 100 * 1024, 11);
     /* complete-or-absent: never torn, never silently lost after an ack.
-     * v3's per-append barrier makes the un-fsync'd create durable, so it
+     * 's per-append barrier makes the un-fsync'd create durable, so it
      * must be present and bit-exact; v2 loses the un-barriered tail. */
     if (img_is_meta(img)) {
         assert_file(v, "hole1.bin", 200 * 1024, 22);
@@ -605,7 +605,7 @@ H=$WORK/ff_harness
 echo "== leg A: failed barrier -> latch, re-anchor, complete-or-absent =="
 $B/invf-mkfs $IMG_A 0.0625 >"$WORK/mkfs-a.log" || fail "mkfs A"
 # the 2nd vol_sync of the process reports EIO (and drops the un-barriered
-# v2 inode-area tail; on v3 the delta append is already barriered)
+# v2 inode-area tail; on  the delta append is already barriered)
 INVFS_SYNC_FAIL_AT=2 "$H" f1run $IMG_A 2>"$WORK/f1run.log" || {
     cat "$WORK/f1run.log"; fail "f1run"; }
 grep -q "latched" "$WORK/f1run.log" || { cat "$WORK/f1run.log"; fail "no latch log"; }
@@ -613,7 +613,7 @@ grep -q "latched" "$WORK/f1run.log" || { cat "$WORK/f1run.log"; fail "no latch l
 # recovery ladder: the volume stayed DIRTY (the latch persisted), the
 # un-barriered tail's blocks (if any) are reclaimed, the volume ends
 # structurally clean. On v2 fsck -f exits 3 ("issues found") for the
-# orphans it just freed -- the honest answer to a real loss; on v3 nothing
+# orphans it just freed -- the honest answer to a real loss; on  nothing
 # was lost, so the ladder simply comes back clean.
 set +e
 $B/invf-fsck $IMG_A -f >"$WORK/fsck-a1.log" 2>&1
@@ -644,18 +644,18 @@ $B/invf-verify $IMG_C --deep >"$WORK/verify-c.log" 2>&1 || fail "verify C"
 grep -q " 0 corrupt," "$WORK/verify-c.log" || fail "verify C reported corrupt"
 echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
 
-# ---- WP80: v2-only legs D-I are skipped on a Meta-v3 volume ------------
-# invf-mkfs writes Meta-v3 only (v2 is retired in v0.5.0). Legs D-I below
+# ---- WP80: v2-only legs D-I are skipped on a metadata store volume ------------
+# invf-mkfs writes metadata store only (v2 is retired in v0.5.0). Legs D-I below
 # exercise the retired v2 machinery: the contiguous inode-area record
 # stream and its vol_inode_next walk (D, I), the flat/slotted v2 journal
 # and mid-compaction crash stages (F, G, G2, H), and the CKP0 sweep
-# rename leg (E). None of that exists on a v3 volume,
-# so they cannot run. The v3 equivalents of rename/retire/fsck honesty are
+# rename leg (E). None of that exists on a  volume,
+# so they cannot run. The  equivalents of rename/retire/fsck honesty are
 # covered by tools/test-meta.sh, test-meta-fold.sh and
 # test-meta-delta.sh. Legs A-C above run on the live format.
 if img_is_meta "$IMG_A"; then
     echo "== legs D-I: SKIP (v2-only machinery retired on Meta; see test-meta*.sh) =="
-    echo "PASS: WP22c (v3: flush/sync failure latch + rename/retire)"
+    echo "PASS: WP22c (: flush/sync failure latch + rename/retire)"
     exit 0
 fi
 

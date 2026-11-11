@@ -1,4 +1,4 @@
-/* fold_test.c — WP-M14 e2e driver for the metadata-v3 fold.
+/* fold_test.c — WP-M14 e2e driver for the metadata store fold.
  *
  * This is the offline counterpart of the sweep's fold step (WP-M18): it
  * exercises the public WP-M14 API on a real VOLF_META image through vol_open.
@@ -94,7 +94,7 @@ static uint16_t ino_row(uint8_t *buf, uint16_t mode, uint64_t size)
 
 static invfs_volume *g_v;
 
-static int open_v3(const char *img)
+static int open_img(const char *img)
 {
     int err = 0;
     g_v = vol_open(img, &err);
@@ -103,7 +103,7 @@ static int open_v3(const char *img)
         return -1;
     }
     if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "fold_test: %s is not a v3 volume\n", img);
+        fprintf(stderr, "fold_test: %s is not a  volume\n", img);
         vol_close(g_v);
         g_v = NULL;
         return -1;
@@ -255,7 +255,7 @@ static void scenario(const char *img)
     uint16_t mode;
     uint64_t size, child;
 
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("fold scenario (WP-M14)\n");
 
@@ -362,7 +362,7 @@ static void verify(const char *img)
     uint16_t mode;
     uint64_t size, child;
 
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("fold verify (WP-M14 remount)\n");
 
@@ -404,7 +404,7 @@ static void verify(const char *img)
  * published and before the delta is reset -- the process never returns. */
 static void crash_setup(const char *img)
 {
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("fold crash (WP-M14): seeding base + delta\n");
     if (base_put(42, 0640, 10) != 0 ||
@@ -436,7 +436,7 @@ static void crash_verify(const char *img)
     invfs_inode in;
     uint64_t child;
 
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("fold crash verify (WP-M14 remount after publish/reset window)\n");
 

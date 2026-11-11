@@ -6,7 +6,7 @@
 - Base: `main` @ `26ef748`
 
 ## Context from compressed orchestration (b6)
-No v3 save-point exists yet. The v2 rollback (the now-deleted `vol_rollback` core file) uses CKP0 + retention registry, completely different mechanism. The new v3 save point is `{base_root, delta_end, flags}` with a new block-0 descriptor `SPT0`. WP-M14 fold publishes new bases and calls `fold_reclaim_hook` (M15). WP-M15 needs `pinned_root` from this WP.
+No  save-point exists yet. The v2 rollback (the now-deleted `vol_rollback` core file) uses CKP0 + retention registry, completely different mechanism. The new  save point is `{base_root, delta_end, flags}` with a new block-0 descriptor `SPT0`. WP-M14 fold publishes new bases and calls `fold_reclaim_hook` (M15). WP-M15 needs `pinned_root` from this WP.
 
 ## Scope (from WP-M16 spec, impl_docs/WP-M16-savepoint-rollback.md)
 
@@ -14,12 +14,12 @@ No v3 save-point exists yet. The v2 rollback (the now-deleted `vol_rollback` cor
 
 Files:
 - `src/core/invarifs.h` — SPT0 descriptor at a new block-0 offset (e.g. `INVFS_SPT0_OFF`)
-- (deleted since) the `vol_rollback` core file — v3 save point capture/restore/drop (rework CKP0 logic)
+- (deleted since) the `vol_rollback` core file —  save point capture/restore/drop (rework CKP0 logic)
 - `src/core/volume.c` — load SPT0 at open; expose `pinned_root` on volume struct
 - `src/core/vol_delta.c` — truncate to `delta_end` (new `vol_delta_truncate`)
 - `src/core/vol_fold.c` — pass `pinned_root` to `fold_reclaim_hook`
 - `src/core/vol_reclaim.c` — consume `pinned_root` (WP-M15)
-- `tools/invf-rollback.c` — v3 path
+- `tools/invf-rollback.c` —  path
 
 **NOT in scope:** browsable snapshots/snapshot DAG; reclaim mechanics (WP-M15); fold triggering (WP-M14); v2 CKP0 deletion (WP-M21).
 
@@ -33,7 +33,7 @@ Files:
 
 4. **K=1**: refuse a second save point while one is live (return error).
 
-5. **v3 rollback procedure**:
+5. ** rollback procedure**:
    ```
    1. publish(savepoint.base_root) via RT30 double-slot + seq++
    2. truncate_delta(savepoint.delta_end) — drop post-capture records
@@ -75,13 +75,13 @@ Files:
 6. Wire `pinned_root` into `fold_reclaim_hook` (vol_fold.c):
    - Pass `v->pinned_root` when calling `vol_reclaim_mark_and_free`
 
-7. Update `tools/invf-rollback.c` — add v3 path that calls `vol_spt0_restore`.
+7. Update `tools/invf-rollback.c` — add  path that calls `vol_spt0_restore`.
 
 8. Update the `invf-rollback.8` man page under `packaging/man/` (and its `ru`
    translation) if applicable. **This was never done** — as of WP102 the page
    still describes the retired v2 CKP0 checkpoint ("undo the last sweep from
    its checkpoint", "decapitates the append-only inode area", L2P reconcile)
-   and never mentions SPT0 save points, which is the v3 behaviour AGENTS.md
+   and never mentions SPT0 save points, which is the  behaviour AGENTS.md
    §2.6 documents. No man page was ever placed under `tools/`; man pages live
    under `packaging/man/` and install as section 8. Worth its own WP.
 
@@ -126,4 +126,4 @@ Remaining TODOs: (list any deferred decisions or open issues)
 - `vol_delta.c` — delta chain structure; `vol_delta_close` resets index
 - `invarifs.h` — block-0 layout: PCK0 @ 0x3C4, next free after
 - `volume_internal.h` — `invfs_volume` struct; add `pinned_root` here
-- `tools/invf-rollback.c` — existing CLI; add v3 path
+- `tools/invf-rollback.c` — existing CLI; add  path

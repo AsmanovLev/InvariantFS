@@ -1,11 +1,11 @@
 #!/bin/bash
-# test-fsync-crash.sh — WP80: the fsync-durability crash test for Meta-v3.
+# test-fsync-crash.sh — WP80: the fsync-durability crash test for metadata store.
 #
 # The contract (docs/architecture/META.md §4): once vol_sync (FUSE
 # .fsync/.fdatasync) returns 0, the acknowledged write is durable against
 # power loss. This test proves it end to end without a real power cut:
 #
-#   1. mkfs a v3 image.
+#   1. mkfs a  image.
 #   2. create durable.bin (256 KiB) and vol_sync() it -- the fsync ack.
 #   3. create unsynced.bin (128 KiB), then SIGKILL the process WITHOUT
 #      vol_close (no final flush, no CLEAN superblock). This is the power
@@ -13,12 +13,12 @@
 #   4. assert the on-disk superblock is still DIRTY (a CLEAN mark would
 #      mean the close ran, i.e. the crash was not abrupt).
 #   5. reopen and assert durable.bin is present AND bit-exact, and that
-#      unsynced.bin is complete-or-absent (v3 barriers every delta append,
+#      unsynced.bin is complete-or-absent ( barriers every delta append,
 #      so it is expected to be complete -- but the contract only promises
 #      it is never torn).
 #   6. fsck + verify --deep come back clean.
 #
-# On v3 there is no un-barriered *metadata* tail to zero: vol_delta_append
+# On  there is no un-barriered *metadata* tail to zero: vol_delta_append
 # barriers each record before publishing it (see META.md §4.3), so the
 # kill IS the strongest available simulation -- there is nothing the fsync
 # left un-barriered that could be dropped to make the file vanish.
@@ -102,7 +102,7 @@ static int cmd_crashfsync(const char *img)
     if (!v) die("open");
     create_pattern(v, "durable.bin", 256 * 1024, 0xD0);
     if (vol_sync(v) != 0) die("vol_sync (the fsync ack) failed");
-    /* a later, un-fsync'd write: v3 makes it durable too, but the contract
+    /* a later, un-fsync'd write:  makes it durable too, but the contract
      * only promises complete-or-absent */
     create_pattern(v, "unsynced.bin", 128 * 1024, 0x55);
     fflush(NULL);
@@ -146,7 +146,7 @@ gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/r
     || fail "harness build"
 H=$WORK/crash_harness
 
-echo "== WP80: fsync-acknowledged v3 write survives an abrupt power loss =="
+echo "== WP80: fsync-acknowledged  write survives an abrupt power loss =="
 $B/invf-mkfs $IMG 0.0625 >"$WORK/mkfs.log" || fail "mkfs"
 # a freshly formatted image is CLEAN (0xCA); vol_mark_dirty marks it DIRTY (0xDA) when opened RW
 python3 - "$IMG" <<'PY' || fail "fresh image not CLEAN"
@@ -174,4 +174,4 @@ grep -q "^OK$" "$WORK/fsck.log" || { cat "$WORK/fsck.log"; fail "fsck not OK"; }
 $B/invf-verify $IMG --deep >"$WORK/verify.log" 2>&1 || fail "verify"
 grep -q " 0 corrupt," "$WORK/verify.log" || fail "verify reported corrupt"
 echo "   durable.bin present + bit-exact after kill; unsynced complete-or-absent; fsck/verify clean"
-echo "PASS: WP80 v3 fsync-durability crash test"
+echo "PASS: WP80  fsync-durability crash test"

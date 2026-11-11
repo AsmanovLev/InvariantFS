@@ -455,7 +455,7 @@ int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        /* WP78: on v3 vol_create_blob_file supersedes the inode row IN PLACE
+        /* WP78: on  vol_create_blob_file supersedes the inode row IN PLACE
          * (newino == inode_id), so deleting the old id would destroy the
          * fresh blob. */
         if (!(v->sb.vol_flags & VOLF_META) || newino != inode_id)

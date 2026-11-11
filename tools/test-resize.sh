@@ -15,7 +15,7 @@
 #   300MB boundary: shrink 640M -> 300M refuses honestly (count + first
 #   block named), volume untouched (still mounts, reads, fsck OK).
 #   Shrink 640M -> 448M with the file in place: refuses honestly. big.bin's own
-#   tail is below 448M (highest live-recipe pba ~93041), but the v3 base B+tree
+#   tail is below 448M (highest live-recipe pba ~93041), but the  base B+tree
 #   holds live pages at ~160165, above the boundary, so 448M is unreachable on
 #   this volume whatever reclaim does. Volume untouched, fsck OK, bit-exact.
 #   (This leg used to assert success; see the comment at A6 for the measurement
@@ -267,7 +267,7 @@ grep -q "live block(s) at/above the new boundary" "$WORK/resize-a3.log" \
     || fail "no honest refusal message"
 # d286390 corrected the message this leg was matching: the compaction limit is
 # not a property of v1, there is no compaction in ANY format. Telling an
-# operator holding a v3 volume to look for a v1 workaround sends them after one
+# operator holding a  volume to look for a v1 workaround sends them after one
 # that does not apply. The assertion follows the text it was written for.
 grep -q "no compaction exists in any format" "$WORK/resize-a3.log" \
     || fail "no guidance in refusal"
@@ -283,7 +283,7 @@ echo
 echo "== [A6] shrink 640M -> 448M: honest refusal (metadata high-water mark) =="
 # 448M is block 114688. big.bin's own tail DOES sit below it (the highest pba
 # any live recipe names is ~93041), and this leg used to assert that the
-# shrink therefore succeeds. It cannot, and the blocker is not big.bin: the v3
+# shrink therefore succeeds. It cannot, and the blocker is not big.bin: the 
 # base B+tree holds LIVE pages up at ~160165, far above the boundary, and
 # truncating a metadata page destroys the volume rather than freeing space.
 #
@@ -408,12 +408,12 @@ echo "  all text-batch members bit-exact"
 
 echo
 echo "== [C] sealed volume grows, seal survives, then unseal =="
-# WP201: native v3 seal exists, so this leg exercises it for real. The
+# WP201: native  seal exists, so this leg exercises it for real. The
 # resize refusal gate ("unseal first") still only recognizes v2-era seal
-# markers and is blind to v3 seals -- grow sails through, which is SAFE
+# markers and is blind to  seals -- grow sails through, which is SAFE
 # (measured: the seal verifies clean after the grow, tail growth lands
 # shadow-side past the sealed groups, post-grow writes go stale by
-# design). Teaching the gate v3 seals is a follow-up, not this leg.
+# design). Teaching the gate  seals is a follow-up, not this leg.
 $B/invf-mkfs "$IMGC" 0.5 >/dev/null
 $B/invf-cp "$IMGC" "$WORK/orig/a.c" a.c >/dev/null
 $B/invf-cp "$IMGC" "$WORK/orig/w.py" w.py >/dev/null

@@ -396,7 +396,7 @@ typedef struct {
 
 
 
-/* WP-M6: a v3 volume has no v2 record stream, so the table is built from
+/* WP-M6: a  volume has no v2 record stream, so the table is built from
  * the dirent tree via vol_walk. Files land under their path; directories
  * additionally land under "path/" so meta_for_path's anchor lookup (shared
  * with the v2 path) finds them. pos is unused after the build. */
@@ -880,7 +880,7 @@ static int meta_for_path(const char *path, char *ename, size_t ecapsz,
         }
         if (grc == -EIO) return -1;
         if (grc == -ENOENT) {
-            /* the anchor record predates its metadata row (a pre-v3 volume):
+            /* the anchor record predates its metadata row (a pre-metadata-store volume):
              * report sane DIR defaults, which is the v1->v2 upgrade path --
              * there is no recorded mode to lose. A row that could not be
              * READ is the other case and returned above. */
@@ -933,7 +933,7 @@ static void fill_stat_from_meta(struct stat *st, const invfs_meta_pub *m,
  * invent:
  *
  *   cur from type defaults (mmeta: rc 1 with the defaults applied)  -- the
- *     record has no metadata row at all, a pre-v3 volume. Writing the
+ *     record has no metadata row at all, a pre-metadata-store volume. Writing the
  *     defaults plus the patch is the documented v1->v2 upgrade path and is
  *     the ONE case where a default belongs in the row.
  *
@@ -1757,7 +1757,7 @@ done:
  * sibling inodes its payload lives in ("x.tar" -> "x.tar!part0"). Core refuses
  * such a name where it is introduced (name_is_internal_ns,
  * src/core/volume_internal.h: vol_create_node, vol_mkdir,
- * vol_rename, vol_v3_hardlink, vol_write_begin), and that check is what
+ * vol_rename, vol_hardlink, vol_write_begin), and that check is what
  * makes the hole unreachable. This is not that check -- it is the ERRNO.
  *
  * Every core create returns 0 for every kind of failure, and these callers
@@ -2226,7 +2226,7 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
                  *
                  * Both non-zero answers of vol_get_meta_rc fail closed:
                  * -EIO is "the row could not be read" and -ENOENT is "there
-                 * is no such row". The second is not expected on a v3 volume
+                 * is no such row". The second is not expected on a  volume
                  * (VOLF_META is the only format there is), and if it happens
                  * then the file has no recorded identity to preserve, which
                  * is not a licence to replace it with 0644 root. */
@@ -2551,7 +2551,7 @@ static void sweep_rollback_warning(const char *img, const char *mnt)
  * deliberately NOT tied to the rollback window below.
  *
  * The rollback window (WP77, extended by WP134 to EVERY in-FUSE pass): on
- * v3 it is the SPT0 save point; a live previous pass's save point is
+ *  it is the SPT0 save point; a live previous pass's save point is
  * dropped (K=1) and spt0_capture records {base_root, delta_end} in
  * prepare, i.e. under g_io_lock and still before vol_collect_sweepables
  * (collect) -- the same position the offline invf-sweep takes
@@ -2566,9 +2566,9 @@ static void sweep_rollback_warning(const char *img, const char *mnt)
  * rewrite with no way back is worse than no rewrite. The watermark path
  * keeps its pre-existing fail-open behaviour.
  *
- * There is no second arm: the v3 save point above is the only window this
+ * There is no second arm: the  save point above is the only window this
  * build has. The coarse WP21 sweep checkpoint it replaced had no writer,
- * so there was never a v3 path to it. */
+ * so there was never a  path to it. */
 static void invf_sweep_worker(int full_pass)
 {
     uint64_t *ids = NULL;
@@ -3615,7 +3615,7 @@ static int invf_link(const char *from, const char *dest)
     if (rc == 0) {
         /* v2 needs this patch: both names share blocks, so record nlink=2
          * to make unlinking ONE name take the name-only path instead of
-         * retiring blocks. On v3 vol_hardlink already maintains the shared
+         * retiring blocks. On  vol_hardlink already maintains the shared
          * row's nlink; forcing it back to 2 here would corrupt a third or
          * later link. */
         if (!(vol_sb(g_vol)->vol_flags & VOLF_META)) {

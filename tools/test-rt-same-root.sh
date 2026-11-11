@@ -26,7 +26,7 @@
 # Every leg asserts the CONSTRUCTION before the verdict, so no leg can pass
 # because the driver quietly failed to build the shape it claims to.
 #
-#   leg 0  build a multi-file v3 volume and fold it into the base.
+#   leg 0  build a multi-file  volume and fold it into the base.
 #   leg 1  THE FALSE POSITIVE: republish the current root (the rollback's
 #          own call) so both slots name one page, and require invf-fsck to
 #          report it CLEAN and invf-fsck's own exit code to be 0.
@@ -94,7 +94,7 @@ build() {  # build <img>
     echo "$OUT"
 }
 
-echo "== leg 0: build a folded multi-file v3 volume =="
+echo "== leg 0: build a folded multi-file  volume =="
 OUT=$(build clean.img)
 echo "$OUT"
 ROOT=$(field "$OUT" ROOT)

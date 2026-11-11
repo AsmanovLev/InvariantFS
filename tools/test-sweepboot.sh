@@ -172,16 +172,16 @@ echo "  empty dir, rc 0 -- the sweepboot script falls back to builtins"
 echo
 echo "== [6] the maintenance pass itself: invf-sweep --seal =="
 # the exact argv sweepboot-init.sh issues (step 3) on the swept image.
-# WP201: native v3 seal (par2-inspired, no compat). --seal seals with the
+# WP201: native  seal (par2-inspired, no compat). --seal seals with the
 # default menu (pct 10 -> k=9,m=1) and proves it with verify-after-write;
 # the old refusal assertions retired with the v2 format. What is asserted
 # here is success plus the volume being untouched by it -- the same
 # contract tools/test-seal.sh asserts in full.
 INVFS_CODECPACKS="$WORK/packs2" $B/invf-sweep "$IMG" --seal > "$WORK/seal.log" 2>&1 \
-    && sealrc=0 || sealrc=$?   # zero is the expected v3 answer now
-[ "$sealrc" -eq 0 ] || { cat "$WORK/seal.log"; fail "v3: --seal failed (rc=$sealrc)"; }
+    && sealrc=0 || sealrc=$?   # zero is the expected  answer now
+[ "$sealrc" -eq 0 ] || { cat "$WORK/seal.log"; fail ": --seal failed (rc=$sealrc)"; }
 grep -q "sealed-at-gen-.* verified clean" "$WORK/seal.log" \
-    || { cat "$WORK/seal.log"; fail "v3: --seal left no verify-after-write proof"; }
+    || { cat "$WORK/seal.log"; fail ": --seal left no verify-after-write proof"; }
 echo "  --seal sealed with verify-after-write proof (rc=0)"
 # everything still bit-exact, volume clean
 for f in demo.splt nest.splt notes.txt rand.bin; do

@@ -1,8 +1,8 @@
 #!/bin/bash
-# test-batch-owner.sh — the v3 batch REGISTRY is a block owner.
+# test-batch-owner.sh — the  batch REGISTRY is a block owner.
 #
 # Red control for the recipe-blob loss: a sweep could free a block that the
-# v3 batch registry still owned, the block was handed straight back to the
+#  batch registry still owned, the block was handed straight back to the
 # shared free pool, and the same sweep's stage-6 tz_gc then freed it a
 # SECOND time through the row it never dropped -- by then as a live base
 # B+-tree page. The fold after it rebuilt the base from the pre-transform
@@ -121,7 +121,7 @@ RC=$?
 echo "$OUT"
 [ "$RC" -eq 0 ] \
     || { cat <<'EOF'
-FAIL: the savepoint reclaim freed a block the v3 batch registry still owns.
+FAIL: the savepoint reclaim freed a block the  batch registry still owns.
 
 That is the recipe-blob loss. The registry row is now a stale pointer into
 the free pool; the next base-page allocation may take the block, and this
@@ -174,5 +174,5 @@ leaked forever"; }
 sed -n '/text gc:/p;/reclaim:/p' m.img.sweep.all.log
 echo "  dead batch reclaimed and its row retired"
 
-echo "PASS: the v3 batch registry is honoured as a block owner"
+echo "PASS: the  batch registry is honoured as a block owner"
 exit 0

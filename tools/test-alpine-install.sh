@@ -16,7 +16,7 @@ set -euo pipefail
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 B="$REPO/bin"
 WORK="${INVFS_ALPINE_WORK:-/var/tmp/invfs-alpine-test}"
-URL="${INVFS_ALPINE_URL:-https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64}"
+URL="${INVFS_ALPINE_URL:-https://dl-cdn.alpinelinux.org/alpine/.24/releases/x86_64}"
 ROOTFS="${INVFS_ALPINE_ROOTFS:-alpine-minirootfs-3.24.4-x86_64.tar.gz}"
 TARBALL="${INVFS_ALPINE_TARBALL:-$WORK/$ROOTFS}"
 STAGE="$WORK/stage"
@@ -35,7 +35,7 @@ rm -rf "$STAGE"; mkdir -p "$STAGE"
 note "stage 1: Alpine minirootfs tarball"
 if [ ! -s "$TARBALL" ]; then
     echo "downloading $URL/$ROOTFS"
-    FALLBACK_URL="https://mirrors.edge.kernel.org/alpine/v3.24/releases/x86_64"
+    FALLBACK_URL="https://mirrors.edge.kernel.org/alpine/.24/releases/x86_64"
     if command -v curl >/dev/null; then
         curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.part" "$URL/$ROOTFS" \
             || curl -fL --retry 5 --retry-connrefused --connect-timeout 15 -o "$TARBALL.part" "$FALLBACK_URL/$ROOTFS" \

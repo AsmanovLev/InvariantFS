@@ -9,7 +9,7 @@ linked, still ran, and nothing failed.
 
 This is not the proof that they are gone. That is
 `src/cli/no_v2_surface_test.c`, which drives the shipped binaries through a
-write/overwrite/sweep/fsck cycle on a real v3 volume and then scans the
+write/overwrite/sweep/fsck cycle on a real  volume and then scans the
 32 MiB reserved gap for a single non-zero byte. Every entry point of the
 deleted layer wrote there and nowhere else, so that test fails on ANY
 re-grown caller, whatever it is named -- a grep for one name cannot do

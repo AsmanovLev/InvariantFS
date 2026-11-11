@@ -1,4 +1,4 @@
-/* vol_spt0.c — WP-M16: v3 save point (SPT0 descriptor).
+/* vol_spt0.c — WP-M16:  save point (SPT0 descriptor).
  *
  * Implements save point capture, rollback-to-savepoint, and drop.
  * See vol_spt0.h for the API contract.
@@ -67,7 +67,7 @@ static int  spt0_data_ok(invfs_volume *v, char *err, size_t errlen);
  * the page does not match the pointer, and the walk returns -1 -- which
  * aborts the fold diff outright (vol_fold.c:298 discards the result) and
  * aborts the orphan collector's entire collection, which is what invf-sweep
- * prints as "warning: v3 orphan reclaim failed" while still exiting 0.
+ * prints as "warning:  orphan reclaim failed" while still exiting 0.
  *
  * On failure the checksum and gen stay zero, deliberately, and that is the
  * safe direction: a walk that cannot verify the save point's tree refuses to
@@ -251,7 +251,7 @@ static int spt0_tree_ok(invfs_volume *v, uint64_t pba, char *err, size_t errlen)
 /* ===================================================================
  * WP96 layer 1: the save point's DATA pin (SPN0).
  *
- * The shape is WP21's retired per-run retmap, re-expressed for v3: a bitmap
+ * The shape is WP21's retired per-run retmap, re-expressed for : a bitmap
  * over total_blocks, one bit per block, persisted in its own run of blocks
  * and named by a block-0 descriptor. While the pin is ARMED (a live save
  * point), vol_free_blocks refuses to free a block the bitmap names, so the
@@ -417,7 +417,7 @@ static uint64_t spn_map_off(uint32_t ndig)
  * a 131072-block volume (16384 bytes) was read on a 163840-block volume with
  * spn_map_bytes() == 20480, so 4096 bytes -- one whole block of the image,
  * straight past the end of the bitmap -- were taken as mark bits for blocks
- * 131072..163839. 150 of those were live v3 base B+tree pages at
+ * 131072..163839. 150 of those were live  base B+tree pages at
  * 159857..160166, the reclaim freed every one of them, and the capture then
  * recorded 160165 -- a block inside the range it had just released -- as
  * base_root.
@@ -805,7 +805,7 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
 
 /* ---- the reclaim pass ------------------------------------------------ */
 
-/* Is block `b` inside an extent the v3 batch registry still claims? The
+/* Is block `b` inside an extent the  batch registry still claims? The
  * extents are sorted by head pba and, being distinct allocations, do not
  * overlap -- so the only candidate is the last one that starts at or before
  * `b`. Called once per block of the volume, hence the binary search. */
@@ -841,13 +841,13 @@ static int spt0_ptr_from_pba(invfs_volume *v, uint64_t pba, invfs_blkptr *out)
     return 0;
 }
 
-/* The v3 BASE TREE is an owner set here, for the same reason a live recipe
+/* The  BASE TREE is an owner set here, for the same reason a live recipe
  * and the batch registry are.
  *
  * The mark set holds every block the CAPTURED generation's recipes named, and
  * that is a list of addresses, not of owners. A block in it can since have
  * been freed and handed to somebody else: this pool is shared and has no hard
- * regions (AGENTS.md 2.3), so a v3 base B+tree page allocated by the fold lands
+ * regions (AGENTS.md 2.3), so a  base B+tree page allocated by the fold lands
  * wherever the free pool gives it. When the capture that took the mark set ran
  * on a volume of a DIFFERENT total_blocks than the one reading it back, the
  * read ran off the end of the stored bitmap (spn_map_read_len above) and
@@ -957,7 +957,7 @@ static uint64_t spn_reclaim(invfs_volume *v, const uint8_t *old_map,
      * pba_ref_ensure makes when it cannot build an exact map (c47cf65). */
     if (!new_map_complete)
         return 0;
-    /* A RECIPE is not the only owner of a pinned block. The v3 batch
+    /* A RECIPE is not the only owner of a pinned block. The  batch
      * registry (the hidden TZ_OWNER_NAME file) owns its batches' extents
      * independently, and a batch that no live recipe names any more is dead
      * while its registry row is still on disk -- the row is retired later, by

@@ -1,7 +1,7 @@
 /* anchor_test.c — the ANC0 tail anchor driver for test-meta-anchor.sh.
  *
  * RT30 (block 0, 0x9D0) and SPT0 (0xA00) are the only copies of the two
- * descriptors that decide whether a metadata-v3 volume can be opened at all.
+ * descriptors that decide whether a metadata store volume can be opened at all.
  * RT30's "double slot" is two POINTERS, not two copies, so it survives a
  * stale root and nothing else; parity over block 0's contents dies with block
  * 0. The answer is a redundant LOCATION, and the only location that works is

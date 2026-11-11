@@ -1,4 +1,4 @@
-/* sibling_retire_test.c — a v3 overwrite must retire the superseded
+/* sibling_retire_test.c — a  overwrite must retire the superseded
  * content's "name!..." siblings, exactly as its v2 twin does.
  *
  * The divergence this exists for (WP meta-write-dup-audit, finding A): the
@@ -6,10 +6,10 @@
  *
  *     if (s->owns_siblings) vol_delete_siblings(v, s->name);
  *
- * (src/core/vol_write.c:1131) and the v3 commit (vol_write_commit_v3) had
- * no such leg. On v3 a decomposed container keeps its payload in sibling
+ * (src/core/vol_write.c:1131) and the  commit (vol_write_commit_v3) had
+ * no such leg. On  a decomposed container keeps its payload in sibling
  * INODES -- vol_create_tar_file calls vol_create_blob_file("%s!part%u"),
- * which on v3 lands as a real dirent -- so overwriting a swept a.tar left
+ * which on  lands as a real dirent -- so overwriting a swept a.tar left
  * a.tar!part0..N live for ever:
  *
  *   - the sweep walks an internal '!' name but never retires it,
@@ -19,7 +19,7 @@
  *     free-block count stayed flat across two further sweeps.
  *
  * The fix makes both formats ask ONE rule (ast_owns_siblings,
- * src/core/vol_records.c) and adds the retire to the v3 commit, so the two
+ * src/core/vol_records.c) and adds the retire to the  commit, so the two
  * cannot disagree again.
  *
  * Legs:
@@ -128,7 +128,7 @@ int main(int argc, char **argv)
     static const char payload[] = "NEW CONTENT, NOT A TAR AT ALL";
     int err = 0, i;
 
-    printf("sibling_retire_test: v3 overwrite retires name! siblings\n");
+    printf("sibling_retire_test:  overwrite retires name! siblings\n");
 
     snprintf(g_img, sizeof g_img, "%s/invf-sibling-retire-test.img", dir);
     unlink(g_img);

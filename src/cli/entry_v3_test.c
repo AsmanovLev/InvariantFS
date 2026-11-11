@@ -1,10 +1,10 @@
 /*
- * entry_v3_test.c — WP639 recipe entry v3: layout, CRC32C, dual-stride.
+ * entry_v3_test.c — WP639 recipe entry : layout, CRC32C, dual-stride.
  *
  * What is under test
  * ------------------
  * The 32-bit entry word is full (zone:2 + algo:6 + block_id:24), so a wider
- * entry is a new 40-byte stride, not a wider bitfield. The on-disk v3 image
+ * entry is a new 40-byte stride, not a wider bitfield. The on-disk  image
  * is assembled arithmetically (shifts/masks + LE memcpy), never by memcping
  * a struct -- so the bytes do not depend on toolchain bitfield layout. This
  * test pins that contract:
@@ -17,17 +17,17 @@
  *      hold (zone > 3, algo > 63, block_id > 2^24-1).
  *   D. tamper in every field region (off/len/flags/boff/crc/pba) fails
  *      verify; a set reserved bit fails verify.
- *   E. serialize_win under INVFS_RECIPE_FORCE_V3=1 emits a v3 header with
+ *   E. serialize_win under INVFS_RECIPE_FORCE_V3=1 emits a  header with
  *      40 B entries; without it the writer stays v1/v2 byte-identical.
- *   F. parse of a v3 blob verifies every entry, converts to the 32 B shape,
+ *   F. parse of a  blob verifies every entry, converts to the 32 B shape,
  *      and refuses truncated/unknown-version blobs; a flipped entry byte
  *      fails the parse (loudly, never a misread).
  *   G. boundaries: 0 entries, single-blob edges, chunk-stride edges
  *      (76.8 entries per 3072-chunk must round-trip, not align).
  *   H. trailing window table behind 40 B entries parses (stride-aware).
  *
- * What is NOT under test here (e2e legs live in tools/test-entry-v3.sh):
- * mounting, sweeping, or fscking a forced-v3 volume -- this binary never
+ * What is NOT under test here (e2e legs live in tools/test-entry-.sh):
+ * mounting, sweeping, or fscking a forced volume -- this binary never
  * touches a volume. CRC32C itself is pinned by src/cli/crc32c_test.c.
  *
  * exit 0 = pass, 1 = failure, 2 = setup error.
@@ -56,7 +56,7 @@ int main(void)
     ok(invfs_ast_entry_stride(INVFS_AST_VERSION_V2) == 32,
        "A: v2 stride is 32");
     ok(invfs_ast_entry_stride(INVFS_AST_VERSION_V3) == 40,
-       "A: v3 stride is 40");
+       "A:  stride is 40");
     ok(invfs_ast_entry_stride(0) == 0 && invfs_ast_entry_stride(4) == 0 &&
        invfs_ast_entry_stride(0xEEEEEEEEu) == 0,
        "A: unknown versions stride 0 (refuse)");
@@ -70,7 +70,7 @@ int main(void)
         uint64_t flags;
         /* zone=1, algo=25 (NBLI), block_id=0xABCDEF:
          * flags = 1 | 25<<6 | 0xABCDEF<<16 = 0xABCDEF0641 */
-        invfs_ast_entry_v3_pack(img, 0x0102030405060708ull,
+        invfs_ast_entry_pack(img, 0x0102030405060708ull,
                                 0x1112131415161718ull, 1, 25, 0xABCDEFull,
                                 0x11223344u, 0x2122232425262728ull);
         ok(img[0] == 0x08 && img[7] == 0x01,
@@ -86,7 +86,7 @@ int main(void)
            "B: block_offset little-endian");
         ok(img[32] == 0x28 && img[39] == 0x21,
            "B: pba little-endian");
-        ok(invfs_ast_entry_v3_verify(img, 40) == 0,
+        ok(invfs_ast_entry_verify(img, 40) == 0,
            "B: fresh pack verifies");
     }
 
@@ -95,12 +95,12 @@ int main(void)
         uint8_t img[40];
         invfs_ast_block_entry e;
         memset(&e, 0, sizeof e);
-        invfs_ast_entry_v3_pack(img, 0xFFFFFFFFFFFFFFFFull,
+        invfs_ast_entry_pack(img, 0xFFFFFFFFFFFFFFFFull,
                                 0xFFFFFFFFFFFFFFFFull, 3, 63, 0xFFFFFFu,
                                 0xFFFFFFFFu, 0xFFFFFFFFFFFFFFFFull);
-        ok(invfs_ast_entry_v3_verify(img, 40) == 0,
+        ok(invfs_ast_entry_verify(img, 40) == 0,
            "C: max representable pack verifies");
-        ok(invfs_ast_entry_v3_unpack(img, &e) == 0 &&
+        ok(invfs_ast_entry_unpack(img, &e) == 0 &&
            e.file_offset == 0xFFFFFFFFFFFFFFFFull &&
            e.length == 0xFFFFFFFFFFFFFFFFull &&
            e.zone == 3 && e.algo == 63 && e.block_id == 0xFFFFFFu &&
@@ -110,17 +110,17 @@ int main(void)
         /* wide values verify (the image is well-formed) but do not unpack
          * into the 32 B in-memory shape: in-memory widening arrives with
          * the stream-cap raise, never before it. */
-        invfs_ast_entry_v3_pack(img, 0, 0, 4, 0, 0, 0, 0);
-        ok(invfs_ast_entry_v3_verify(img, 40) == 0 &&
-           invfs_ast_entry_v3_unpack(img, &e) != 0,
+        invfs_ast_entry_pack(img, 0, 0, 4, 0, 0, 0, 0);
+        ok(invfs_ast_entry_verify(img, 40) == 0 &&
+           invfs_ast_entry_unpack(img, &e) != 0,
            "C: zone 4 verifies but refuses unpack (fail closed)");
-        invfs_ast_entry_v3_pack(img, 0, 0, 0, 64, 0, 0, 0);
-        ok(invfs_ast_entry_v3_verify(img, 40) == 0 &&
-           invfs_ast_entry_v3_unpack(img, &e) != 0,
+        invfs_ast_entry_pack(img, 0, 0, 0, 64, 0, 0, 0);
+        ok(invfs_ast_entry_verify(img, 40) == 0 &&
+           invfs_ast_entry_unpack(img, &e) != 0,
            "C: algo 64 verifies but refuses unpack (fail closed)");
-        invfs_ast_entry_v3_pack(img, 0, 0, 0, 0, 0x1000000u, 0, 0);
-        ok(invfs_ast_entry_v3_verify(img, 40) == 0 &&
-           invfs_ast_entry_v3_unpack(img, &e) != 0,
+        invfs_ast_entry_pack(img, 0, 0, 0, 0, 0x1000000u, 0, 0);
+        ok(invfs_ast_entry_verify(img, 40) == 0 &&
+           invfs_ast_entry_unpack(img, &e) != 0,
            "C: block_id 2^24 verifies but refuses unpack (fail closed)");
     }
 
@@ -132,25 +132,25 @@ int main(void)
         int all_fail = 1;
         for (i = 0; i < sizeof spots / sizeof spots[0]; i++) {
             uint8_t img[40];
-            invfs_ast_entry_v3_pack(img, 100, 200, 1, 2, 300, 400, 500);
+            invfs_ast_entry_pack(img, 100, 200, 1, 2, 300, 400, 500);
             img[spots[i]] ^= 0x01;
-            if (invfs_ast_entry_v3_verify(img, 40) == 0)
+            if (invfs_ast_entry_verify(img, 40) == 0)
                 all_fail = 0;
         }
         ok(all_fail, "D: a 1-bit flip in any field region fails verify");
         {
             uint8_t img[40];
-            invfs_ast_entry_v3_pack(img, 100, 200, 1, 2, 300, 400, 500);
+            invfs_ast_entry_pack(img, 100, 200, 1, 2, 300, 400, 500);
             img[22] ^= 0x80;   /* rsv bit (flags bit 48+7): must be zero */
-            ok(invfs_ast_entry_v3_verify(img, 40) != 0,
+            ok(invfs_ast_entry_verify(img, 40) != 0,
                "D: a set reserved bit fails verify");
         }
-        ok(invfs_ast_entry_v3_verify(NULL, 40) != 0 &&
-           invfs_ast_entry_v3_verify((const uint8_t *)"", 39) != 0,
+        ok(invfs_ast_entry_verify(NULL, 40) != 0 &&
+           invfs_ast_entry_verify((const uint8_t *)"", 39) != 0,
            "D: NULL/truncated input fails verify");
     }
 
-    /* ---- LEG E: forced v3 serialize; unforced stays v1/v2 ---- */
+    /* ---- LEG E: forced  serialize; unforced stays v1/v2 ---- */
     {
         invfs_ast_block_entry ents[3];
         uint8_t *blob = NULL;
@@ -171,15 +171,15 @@ int main(void)
         ents[2].block_offset = 0; ents[2].pba = 779;
         setenv("INVFS_RECIPE_FORCE_V3", "1", 1);
         ok(vol_ast_recipe_serialize(196708ull, ents, 3, &blob, &blen) == 0,
-           "E: forced-v3 serialize succeeds");
+           "E: forced serialize succeeds");
         memcpy(&ver, blob, 4);
         ok(ver == INVFS_AST_VERSION_V3 && blen == 24 + 3 * 40,
-           "E: forced blob is v3 (24 B header + 3x40 B entries)");
+           "E: forced blob is  (24 B header + 3x40 B entries)");
         ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) == 0 &&
            ah.version == INVFS_AST_VERSION_V3 && nents == 3 && ents_out &&
            ents_out[0].pba == 777 && ents_out[1].pba == 778 &&
            ents_out[2].length == 100 && ents_out[2].block_id == 2,
-           "E: forced-v3 blob parses with verified, converted entries");
+           "E: forced blob parses with verified, converted entries");
         vol_ast_recipe_parsed_free(&ah, ents_out);
         free(blob);
         blob = NULL;
@@ -188,7 +188,7 @@ int main(void)
            "E: unforced serialize succeeds");
         memcpy(&ver, blob, 4);
         ok(ver != INVFS_AST_VERSION_V3 && blen == 16 + 3 * 32,
-           "E: unforced output stays v1 byte-shape (no v3 without need)");
+           "E: unforced output stays v1 byte-shape (no  without need)");
         ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) == 0 &&
            nents == 3 && ents_out && ents_out[1].pba == 778,
            "E: unforced blob parses as before");
@@ -196,7 +196,7 @@ int main(void)
         free(blob);
     }
 
-    /* ---- LEG F: v3 parse refuses corruption ---- */
+    /* ---- LEG F:  parse refuses corruption ---- */
     {
         invfs_ast_block_entry ents[2];
         uint8_t *blob = NULL;
@@ -210,7 +210,7 @@ int main(void)
         ents[1].block_id = 1; ents[1].pba = 12;
         setenv("INVFS_RECIPE_FORCE_V3", "1", 1);
         ok(vol_ast_recipe_serialize(131072ull, ents, 2, &blob, &blen) == 0,
-           "F: forced-v3 fixture serializes");
+           "F: forced fixture serializes");
         unsetenv("INVFS_RECIPE_FORCE_V3");
         blob[24 + 40] ^= 0x04;   /* flip a length bit of entry 1 */
         ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) != 0,
@@ -222,7 +222,7 @@ int main(void)
         vol_ast_recipe_parsed_free(&ah, ents_out);
         ents_out = NULL;
         ok(vol_ast_recipe_parse(blob, blen - 1, &ah, &ents_out, &nents) != 0,
-           "F: a truncated v3 blob fails the parse");
+           "F: a truncated  blob fails the parse");
         ok(vol_ast_recipe_parse(blob, 10, &ah, &ents_out, &nents) != 0,
            "F: a header-truncated blob fails the parse");
         blob[0] = 0x04; blob[1] = 0x00; blob[2] = 0x00; blob[3] = 0x00;
@@ -241,10 +241,10 @@ int main(void)
         setenv("INVFS_RECIPE_FORCE_V3", "1", 1);
         ok(vol_ast_recipe_serialize(0ull, NULL, 0, &blob, &blen) == 0 &&
            blen == 24,
-           "G: 0-entry v3 blob is header-only");
+           "G: 0-entry  blob is header-only");
         ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) == 0 &&
            nents == 0,
-           "G: 0-entry v3 blob parses (no entries, no failure)");
+           "G: 0-entry  blob parses (no entries, no failure)");
         vol_ast_recipe_parsed_free(&ah, ents_out);
         free(blob);
         unsetenv("INVFS_RECIPE_FORCE_V3");
@@ -267,12 +267,12 @@ int main(void)
             ok(vol_ast_recipe_serialize((uint64_t)n * 65536ull, ents, (uint32_t)n,
                                         &blob, &blen) == 0 &&
                blen == 24 + n * 40,
-               "G: 77-entry v3 blob has the exact byte size");
+               "G: 77-entry  blob has the exact byte size");
             unsetenv("INVFS_RECIPE_FORCE_V3");
             ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) == 0 &&
                nents == n && ents_out && ents_out[76].pba == 1076 &&
                ents_out[76].block_id == 76,
-               "G: 77-entry v3 blob parses with the tail entry intact");
+               "G: 77-entry  blob parses with the tail entry intact");
             vol_ast_recipe_parsed_free(&ah, ents_out);
             free(blob);
             free(ents);
@@ -299,11 +299,11 @@ int main(void)
         setenv("INVFS_RECIPE_FORCE_V3", "1", 1);
         ok(vol_ast_recipe_serialize_win(131072ull, ents, 2, wins, 1,
                                         &blob, &blen) == 0,
-           "H: forced-v3 windowed serialize succeeds");
+           "H: forced windowed serialize succeeds");
         unsetenv("INVFS_RECIPE_FORCE_V3");
         ok(vol_ast_recipe_parse(blob, blen, &ah, &ents_out, &nents) == 0 &&
            nents == 2 && ents_out && ents_out[1].algo == 24,
-           "H: forced-v3 windowed blob parses (entries verified)");
+           "H: forced windowed blob parses (entries verified)");
         vol_ast_recipe_parsed_free(&ah, ents_out);
         ok(vol_ast_recipe_windows(blob, blen, &ah, &wout, &nw) == 0 &&
            nw == 1 && wout && wout[0].src_len == 4096,

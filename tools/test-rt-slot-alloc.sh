@@ -98,7 +98,7 @@ build() {  # build <img>
     echo "$OUT"
 }
 
-echo "== leg 0: build a multi-generation v3 volume =="
+echo "== leg 0: build a multi-generation  volume =="
 OUT=$(build good.img)
 echo "$OUT"
 S0=$(field "$OUT" SLOT0); S1=$(field "$OUT" SLOT1)

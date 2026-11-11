@@ -33,7 +33,7 @@ void vol_walk_init(vol_walk_t *w, invfs_volume *v, const char *what)
     w->rc = 0;
     w->n = 0;
     w->found = 0;
-    w->what = what ? what : "v3 walk";
+    w->what = what ? what : " walk";
     w->latched = 0;
     w->armed = 0;
 }
@@ -117,7 +117,7 @@ int vol_walk_abandon(vol_walk_t *w)
         fprintf(stderr, "vol_walk: %s stopped after %zu of this volume's "
                 "entries; its caller is proceeding on the partial result "
                 "anyway.\n",
-                w->what ? w->what : "a v3 walk", w->found);
+                w->what ? w->what : "a  walk", w->found);
     }
     {
         int short_walk = (w && !vol_walk_complete(w)) ? 1 : 0;

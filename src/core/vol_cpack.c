@@ -3245,7 +3245,7 @@ struct cpack_map_cache {
  * holds it is straight-line code over `v->maps` / this struct plus
  * strcmp/strdup/free/memset, and it calls nothing outside libc. The map
  * LOAD deliberately runs with the lock DROPPED, because it descends into
- * vol_find / vol_read_file / cpack_recipe_seg, and the v3 tree, delta and
+ * vol_find / vol_read_file / cpack_recipe_seg, and the  tree, delta and
  * plugin locks all sit ABOVE this one. So the only orders ever observed
  * are g_io_lock -> cpacks.mu, vol_btree -> cpacks.mu,
  * vol_plugin_client -> cpacks.mu, arc.mu -> cpacks.mu and
@@ -3405,7 +3405,7 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
     pthread_mutex_unlock(&v->cpacks_mu);
 
     /* The load runs UNLOCKED: it calls vol_find / vol_read_file /
-     * cpack_recipe_seg, which descend into the v3 tree, and those locks
+     * cpack_recipe_seg, which descend into the  tree, and those locks
      * sit above cpacks_mu. Holding a leaf across them would be a cycle.
      * Two threads racing on a cold name therefore both load; the insert
      * below re-checks and keeps ONE of them, so the duplicate is a cost
@@ -3556,7 +3556,7 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 
 
 
-/* v3: release the blocks the superseded parent recipe owned, once the
+/* : release the blocks the superseded parent recipe owned, once the
  * decomposition has committed. Called at the END of the commit, never before:
  * a guard/map failure rolls the name back onto the untouched old record, which
  * has to stay readable.
@@ -3579,25 +3579,25 @@ static void cpack_release_superseded(
 /* The MAP branch's rollback: undo the commit at step 6 when a fallible step
  * AFTER it fails, and put the name back on the untouched old record.
  *
- * WP201: the v3 guard is the same one the EXER lane already carries
- * (src/core/vol_exer.c:441), and it is not optional. On v3
+ * WP201: the  guard is the same one the EXER lane already carries
+ * (src/core/vol_exer.c:441), and it is not optional. On 
  * vol_create_blob_file supersedes the inode row IN PLACE (newino ==
  * inode_id), so the "old row" this rollback exists to retire no longer
- * exists -- the call cannot undo its commit, on v2 or on v3.
+ * exists -- the call cannot undo its commit, on v2 or on .
  *
  * What it does instead is worse than doing nothing. vol_retire_inode
- * (vol_records.c:623) has no v3 guard either, so it rewrites the superblock
+ * (vol_records.c:623) has no  guard either, so it rewrites the superblock
  * and then appends a v2 TOMBSTONE_MAGIC record through vol_append_slot into
- * the ACTIVE METADATA EXTENT. On v3 that extent is the shared base-page /
+ * the ACTIVE METADATA EXTENT. On  that extent is the shared base-page /
  * data pool the COW B+ tree allocates from, and on a volume whose metadata
  * zone ran short it is physically in the shadow pool (AGENTS.md 2.7).
- * Measured on a 48 MB v3 image: the record landed at pba 2680775 in the
+ * Measured on a 48 MB  image: the record landed at pba 2680775 in the
  * shadow zone, overwriting a block that was ALLOCATED -- a v2-shaped
- * record written over a live v3 block, which is a bit-exactness violation,
+ * record written over a live  block, which is a bit-exactness violation,
  * not a bookkeeping one.
  *
  * Note what it does NOT do: the v2 tombstone and the idx_del beside it are
- * invisible to v3 resolution, so the committed row survives. The damage is
+ * invisible to  resolution, so the committed row survives. The damage is
  * the pool overwrite plus the superblock rewrite, not a lost file -- which
  * is exactly why "declined" is such a poor report for it. The lane has to
  * say what it actually did.
@@ -4325,7 +4325,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * normal pipeline owns them from here), then the member table, then
      * the name-owning recipe record; retire the old record last. */
     have_keep = vol_get_meta(v, inode_id, &keep) == 0;
-    /* v3: the parent's row is superseded IN PLACE -- vol_create_content_node
+    /* : the parent's row is superseded IN PLACE -- vol_create_content_node
      * reuses the dirent's inode id -- so the moment the new record lands the
      * superseded recipe's DATA SEGMENTS are unreachable, and nothing in the
      * tree ever frees them: vol_create_blob_file cannot (it is handed the new

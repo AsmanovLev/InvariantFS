@@ -196,7 +196,7 @@ This matches the existing lazy-sweep convention documented in `AGENTS.md` §2.5 
 - **Cross-VM deduplication becomes real, not theoretical.** A 10-VM Ubuntu deployment that today stores 10 × 600 MiB compressed qcow2 images (~6 GiB total) deduplicates the ~50k identical guest files (kernel modules, libc, openssl, systemd, locale data, …) down to one copy in Shadow. Expected savings: 5-9 GiB depending on Ubuntu version spread.
 - **Storage-efficient archival of OS fleets.** Image baselines, CI containers, and dev VM caches all collapse to one canonical copy plus tiny per-instance diffs.
 - **Reuses every existing mechanism.** Block dedup, ARC cache, COW B+tree, sweep — none of these change. The new opcode slots into `vol_decode_ast_entries` like any other segment decoder.
-- **Backward-compatible ABI.** API v3 plugins ignore unknown commands; v2 hosts ignore the new opcode at the recipe level (it remains a 32-byte entry whose algo value is simply not in their switch).
+- **Backward-compatible ABI.** API  plugins ignore unknown commands; v2 hosts ignore the new opcode at the recipe level (it remains a 32-byte entry whose algo value is simply not in their switch).
 - **Bit-exactness preserved.** Window reads either succeed (window into materialized source) or fail (source unlinked → counter holds it). There is no silent data loss path.
 
 ### Negative

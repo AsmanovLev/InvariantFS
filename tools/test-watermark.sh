@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-watermark.sh — WP26 watermark-triggered early sweep e2e, v3 SPT0
+# test-watermark.sh — WP26 watermark-triggered early sweep e2e,  SPT0
 # (persistent regression).
 #
 # Mount option raw_watermark=<pct> (env INVFS_RAW_WATERMARK fallback)
@@ -7,7 +7,7 @@
 # the RAW-zone fill exceeds <pct>% — the first rung of the pressure
 # ladder (WP23 added the adaptive write-effort rungs; this one reclaims).
 #
-# On Meta-v3 (the default format) the pass's rollback window is the SPT0
+# On metadata store (the default format) the pass's rollback window is the SPT0
 # save point (WP77): the worker drops any previous pass's save point
 # (K=1) and captures a fresh one {base_root, delta_end} before the walk,
 # printing "[watermark] save point captured (...)". invf-rollback
@@ -21,7 +21,7 @@
 #          every-second pending drain would relieve mounted writes on
 #          its own; offline-staged files are invisible to it). The
 #          daemon sweeps with NO explicit invf-sweep call and captures a
-#          v3 save point. The fill does NOT drop at this generation —
+#           save point. The fill does NOT drop at this generation —
 #          the window it just armed is a hold on the pre-sweep
 #          generation's blocks — so leg 1 asserts the pin.
 #   Leg 1b: on its OWN image, the next bare sweep discharges that hold: a
@@ -348,7 +348,7 @@ echo
 echo "== [3] rollback undoes the watermark sweep =="
 $B/invf-rollback "$IMGA" > "$WORK/rb-a.log" 2>&1 || { cat "$WORK/rb-a.log"; fail "rollback failed"; }
 grep -q "rolled back to save point" "$WORK/rb-a.log" \
-    || fail "rollback did not report the v3 save point"
+    || fail "rollback did not report the  save point"
 $B/invf-cat "$IMGA" fat00.txt "$WORK/out/a.bin" >/dev/null
 cmp "$WORK/ref/fat00.txt" "$WORK/out/a.bin" \
     || fail "swept file not bit-exact after the rollback"
@@ -365,7 +365,7 @@ wait_log b1 "DONE found=[0-9]* files=" 60
 mnt_down "$IMGB"
 $B/invf-rollback "$IMGB" > "$WORK/rb-b.log" 2>&1 || { cat "$WORK/rb-b.log"; fail "rollback failed"; }
 grep -q "rolled back to save point" "$WORK/rb-b.log" \
-    || fail "rollback did not report the v3 save point"
+    || fail "rollback did not report the  save point"
 LAST=$(printf 'fat%02d.txt' $((FATN-1)))
 $B/invf-cat "$IMGB" "$LAST" "$WORK/out/b.bin" >/dev/null
 cmp "$WORK/ref/$LAST" "$WORK/out/b.bin" \

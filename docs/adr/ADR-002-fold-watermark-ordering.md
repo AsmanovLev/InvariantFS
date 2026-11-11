@@ -4,7 +4,7 @@
 Proposed
 
 ## Context
-In Meta-v3, the "add-before-remove" rule specifies that readers consult the delta log before the base B+ tree, ensuring that delta mutations shadow base values. However, a subtle race exists:
+In metadata store, the "add-before-remove" rule specifies that readers consult the delta log before the base B+ tree, ensuring that delta mutations shadow base values. However, a subtle race exists:
 - A reader snapshots the current base root pointer $R_0$ before a fold publishes $R_1$.
 - The fold worker publishes $R_1$ and subsequently truncates or resets the delta log.
 - The reader proceeds to search the reset delta log (missing the folded key) and then looks up the key in $R_0$ (where the updated key is absent). The reader observes a transient stale state or phantom `ENOENT`.

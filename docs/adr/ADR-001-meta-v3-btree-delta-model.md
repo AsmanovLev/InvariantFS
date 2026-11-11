@@ -1,4 +1,4 @@
-# ADR-001: Meta-v3 B+ Tree and Delta Log Architecture
+# ADR-001: metadata store B+ Tree and Delta Log Architecture
 
 ## Status
 Accepted

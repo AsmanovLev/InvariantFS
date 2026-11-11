@@ -37,19 +37,19 @@
  * must be < 2^24 blocks (the rawm map keys are 24-bit). Both are format
  * limits of the owner-record pattern, not of the device table.
  *
- * WP98 (Meta-v3): v3 has neither the v2 record stream nor the owner-L2P
+ * WP98 (metadata store):  has neither the v2 record stream nor the owner-L2P
  * journal, so the owner-record shape above does not exist there -- an
  * owner written through it, and read back through
  * meta_read_record_by_id(), was invisible after every reopen (WP94 found
- * it; it is the same trap WP78 fell into for heat, vol_heat.c:195). On v3
+ * it; it is the same trap WP78 fell into for heat, vol_heat.c:195). On 
  * the owner is a hidden file whose CONTENT is the index: a recipe blob
  * whose AST entries carry each copy's pba and block count directly (the
- * WP27 invariant every v3 file recipe already has), published with
+ * WP27 invariant every  file recipe already has), published with
  * vol_publish_blob_inode and read back with vol_read_file. That is the
  * tz_reg_store registry-over-a-hidden-file shape (vol_textzone.c:1085)
  * and it is a re-expression, not a second mapping structure: the v2 L2P
  * map existed only to carry (pba, plen) that the AST entry now carries, so
- * on v3 it is not written at all (wp25_map/wp25_unmap below are no-ops).
+ * on  it is not written at all (wp25_map/wp25_unmap below are no-ops).
  * The consequences of getting this wrong were: invf-stats reporting 0
  * copies after a sweep that made 24, a non-idempotent tier pass that
  * re-copied and re-demoted the same segments every sweep, and -- worst --
@@ -195,8 +195,8 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
 
 /* ---------------- owner-record persistence ---------------- */
 
-/* WP98: the Meta-v3 owner. There is no v2 record stream and no owner-L2P
- * journal on v3, so the index IS the owner's content: a recipe blob whose
+/* WP98: the metadata store owner. There is no v2 record stream and no owner-L2P
+ * journal on , so the index IS the owner's content: a recipe blob whose
  * AST entries carry every copy's pba and block count directly (the WP27
  * invariant -- the field has been in the entry since WP27 and the v2 writer
  * below already fills it; only the v2 LOADER still prefers the WAL map).
@@ -267,7 +267,7 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
                             uint64_t *ext_slot, const char *name,
                             const wp25_ent *ents, size_t n)
 {
-    /* On v3 the owner is a recipe blob + inode row. The v2 alternative
+    /* On  the owner is a recipe blob + inode row. The v2 alternative
      * appended [INOD][DELT] into the inode area and re-keyed the owner's
      * L2P mappings. */
     (void)ext_slot;
@@ -275,8 +275,8 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
 }
 
 
-/* WP98: the Meta-v3 index load. The owner is a hidden file (vol_find
- * resolves a 0x01 name through the v3 dirent tree, like the tz registry's
+/* WP98: the metadata store index load. The owner is a hidden file (vol_find
+ * resolves a 0x01 name through the  dirent tree, like the tz registry's
  * "\x01tzb"), its content is the recipe blob wp25_owner_write_v3
  * published, and each copy's pba and extent ride in its AST entries --
  * so there is no second mapping structure to consult, which is why this
@@ -345,9 +345,9 @@ static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
                                 wp25_ent **tp, size_t *np, size_t *cp,
                                 int is_rawm)
 {
-    /* the v3 loader resolves the owner by name itself rather than
+    /* the  loader resolves the owner by name itself rather than
      * trusting the caller's id: vol_find answers a 0x01 name through
-     * the v3 dirent tree on both a full and a degraded open, and this
+     * the  dirent tree on both a full and a degraded open, and this
      * is the same lookup the tz_v3 registry does (vol_textzone.c). */
     wp25_index_load_v3(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
                        is_rawm ? "\x01rawm" : "\x01tier0",
@@ -370,9 +370,9 @@ void wp25_index_load(invfs_volume *v)
 
 /* vol_flush hook: rewrite dirty owner records so they
  * name exactly the current index entries. The maps/unmaps are already
- * durable in this same flush. WP98: on v3 vol_flush's v2 tail is not
+ * durable in this same flush. WP98: on  vol_flush's v2 tail is not
  * reached at all (volume.c:2435 returns for VOLF_META right after the bitmap
- * flush), so the call site in vol_flush has a v3 branch of its own -- the
+ * flush), so the call site in vol_flush has a  branch of its own -- the
  * ordering rule is unchanged and satisfied there by the bitmap barrier. */
 int wp25_owner_sync(invfs_volume *v)
 {
@@ -397,9 +397,9 @@ int wp25_owner_sync(invfs_volume *v)
 /* Lazy owner creation (the tz_owner_id pattern): a fresh two-device
  * volume has no owner records yet -- the first mirrored RAW segment / the
  * first promotion creates its owner as an empty record, which the next
- * flush's wp25_owner_sync rewrites with the live entries. WP98: on v3 the
+ * flush's wp25_owner_sync rewrites with the live entries. WP98: on  the
  * owner is born with its (empty) index blob rather than as an empty node,
- * because vol_create_blob_file is the v3 create-with-content path; the
+ * because vol_create_blob_file is the  create-with-content path; the
  * first flush's wp25_owner_write_v3 republishes it with the live entries. */
 static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
 {
@@ -649,8 +649,8 @@ typedef struct {
 
 
 
-/* WP94: v3 body -- the v2 callback above parses the AST out of a v2
- * record; a v3 recipe lives in its own content-addressed blob behind
+/* WP94:  body -- the v2 callback above parses the AST out of a v2
+ * record; a  recipe lives in its own content-addressed blob behind
  * in.recipe_addr (the shape vol_sweep_dedupe_ex walks). Same admission
  * rules, so the two passes cannot drift: internal \x01 rows, anchored
  * files, cold files and non-shadow (RAW / arena / metadata) pbas are all
@@ -705,10 +705,10 @@ static int tier_heat_build(invfs_volume *v, tier_heat_map *m)
     tier_heat_ctx c;
     c.v = v;
     c.m = m;
-    /* WP94: a Meta-v3 volume has no v2 records to walk -- the live set is
+    /* WP94: a metadata store volume has no v2 records to walk -- the live set is
      * the base inode tree + delta overlay (the same branch
      * vol_collect_sweepables takes, vol_sweep.c:2355). Without it the map
-     * came back empty on every v3 volume, so vol_tier_migrate's
+     * came back empty on every  volume, so vol_tier_migrate's
      * `heat_any_rhot && hm.t` gate never opened and the whole WP25 tier
      * migration was inert on the only format invf-mkfs produces. */
     return vol_iter_live_inodes(v, tier_heat_cb, &c);

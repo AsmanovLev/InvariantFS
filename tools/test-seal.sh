@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-seal.sh — WP201 native v3 seal (par2-inspired, no compat) end-to-end.
+# test-seal.sh — WP201 native  seal (par2-inspired, no compat) end-to-end.
 #
 #   image A: mkfs -> mixed corpus (texts + empty file + incompressible
 #   binary + subdir file + symlink) -> sweep -> --seal (default pct 10):
@@ -52,7 +52,7 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
-# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+# the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
 B=$REPO/bin

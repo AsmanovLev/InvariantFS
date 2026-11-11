@@ -1,5 +1,5 @@
 /*
- * delta_test.c -- WP-M10 unit harness + offline e2e driver for the v3
+ * delta_test.c -- WP-M10 unit harness + offline e2e driver for the 
  * delta log (append + in-memory index + mount replay).
  *
  * Unit mode (default, `invf-delta_test [scratch-dir]`):
@@ -646,7 +646,7 @@ static void test_rollover(const char *dir)
 
 /* WP-M12: a namespace mutation must land in the delta and leave the base
  * root untouched (the base stays immutable between folds). Drives the public
- * v3 mutation entry points on a synthetic volume whose base tree is empty, so
+ *  mutation entry points on a synthetic volume whose base tree is empty, so
  * "base unchanged" is exactly "the base root blkptr did not move". */
 static void test_metadata_delta(const char *dir)
 {
@@ -658,7 +658,7 @@ static void test_metadata_delta(const char *dir)
     char vbuf[16];
     size_t vlen;
 
-    printf("v3 metadata mutations append to the delta (base untouched)\n");
+    printf(" metadata mutations append to the delta (base untouched)\n");
     snprintf(img, sizeof img, "%s/invf-delta_mut.img", dir);
     if (image_make(img, FB_TOTAL) != 0) { ok(0, "make v3mut image"); return; }
     v = (invfs_volume *)calloc(1, sizeof *v);
@@ -759,7 +759,7 @@ static void test_spt0_truncate_multiseg(const char *dir)
     delta_ref r;
 
     printf("rollback truncates correctly across a segment rollover\n");
-    /* A REAL v3 volume, not the synthetic substrate: spt0_capture refuses
+    /* A REAL  volume, not the synthetic substrate: spt0_capture refuses
      * anything without a VOLF_META base root, and this leg exists to hold
      * the real producer (not a restatement of its formula) to the real
      * consumer. */
@@ -942,7 +942,7 @@ static int open_v3(const char *img, invfs_volume **out)
         return -1;
     }
     if (!(vol_sb(v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "delta_test: %s is not a v3 volume\n", img);
+        fprintf(stderr, "delta_test: %s is not a  volume\n", img);
         vol_close(v);
         return -1;
     }

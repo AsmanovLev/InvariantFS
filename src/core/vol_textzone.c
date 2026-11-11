@@ -284,12 +284,12 @@ static int tz_flush_class_ok(int binary, uint8_t cc)
 
 
 /* ===================================================================
- * WP78: v3 text/binary batching.
+ * WP78:  text/binary batching.
  *
- * A v3 volume has no v2 record stream and no owner-L2P map, but the read
+ * A  volume has no v2 record stream and no owner-L2P map, but the read
  * path already serves a shared batch through an AST entry with
  * zone==INVFS_ZONE_TEXT that names the batch segment by pba (WP27), exactly
- * as on v2. So the v3 flush only has to (a) build the batch segments, (b)
+ * as on v2. So the  flush only has to (a) build the batch segments, (b)
  * rewrite each member's recipe with TEXT entries pointing at them, and
  * (c) keep a registry of live batches so a later GC can free the dead ones.
  * The registry is a hidden 0x01 file (TZ_OWNER_NAME) holding a flat array of
@@ -423,7 +423,7 @@ static int tz_reg_load(invfs_volume *v, tz_reg *r)
  * (§2.3: one pool, no hard regions), so the very next mbuf_alloc can hand
  * the same block out as a base B+-tree page. A free path that consults only
  * recipes then frees a live metadata page through a row that has been stale
- * for the whole run: that is the v3 recipe-blob loss this closes.
+ * for the whole run: that is the  recipe-blob loss this closes.
  *
  * So the registry is published here as an owner set, and spn_reclaim
  * (vol_spt0.c) treats these blocks as claimed. tz_gc still frees the dead
@@ -474,7 +474,7 @@ int tz_reg_owned_blocks(invfs_volume *v, tz_extent **out, size_t *n)
  * pair, because it runs LATER: by the time this executes the flush has already
  * sealed this run's batches and rewritten every member's recipe to point at
  * them. So the branch below is not "which of two equivalent ways to write the
- * blob" -- on the else arm it is `vol_create_blob_file`, which on v3 installs
+ * blob" -- on the else arm it is `vol_create_blob_file`, which on  installs
  * an EMPTY node over the existing one (vol_dirs.c:299 keeps the inode id,
  * :340-344 zeroes the recipe address, :365-367 frees the old blocks) and then
  * publishes the new content. The earlier rows are not merged; they are
@@ -588,7 +588,7 @@ static int tz_seal(invfs_volume *v, int binary, const uint8_t *bbuf,
     out->pba = pba;
     out->phys = (uint32_t)phys;
     if (getenv("INVFS_DEBUG"))
-        fprintf(stderr, "[tz-v3] sealed %s batch %llu: %zu -> %zu bytes "
+        fprintf(stderr, "[tz-] sealed %s batch %llu: %zu -> %zu bytes "
                         "(pba %llu)\n",
                 binary ? "binary" : "ppmd", (unsigned long long)seq, blen,
                 enc_len, (unsigned long long)pba);
@@ -642,7 +642,7 @@ static int tz_old_recipe_single_entry(invfs_volume *v,
     return nvis <= 1;
 }
 
-/* Rewrite one member's v3 recipe with TEXT entries naming the sealed
+/* Rewrite one member's  recipe with TEXT entries naming the sealed
  * batches. Returns 0 on success/soft-skip, -1 on hard error. */
 static int tz_commit_member(invfs_volume *v, int binary,
                                const tz_candidate *cand, tz_member *m,
@@ -731,10 +731,10 @@ static int tz_commit_member(invfs_volume *v, int binary,
     return 0;
 }
 
-/* Flush ONE v3 accumulator. Same shape as tz_flush_one (sort by
+/* Flush ONE  accumulator. Same shape as tz_flush_one (sort by
  * (family,size), feed into batches, BCJ-homogeneous binary batches), but
- * publication is v3 recipe deltas + the batch registry. */
-static int tz_flush_one_v3(invfs_volume *v, int binary)
+ * publication is  recipe deltas + the batch registry. */
+static int tz_flush_one(invfs_volume *v, int binary)
 {
     tz_candidate *acc = binary ? v->bz : v->tz;
     size_t n = binary ? v->bz_n : v->tz_n;
@@ -966,7 +966,7 @@ out:
     return sealed_any ? 0 : 1;
 }
 
-/* WP78: v3 batch GC. A batch is live iff some live recipe has a zone==TEXT
+/* WP78:  batch GC. A batch is live iff some live recipe has a zone==TEXT
  * entry naming its pba; unmarked registry rows are freed. */
 static int tz_gc(invfs_volume *v)
 {
@@ -1068,8 +1068,8 @@ int vol_tz_flush(invfs_volume *v)
     /* WP78: there are no owner records, but the read path serves a
      * TEXT-zone AST entry identically, so the same accumulators flush into
      * recipe deltas + a hidden batch registry. */
-    rt = tz_flush_one_v3(v, 0);
-    rb = tz_flush_one_v3(v, 1);
+    rt = tz_flush_one(v, 0);
+    rb = tz_flush_one(v, 1);
     if (rt < 0 || rb < 0) return -1;
     return (rt == 0 || rb == 0) ? 0 : 1;   /* 0 = something sealed */
 }

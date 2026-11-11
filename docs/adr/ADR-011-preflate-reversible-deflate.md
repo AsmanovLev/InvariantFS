@@ -75,7 +75,7 @@ The `corrections` delta is embedded directly inside the inode's AST recipe blob 
 
 | Evaluation Vector | Option A: Sibling File (`!pfd`) | Option B: In-Recipe AST Metadata |
 |---|---|---|
-| **Disk Format Compatibility (Meta-v3)** | **100% Compatible (Zero schema changes).** Sibling files are standard inodes managed by naming convention. B+-tree row version `INVFS_INODE_ROW_VERSION = 2` is untouched. | **Breaks Page Size Invariant.** Under WP-M8 (`invarifs.h:1478`), a recipe blob MUST fit within a single 4096-byte base page (max usable ~3800 B). Multi-megabyte files can produce 5 KiB to 50 KiB preflate deltas, overflowing the base page and requiring a whole new multi-page tree layer. |
+| **Disk Format Compatibility (metadata store)** | **100% Compatible (Zero schema changes).** Sibling files are standard inodes managed by naming convention. B+-tree row version `INVFS_INODE_ROW_VERSION = 2` is untouched. | **Breaks Page Size Invariant.** Under WP-M8 (`invarifs.h:1478`), a recipe blob MUST fit within a single 4096-byte base page (max usable ~3800 B). Multi-megabyte files can produce 5 KiB to 50 KiB preflate deltas, overflowing the base page and requiring a whole new multi-page tree layer. |
 | **Tooling & `invf-fsck`** | **Native Support.** `invfs_register_sibling_tag("pfd", 1)` integrates with `sib_segment_is_internal_shape` (`vol_records.c:326`). Sibling retirement (`vol_retire_siblings`) automatically reclaims `!pfd` on unlink/overwrite. `invf-fsck` verifies refcounts with zero code modifications. | **High Risk.** Unknown trailing section magic will cause existing `invf-fsck` versions to flag recipes as corrupt or fail recipe verification passes (`recipe_fsck_test`). |
 | **Cache & ARC Efficiency** | **Optimal.** AST recipe remains lean (~200 B), allowing thousands of inode recipes to stay resident in memory. `!pfd` data is paged into the ARC only when full bit-exact container reconstruction is demanded. | **Severe Cache Thrashing.** Loading an inode recipe into ARC forces megabytes of static reconstruction deltas into metadata cache, evicting active segment tables. |
 | **Partial & Member Reads** | **Direct Zero-Copy Access.** Range reads on member files read pure plaintext directly without loading or parsing the preflate delta. | **Overhead.** Every read must parse and bypass trailing delta metadata structures. |
@@ -153,7 +153,7 @@ PNG files store image data in one or more `IDAT` chunks containing a single conc
 3. **Preflate Integration:**
    - Execute `invfs_preflate_encode(idat_stream, idat_len, &filt, &filt_len, &pfd, &pfd_len)`.
    - Store `pfd` in `<name>!pfd`.
-   - In `IVPN` recipe v3:
+   - In `IVPN` recipe :
      - Set `enc = INVFS_DEFLATE_ENGINE_PREFLATE` (3).
      - Recipe stores non-IDAT chunks (`IHDR`, `PLTE`, `tEXt`), per-row filter bytes, and original IDAT chunk split sizes.
 4. **Read Path:**

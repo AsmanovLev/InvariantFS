@@ -374,5 +374,5 @@ SEQ1=$(printf '%s\n' "$P1" | sed -n 's/.*MIRROR_SEQ=\([0-9]*\).*/\1/p')
 note "leg 10: with its bitmap bit cleared, the anchor still validates and its seq advanced $SEQ0 -> $SEQ1"
 
 echo
-echo "PASS: v3 metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat"
+echo "PASS:  metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat"
 exit 0

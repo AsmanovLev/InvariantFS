@@ -27,7 +27,7 @@ else
     cat >> "$E/portage/make.conf" <<'EOF'
 
 # --- InvariantFS VM ---
-BINHOST="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-v3/"
+BINHOST="https://distfiles.gentoo.org/releases/amd64/binpackages/23.0/x86-64-/"
 PORTAGE_BINHOST="${BINHOST}"
 EMERGE_DEFAULT_OPTS="${EMERGE_DEFAULT_OPTS} --usepkg --getbinpkg"
 FEATURES="${FEATURES} -news -pid-sandbox -userpriv -sandbox"

@@ -50,7 +50,7 @@ set -o pipefail
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 export REPO
 
-# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+# the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
 B=$REPO/bin
@@ -636,11 +636,11 @@ C=$("$WORK/classof" "$IMGT" multi.splt)
 
 # WP106, second half: free space appears and the NEXT sweep decomposes.
 # Rebuilt from scratch with the pin ON (the production default), because on
-# v3 the pin release IS the reclaim trigger. With the pin on, 120 MiB of
+#  the pin release IS the reclaim trigger. With the pin on, 120 MiB of
 # filler is what makes the first sweep defer, and the pin release at the
 # start of the second sweep hands back ~16k blocks, which re-arms the
 # decomposition. So the re-arm is driven by a real reclaim. It is NOT
-# driven by the fixture deleting a file: on v3 an unlink frees the NAME and
+# driven by the fixture deleting a file: on  an unlink frees the NAME and
 # the blocks return only through that reclaim path, so "delete the filler
 # and expect the sweep to re-arm" does not hold. Measured on a plain 20 MiB
 # file with no container involved: import free=94658, after sweep free=94624,

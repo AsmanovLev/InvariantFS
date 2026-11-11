@@ -40,7 +40,7 @@
 #      with no clean close, sync + drop_caches (the power-cut surrogate),
 #      reopen: every acknowledged byte intact, and a file rewritten in
 #      place is the COMPLETE old or COMPLETE new content, never a splice.
-#   8  orphan reclaim across a power cut (WP130): the v3 collector frees
+#   8  orphan reclaim across a power cut (WP130): the  collector frees
 #      base pages and flushes the bitmap, then the process is killed -9 with
 #      no clean close, the page cache is dropped, and the volume is asked
 #      what survived: every file byte-identical, and then rewritten on top of
@@ -632,7 +632,7 @@ verify_or_reseal() { # <label>
         grep -E "^parity|^deep" "$FLK/verify.last"
     fi
     [ "$rc" = 0 ] && return 0
-    # WP-leg5-post-soak: the v3 checker never learned the content cut (the
+    # WP-leg5-post-soak: the  checker never learned the content cut (the
     # v2-only pass died with the v2 stream; vol_fsck.c names the gap), so a
     # torn DATA segment survives -f by design and verify stays CORRUPT. The
     # project's own bar (a) contained+named+honest, extended to soak as
@@ -778,18 +778,18 @@ leg0() {
     $B/invf-fsck "$DM" >"$FLK/fsck0.log" 2>&1 \
         || { cat "$FLK/fsck0.log"; fail "leg0 fsck"; }
     # The gate used to be `grep -q "orphans:"`. That line is v2-only
-    # (src/cli/fsck.c:464): on a v3 volume -- which is every volume mkfs
+    # (src/cli/fsck.c:464): on a  volume -- which is every volume mkfs
     # writes -- the report has no such line, so the gate could never fire
-    # and the leg asserted nothing. What the leg actually means on v3 is
+    # and the leg asserted nothing. What the leg actually means on  is
     # stronger and directly checkable: the re-mkfs erased the OLD volume
     # completely, so what is left is exactly the corpus just imported.
-    # Three v3-true witnesses for that, none of them the sweep's own log:
+    # Three -true witnesses for that, none of them the sweep's own log:
     local want; want=$(ls "$FLK/orig0b" | wc -l)
     grep -qE "names/inodes: +$want name\(s\) over $want live inode\(s\)" "$FLK/fsck0.log" \
         || { echo "  re-mkfs left something behind: expected exactly the $want names just imported" >&2
              cat "$FLK/fsck0.log" >&2; fail "leg0 re-mkfs name/inode count"; }
     # "orphan rows:" is printed by fsck only when a live inode has no
-    # directory entry naming it -- the v3 counterpart of a live record with
+    # directory entry naming it -- the  counterpart of a live record with
     # no reference. A stale journal replayed into a fresh bitmap shows up
     # here.
     if grep -q "orphan rows:" "$FLK/fsck0.log"; then
@@ -1383,16 +1383,16 @@ leg5() {
 # What this tier can and cannot prove, stated honestly:
 # drop_caches evicts CLEAN pages only -- the kernel will not discard dirty
 # ones, so a write that reached the page cache can still be written back
-# after the "cut" (v3 barriers every delta append, so the un-acked file
+# after the "cut" ( barriers every delta append, so the un-acked file
 # usually comes back NEW; the leg accepts either generation). Discarding
 # un-acked bytes for real is dm-flakey drop_writes = legs 3/4. What this
 # tier uniquely proves is that the acknowledged bytes, their delta records
 # and the bitmap are on the MEDIUM and that the on-disk image is
 # self-consistent when re-read from scratch -- i.e. the FUSE fsync ack
-# (commit_wctx + vol_sync) is real on v3, which is what the pre-WP80
+# (commit_wctx + vol_sync) is real on , which is what the pre-WP80
 # `vol_sync` early return made a silent no-op.
 #
-# v3 audit (WP202): none of the eight bodies below touches the deleted v2
+#  audit (WP202): none of the eight bodies below touches the deleted v2
 # mapping journal, L2P or checkpoint paths. pc_run retries on the two live
 # vol_open failure strings (flock race, dm down-window sizing); pc_cut is
 # sync + drop_caches with no format assumption; pc_fsck/pc_verify drive the
@@ -1743,7 +1743,7 @@ PY
 }
 
 # ------------------------------------------------------------- leg 8 (WP130) --
-# The v3 orphan collector (WP121) frees COW base pages that no RT30 slot and
+# The  orphan collector (WP121) frees COW base pages that no RT30 slot and
 # no save point can name. A wrong answer to "is this page reachable" is
 # SILENT DATA LOSS, not a crash, so the collector's safety case cannot be made
 # by reading the predicate -- it has to be made by cutting power in the middle
@@ -1795,7 +1795,7 @@ PY
 #     flushed". The flush is the statement immediately after the frees
 #     inside the collector, so that window is a handful of instructions and
 #     a cut inside it is a LEAK by construction, never a wrong free.
-#   * The RT30-fallback axis is not re-litigated here. test-v3-orphan-
+#   * The RT30-fallback axis is not re-litigated here. test--orphan-
 #     reclaim.sh legs 3 and 4 own it, with the wrong-predicate red control.
 #   * dm-flakey's drop_writes is the only thing that can discard an
 #     acknowledged write, and it needs a loop device, which transfers zero
@@ -1845,7 +1845,7 @@ rc_sudirty() {     # the death really was abrupt.
                    # matters. Leg 7 watches a FUSE daemon, which marks the
                    # volume DIRTY as it mounts, so CLEAN-on-medium after a
                    # kill -9 is proof that vol_close never ran. Nothing here
-                   # does: a v3 volume is recovered by replaying the delta
+                   # does: a  volume is recovered by replaying the delta
                    # log, so vol_open does not set the state bit and the
                    # medium legitimately still says CLEAN from the last
                    # clean close. Copying leg 7's check here would assert a

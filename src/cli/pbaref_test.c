@@ -1,8 +1,8 @@
 /*
- * pbaref_test.c — WP: pba-ref-v3-incremental
+ * pbaref_test.c — WP: pba-ref-incremental
  *
  * MEASUREMENT harness for the pba reference map on Meta, the sole gate
- * on every block free (pba_ref_ensure -> src/core/volume.c:3975, v3 branch
+ * on every block free (pba_ref_ensure -> src/core/volume.c:3975,  branch
  * at :3986-3987; the gate at src/core/vol_ast.c:177-182).
  *
  * Phases (argv[2]), so the map-rebuild leg and the write/unlink legs can be
@@ -907,7 +907,7 @@ int main(int argc, char **argv)
     const char *phase = (argc > 2) ? argv[2] : "red";
 
     g_dir = (argc > 1) ? argv[1] : "/tmp";
-    snprintf(g_img, sizeof g_img, "%s/pbaref-v3.img", g_dir);
+    snprintf(g_img, sizeof g_img, "%s/pbaref-.img", g_dir);
     printf("pbaref_test: phase=%s img=%s\n", phase, g_img);
 
     if (!strcmp(phase, "red") || !strcmp(phase, "rednosweep")) {
@@ -967,7 +967,7 @@ int main(int argc, char **argv)
          *
          * One session: mkfs, open (pba_ref_ensure builds the map over an
          * EMPTY volume, src/core/volume.c:2091), then A and B are created.
-         * Nothing on the v3 write path applies a +1 for a new inode
+         * Nothing on the  write path applies a +1 for a new inode
          * (vol_inode_delta_put, src/core/vol_btree.c:3672, has no pba_ref
          * hook), so the map is empty when the two files land. Dedupe merges
          * B's copy of the shared segment into A's pba P and hand-adjusts the
@@ -1034,7 +1034,7 @@ int main(int argc, char **argv)
          *
          * One session. A and B share P after dedupe; B is unlinked, leaving
          * A the sole live sharer. A SECOND inode is then published naming P
-         * through the real v3 recipe-publish pair (vol_recipe_store +
+         * through the real  recipe-publish pair (vol_recipe_store +
          * vol_create_content_node) -- the same pair every lane that
          * supersedes or publishes a recipe uses. vol_inode_delta_put has
          * no pba_ref hook, so the map never hears about the new sharer; the

@@ -1,7 +1,7 @@
 /* rt_slot_test.c — WP123: does the RT30 READER enforce the allocation
  * invariant, or only the page-integrity one?
  *
- * Meta-v3's RT30 is a DOUBLE-slot root descriptor (WP86): mbuf_root_publish
+ * metadata store's RT30 is a DOUBLE-slot root descriptor (WP86): mbuf_root_publish
  * writes one slot per publish, so the other slot keeps naming the previous
  * root. That is damage tolerance -- if the newest root page is torn, the
  * reader falls back. The fallback is only sound while the page it falls back

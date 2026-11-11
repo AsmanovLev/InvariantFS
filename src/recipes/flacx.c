@@ -581,7 +581,7 @@ int flacx_extract(const uint8_t *d, size_t n, uint8_t **recipe_out, size_t *rlen
         off = nxt;
     }
 
-    /* serialize (v3: cover slots [offset][len][kind] after frame count) */
+    /* serialize (: cover slots [offset][len][kind] after frame count) */
     size_t total = 4 + 1 + 4 + 8 + 2 + 2 + 4 + 1 + 1 + 4 + 2 +
                    si.n_covers * 9 + si.hlen_wo;
     for (int i = 0; i < si.nframes; i++) {
@@ -669,7 +669,7 @@ int flacx_extract(const uint8_t *d, size_t n, uint8_t **recipe_out, size_t *rlen
 
 /* number of cover payloads referenced by a recipe (0 for v1 recipes) */
 /* number of DATA cover payloads (kind=0) referenced by a recipe.
-   v1: 0; v2: all slots carry data; v3: only kind=0 slots. */
+   v1: 0; v2: all slots carry data; : only kind=0 slots. */
 int flacx_recipe_num_covers(const uint8_t *r, size_t rn)
 {
     if (!r || rn < 33 || memcmp(r, "IVFR", 4)) return 0;

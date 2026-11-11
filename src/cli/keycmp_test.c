@@ -1,8 +1,8 @@
-/* keycmp_test.c — THE v3 key ordering, asserted on its own.
+/* keycmp_test.c — THE  key ordering, asserted on its own.
  *
  * What this is for
  * ----------------
- * The v3 base B+-tree, the delta log and the fold each sort keys, and the
+ * The  base B+-tree, the delta log and the fold each sort keys, and the
  * fold's whole job is to merge a base run into a delta run. That merge is
  * only a merge if the three sorts are the same total order. They used to be
  * three byte-identical private statics — bt_cmp (vol_btree.c:113),
@@ -40,7 +40,7 @@
  *   3. TOTAL ORDER. Irreflexive, antisymmetric and transitive over all
  *      1555 keys of length 0..4 drawn from a six-byte alphabet, checked
  *      pairwise and (transitivity) over all triples.
- *   4. THE SHAPES. Real v3 keys — inode, dirent, xattr, recipe descriptor,
+ *   4. THE SHAPES. Real  keys — inode, dirent, xattr, recipe descriptor,
  *      recipe chunk -- with the properties the format depends on: namespace
  *      disjointness, big-endian numeric order (an inode id of 255
  *      sorts before 256, and 256 before 65536 -- which little-endian
@@ -656,7 +656,7 @@ int main(void)
     check_one_definition();
 
     printf("keycmp: %d checks, %d failures\n", checks, fails);
-    printf("%s: the v3 key ordering is one definition, and it is still "
+    printf("%s: the  key ordering is one definition, and it is still "
            "byte-lexicographic shorter-first\n", fails ? "FAIL" : "PASS");
     return fails ? 1 : 0;
 }

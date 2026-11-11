@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-sweep-publish-rollback.sh — a v3 sweep transform that CANNOT publish
+# test-sweep-publish-rollback.sh — a  sweep transform that CANNOT publish
 # its new recipe must roll back what it wrote, not keep it.
 #
 # THE DEFECT THIS IS THE RED CONTROL FOR
@@ -41,7 +41,7 @@
 #
 # THIS SUITE WENT RED AGAIN, AND IT WAS RIGHT BOTH TIMES
 #
-# dabc5e6 ("volume: the v3 pba-ref map was built once per session, at open")
+# dabc5e6 ("volume: the  pba-ref map was built once per session, at open")
 # rewrote the publish block of vol_sweep_one_v3 and mis-braced it: the `else`
 # carrying the rollback bound to `vol_ast_recipe_serialize`, which essentially
 # never fails, instead of to `vol_recipe_store`, which is the step that

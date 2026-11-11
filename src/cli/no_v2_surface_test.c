@@ -25,7 +25,7 @@
  * shipped binaries only:
  *
  *   LEG 1 (the one that matters): the reserved 32 MiB gap between the
- *     metadata extent mapper and the record area is BYTE-FOR-ZERO on a v3
+ *     metadata extent mapper and the record area is BYTE-FOR-ZERO on a 
  *     volume -- at mkfs, and again after a full write / overwrite /
  *     sweep / fsck cycle. Every v2 entry point wrote there and nowhere
  *     else: `vol_map` and `l2p_remove` queued ops that only `jrn_flush`

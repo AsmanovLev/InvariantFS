@@ -1,7 +1,7 @@
 /* vol_meta_merge.c — WP30: dynamic metadata extent management.
  * Mapper table, MET0 persistence, append-position resolution, and owner
  * extent allocation. Consolidation (extent shrink/merge) was retired in
- * WP-M21 (v3 mapper is pre-allocated at mkfs; per-extent reclaim is a
+ * WP-M21 ( mapper is pre-allocated at mkfs; per-extent reclaim is a
  * read-friendly fold that lives in vol_fold.c / vol_reclaim.c). */
 
 #include "volume_internal.h"

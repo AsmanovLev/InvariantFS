@@ -68,14 +68,14 @@ dedupe_field() {  # <log> <merged|cross|intra|freed>
 }
 
 
-# v3 fsck reports base-tree health (bad pages / cycles) rather than the v2
+#  fsck reports base-tree health (bad pages / cycles) rather than the v2
 # orphan/missing counters, so the gate is format-aware: fsck_clean lives in
 # tools/fsck-clean.sh and asserts what each format actually verifies
-# (WP75: the test now reaches this section on the default v3 format).
+# (WP75: the test now reaches this section on the default  format).
 . "$REPO/tools/fsck-clean.sh"
 
-# Meta-v3 stores text as generic ZSTD (no deferred PPMd batches), so the
-# leg-2 expectations differ between formats. Meta-v3 is the default.
+# metadata store stores text as generic ZSTD (no deferred PPMd batches), so the
+# leg-2 expectations differ between formats. metadata store is the default.
 is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v0"; }
 
 echo "== generate tree (leg 1) =="
@@ -137,7 +137,7 @@ MERGED=$(dedupe_field "$WORK/sweep1.log" merged)
 FREED=$(dedupe_field "$WORK/sweep1.log" freed)
 # 1 shared middle segment (a1/a2) + 3 fully-shared segments (dup1/dup2)
 [ "$MERGED" = "4" ] || { echo "FAIL: expected 4 merged segments, got $MERGED"; exit 1; }
-# merged blocks must be back in the bitmap. On Meta-v3 the sweep also
+# merged blocks must be back in the bitmap. On metadata store the sweep also
 # allocates metadata (recipe/base/delta pages), so the naive
 # FREE0 + FREED == FREE1 identity is false. Compare against a no-dedupe
 # control image with identical geometry: the control captures the sweep's
@@ -145,7 +145,7 @@ FREED=$(dedupe_field "$WORK/sweep1.log" freed)
 #   (FREE1_dup - FREE0_dup) - (FREE1_ctl - FREE0_ctl)
 # recovers the blocks dedupe returned minus the handful of pages it
 # allocates to rewrite the losing inodes (one recipe/inode page per merged
-# file on v3).
+# file on ).
 #
 # WP612 shape: superseded frees ride retire-on-fence and discharge
 # across generations (retire drain at close, fold settling, savepoint
@@ -271,20 +271,20 @@ for f in $TFILES; do
     $B/invf-cp "$IMGT" "$WORK/orig2/$f" "$f" >/dev/null
 done
 
-echo "== sweep (v3: generic text; v2: texts batch) =="
+echo "== sweep (: generic text; v2: texts batch) =="
 $B/invf-sweep "$IMGT" > "$WORK/sweept1.log" 2>&1 || { cat "$WORK/sweept1.log"; exit 1; }
 TZL=$(grep -c "text -> PPMd batch" "$WORK/sweept1.log" || true)
 DEDUPT=$(grep "dedupe: " "$WORK/sweept1.log" || true)
 echo "$DEDUPT"
 if is_meta "$IMGT"; then
-    # WP78 taught v3 to defer texts into PPMd batches too (published as v3
-    # recipe deltas), so v3 batches here exactly like v2 -- the old "v3 stores
+    # WP78 taught  to defer texts into PPMd batches too (published as 
+    # recipe deltas), so  batches here exactly like v2 -- the old " stores
     # text as generic ZSTD, expect no batching" expectation predates it. What
-    # the pass must still deliver on v3 is a cross-file merge.
-    echo "text->PPMd lines: $TZL (v3 batches texts since WP78)"
-    [ "$TZL" -ge 3 ] || { echo "FAIL: v3 did not batch the texts"; exit 1; }
+    # the pass must still deliver on  is a cross-file merge.
+    echo "text->PPMd lines: $TZL ( batches texts since WP78)"
+    [ "$TZL" -ge 3 ] || { echo "FAIL:  did not batch the texts"; exit 1; }
     echo "$DEDUPT" | grep -qE "merged [1-9][0-9]* segments" || {
-        echo "FAIL: v3 dedupe merged nothing"; exit 1; }
+        echo "FAIL:  dedupe merged nothing"; exit 1; }
 else
     echo "text->PPMd lines: $TZL"
     [ "$TZL" -ge 3 ] || { echo "FAIL: expected >=3 deferred texts"; exit 1; }
@@ -306,7 +306,7 @@ done
 [ "$ok" = 1 ] || exit 1
 echo "all $(echo "$TFILES" | wc -w) files bit-exact"
 if is_meta "$IMGT"; then
-    echo "v3: no TEXT class line (generic ZSTD), skipping stats check"
+    echo ": no TEXT class line (generic ZSTD), skipping stats check"
 else
     $B/invf-stats "$IMGT" | grep "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }
 fi

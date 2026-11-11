@@ -1,6 +1,6 @@
-/* vol_seal.h — native v3 seal backend (WP201): par2-inspired, no compat.
+/* vol_seal.h — native  seal backend (WP201): par2-inspired, no compat.
  *
- * WHAT THIS IS. The v3 content-seal: live REG/LNK file bytes are streamed in
+ * WHAT THIS IS. The  content-seal: live REG/LNK file bytes are streamed in
  * sorted-name order, sliced into 64 KiB symbols (== INVFS_SEGMENT_SIZE, so a
  * symbol lines up with one RAW segment), packed into groups of k data
  * symbols, and each group gains m Reed-Solomon parity symbols (rs.c, over

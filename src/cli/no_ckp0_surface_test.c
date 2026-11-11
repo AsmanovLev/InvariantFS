@@ -210,7 +210,7 @@ int main(int argc, char **argv)
         fail("CONTROL: the superblock reports total_blocks == 0");
         return 1;
     }
-    printf("ok  CONTROL  the volume is v3, %llu blocks\n",
+    printf("ok  CONTROL  the volume is , %llu blocks\n",
            (unsigned long long)total_blocks);
 
     /* RT30 is written by the publish path, so on a volume with content it
@@ -278,7 +278,7 @@ int main(int argc, char **argv)
             b, img) != 0)
         fail("fsck reported a problem on a freshly written volume");
 
-    /* the two consumers: rollback restores the v3 save point (and used to
+    /* the two consumers: rollback restores the  save point (and used to
      * read the retired descriptor), resize rewrites block 0 outright */
     if (run("INVFS_CODECPACK_REGISTRY=none %s/invf-rollback '%s' "
             ">/dev/null 2>&1", b, img) != 0)

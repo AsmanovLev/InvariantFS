@@ -14,11 +14,11 @@ FUSE-based, single-host, content-addressed. Written in C11.
 **Status: testing.** CI is green across engine, e2e and soak tiers,
 releases are published (`v0.6.x`, tarball + deb + Arch + rpm, sha256 +
 bootstrap installer), and the pack registry is live. The on-disk format
-is Meta-v3 and Meta-v3 only (a pre-v0.5 volume will not open; there is
+is metadata store and metadata store only (a pre-v0.5 volume will not open; there is
 no conversion path). Durability contract: acknowledged writes are durable
 (`fsync` fences before it returns; a failed call leaves the pre-call
 state, never a torn prefix) --
-see `docs/adr/ADR-009-v3-durability-contract.md`. Anything not yet
+see `docs/adr/ADR-009--durability-contract.md`. Anything not yet
 acknowledged may be absent after a crash, never torn. Pre-production
 status: keep reviewed snapshots and raw `dd` backups before storing
 anything you cannot re-import (see `INCIDENTS.md`).
@@ -45,7 +45,7 @@ anything you cannot re-import (see `INCIDENTS.md`).
   explicit sweep consolidates them into Shadow, re-encoding where proven
   bit-exact. Zone fields are dynamic advisory policy over one shared pool,
   not rigid physical regions.
-* **Meta-v3 Metadata Architecture** — B+ tree base metadata + append-only Delta
+* **metadata store Metadata Architecture** — B+ tree base metadata + append-only Delta
   Log with background fold worker and lock-free reads.
 * **Content Addressing & Dedup** — immutable recipes and shadow blobs are
   BLAKE3-addressed with deduplication.
@@ -142,7 +142,7 @@ codec CPU cost.
   never torn (`make flakey` soaks exactly this boundary).
 * **Metadata scale** — not suited for metadata-dominated sets (millions of
   empty zero-byte files).
-* **Format v3 only** — the on-disk format is Meta-v3. Pre-v0.5 volumes (v1/v2)
+* **Format  only** — the on-disk format is metadata store. Pre-v0.5 volumes (v1/v2)
   will not open and are not converted in-place: create a new volume and
   re-import from source, or restore from backup.
 * **POSIX details** — POSIX.1e ACLs supported via `system.posix_acl_*`; xattr
@@ -178,7 +178,7 @@ unlink()  ->  delta delete entry appended; blocks retired, freed at the next
 
 For complete architecture specifications, see:
 * [Architecture Overview](docs/architecture/OVERVIEW.md)
-* [Meta-v3 Specification](docs/architecture/META.md)
+* [metadata store Specification](docs/architecture/META.md)
 * [Architecture Decision Records (ADRs)](docs/adr/README.md)
 * [CLI Usage Guide](docs/guides/CLI-USAGE.md)
 
@@ -190,7 +190,7 @@ For complete architecture specifications, see:
 | Write model | in-place | COW | dynamic RAW landing, background/offline sweep |
 | Compression | no / opt | opt, not bit-exact-checked | per-segment, **proven** bit-exact |
 | Deduplication | no | btrfs yes | content-addressed recipe & shadow blobs (BLAKE3) |
-| Metadata | fixed inode table / B-tree | B-tree | Meta-v3 (B+ tree + Delta Log) |
+| Metadata | fixed inode table / B-tree | B-tree | metadata store (B+ tree + Delta Log) |
 | Snapshots | no / LVM | yes (COW) | savepoints + rollback (`invf-rollback`) |
 | Containers | opaque | opaque | stored original, members on demand |
 | Codecs | in-kernel | in-kernel | external versioned packs |
@@ -289,7 +289,7 @@ on a global lock.
 ## Docs
 
 ```
-docs/        architecture (concept + Meta-v3), ADRs, CLI guide, benchmarks,
+docs/        architecture (concept + metadata store), ADRs, CLI guide, benchmarks,
              per-distro install guides (Arch, Debian, Gentoo, Void),
              SECURITY.md
 src/core/    invarifs.h IS the on-disk spec; volume_internal.h the engine map

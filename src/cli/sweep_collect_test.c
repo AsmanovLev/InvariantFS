@@ -137,7 +137,7 @@ int main(int argc, char **argv)
             vol_write_commit(ws) != 0) { fprintf(stderr, "write %s\n", nm); return 2; }
         nmade++;
     }
-    ok(nmade == NFILES, "fixture: %d files written to a v3 volume", nmade);
+    ok(nmade == NFILES, "fixture: %d files written to a  volume", nmade);
 
     /* --- 1. truncation is VISIBLE ------------------------------------ */
     ids = (uint64_t *)calloc(TINY_CAP, sizeof *ids);

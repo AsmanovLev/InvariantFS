@@ -17,7 +17,7 @@
  *
  * vol_find returns a uint64_t, so "there is no such name" and "the lookup
  * could not be COMPLETED" are both the value 0. On the second one this takes
- * the CREATE branch, and create-on-v3 is not "add a new name" -- it is
+ * the CREATE branch, and create-on- is not "add a new name" -- it is
  * "install an EMPTY node over whatever was there" (src/core/vol_dirs.c:
  *
  *     :294  rc = vol_dirent_get(v, pino, leaf, &existing);

@@ -1,6 +1,6 @@
-/* batch_owner_test.c — the v3 batch REGISTRY is a block owner.
+/* batch_owner_test.c — the  batch REGISTRY is a block owner.
  *
- * THE BUG THIS EXISTS FOR. A v3 text/binary batch segment is owned by TWO
+ * THE BUG THIS EXISTS FOR. A  text/binary batch segment is owned by TWO
  * things at once: by the recipe of every member that points into it (its
  * zone==TEXT entries), and by the batch registry -- the hidden "\x01tzb"
  * file whose row is what tz_gc frees the block through. The two owners do
@@ -39,7 +39,7 @@
  * off the end of the volume, a zero-length extent) is reported as MALFORMED
  * rather than quietly testing nothing.
  *
- * Subcommands (the image is a v3 volume built by tools/test-batch-owner.sh):
+ * Subcommands (the image is a  volume built by tools/test-batch-owner.sh):
  *
  *   rows <img>
  *       Print the registry's block extents and whether each is currently
@@ -305,7 +305,7 @@ static int cmd_capture(const char *img)
         return 1;
     }
     if (!(vol_sb(v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "FAIL: not a v3 volume\n");
+        fprintf(stderr, "FAIL: not a  volume\n");
         vol_close(v);
         return 1;
     }
@@ -379,7 +379,7 @@ int main(int argc, char **argv)
         return cmd_capture(argv[2]);
     fprintf(stderr,
             "usage: %s rows|capture <img>\n"
-            "  rows    -- list the v3 batch registry's block extents\n"
+            "  rows    -- list the  batch registry's block extents\n"
             "  capture -- run the sweep's prepare and assert the reclaim\n"
             "             freed no block the registry still owns\n",
             argv[0]);

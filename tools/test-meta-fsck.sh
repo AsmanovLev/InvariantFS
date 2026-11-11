@@ -1,13 +1,13 @@
 #!/bin/bash
-# test-meta-fsck.sh — WP-M4: metadata-v3 fsck (root + base-tree validation).
+# test-meta-fsck.sh — WP-M4: metadata store fsck (root + base-tree validation).
 #
-# The v3 write path is not wired yet (WP-M2/M3 own the engine), so this leg
-# builds a small base B+-tree by hand in a real mkfs'd v3 image and checks the
+# The  write path is not wired yet (WP-M2/M3 own the engine), so this leg
+# builds a small base B+-tree by hand in a real mkfs'd  image and checks the
 # WP-M4 checker:
 #   * an intact base tree + valid RT30 double slot  -> fsck OK, exit 0
 #   * a corrupted base page                         -> fsck DAMAGED, exit != 0
 #   * a corrupted RT30 descriptor                   -> fsck DAMAGED, exit != 0
-#   * an empty v3 volume (mkfs only)                -> fsck OK, exit 0
+#   * an empty  volume (mkfs only)                -> fsck OK, exit 0
 #
 # Legs 0-3 above ask invf-fsck about invf-fsck: its exit code, its verdict
 # line, and its own counters. That is a real weakness, not a style note --
@@ -292,28 +292,28 @@ WANT_ALL="TREE KEYS=alpha=one beta=two gamma=three"
 WANT_NO_ALPHA="TREE KEYS=beta=two gamma=three"
 WANT_NO_BG="TREE KEYS=alpha=one"
 
-echo "== WP-M4: v3 fsck (RT30 + base-tree walk) =="
+echo "== WP-M4:  fsck (RT30 + base-tree walk) =="
 
-# --- leg 0: empty v3 volume is clean ------------------------------------
+# --- leg 0: empty  volume is clean ------------------------------------
 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "empty v3 volume: fsck exited nonzero"; }
-echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "empty v3 volume: not OK"; }
+OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "empty  volume: fsck exited nonzero"; }
+echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "empty  volume: not OK"; }
 echo "$OUT" | grep -q "format:       v0" \
-    || { echo "$OUT"; fail "empty v3 volume: not reported as v3"; }
-echo "empty v3 volume: OK (exit 0)"
+    || { echo "$OUT"; fail "empty  volume: not reported as "; }
+echo "empty  volume: OK (exit 0)"
 
 # --- leg 1: intact hand-built base tree is CLEAN and walked -------------
 craft_base "$IMG" intact >"$WORK/craft1.log" 2>&1 \
     || { cat "$WORK/craft1.log"; fail "craft intact base tree failed"; }
 cat "$WORK/craft1.log"
-OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "intact v3 tree: fsck exited nonzero"; }
-echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "intact v3 tree: not OK"; }
+OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "intact  tree: fsck exited nonzero"; }
+echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "intact  tree: not OK"; }
 echo "$OUT" | grep -qE "pages walked: [1-9]" \
-    || { echo "$OUT"; fail "intact v3 tree: no pages walked"; }
+    || { echo "$OUT"; fail "intact  tree: no pages walked"; }
 echo "$OUT" | grep -q "base keys:    3" \
-    || { echo "$OUT"; fail "intact v3 tree: wrong key count"; }
-echo "intact v3 base tree: CLEAN, 3 pages walked (exit 0)"
+    || { echo "$OUT"; fail "intact  tree: wrong key count"; }
+echo "intact  base tree: CLEAN, 3 pages walked (exit 0)"
 
 # --- leg 2: corrupted base page is DAMAGED, nonzero exit ----------------
 craft_base "$IMG" badpage >"$WORK/craft2.log" 2>&1 \
@@ -349,7 +349,7 @@ echo "corrupted RT30 descriptor: DAMAGED, exit $RC"
 #
 # Everything above asks invf-fsck about invf-fsck -- its exit code, its verdict
 # line, and its own counters ("base keys: 3", "bad pages: 1"). Nothing above
-# runs `-f` at all, so "fsck repairs a v3 base tree correctly" was asserted
+# runs `-f` at all, so "fsck repairs a  base tree correctly" was asserted
 # NOWHERE in this file, and that is the question whose wrong answer cost this
 # project years: WP86's `-f` excised a key RANGE, every page CRC still
 # verified, every fan-in still balanced, both files' content was gone, and the

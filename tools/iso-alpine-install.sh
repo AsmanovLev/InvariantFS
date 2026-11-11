@@ -14,7 +14,7 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK="${WORK:?set WORK to a scratch dir}"
 
 ISO_VER="3.24.4"
-ISO_URL="https://dl-cdn.alpinelinux.org/alpine/v3.24/releases/x86_64/alpine-virt-$ISO_VER-x86_64.iso"
+ISO_URL="https://dl-cdn.alpinelinux.org/alpine/.24/releases/x86_64/alpine-virt-$ISO_VER-x86_64.iso"
 ISO_KERNEL="boot/vmlinuz-virt"
 ISO_INITRD="boot/initramfs-virt"
 PORT="${INVFS_ISO_PORT:-8003}"

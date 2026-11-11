@@ -1,6 +1,6 @@
 /* vol_migrate.c — WP601 migration zone (see vol_migrate.h for the contract).
  *
- * House discipline (copied from heat_promote + heat_extract_v3 + WP145,
+ * House discipline (copied from heat_promote + heat_extract + WP145,
  * read those, this file does not alter them):
  *  - vol_walk receipt: the candidate list comes from vol_iter_live_inodes
  *    and is USED only when vol_walk_commit says the walk finished. A

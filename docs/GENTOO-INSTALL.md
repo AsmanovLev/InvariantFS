@@ -115,7 +115,7 @@ INVFS_DEV1=/mnt/sde/invfs-shadow.img bin/invf-ls /mnt/sde/invfs-root.img | wc -l
 > `/bin /sbin /lib /lib64` pointing into `usr/*`; import preserves
 > them, and the guest kernel resolves them natively.
 
-### Step V3: Volumes over which the guest sees four disks
+### Step : Volumes over which the guest sees four disks
 
 Disk 1 (10 GB GPT): p1 = 256 MiB FAT32 ESP, p2 = 2 GiB swap,
 p3 = shadow half of the InvFS pair. Disk 2 (15 GB): raw InvFS volume

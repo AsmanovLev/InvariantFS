@@ -1,4 +1,4 @@
-/* overlay_test.c — WP-M11 e2e driver for the metadata-v3 overlay reads.
+/* overlay_test.c — WP-M11 e2e driver for the metadata store overlay reads.
  *
  * The delta overlay (delta first, then base; the delta wins) is exercised
  * end to end on a real VOLF_META image through the public engine surface:
@@ -91,7 +91,7 @@ static uint16_t ino_row(uint8_t *buf, uint16_t mode, uint64_t size)
 
 static invfs_volume *g_v;
 
-static int open_v3(const char *img)
+static int open_img(const char *img)
 {
     int err = 0;
     g_v = vol_open(img, &err);
@@ -100,7 +100,7 @@ static int open_v3(const char *img)
         return -1;
     }
     if (!(vol_sb(g_v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "overlay_test: %s is not a v3 volume\n", img);
+        fprintf(stderr, "overlay_test: %s is not a  volume\n", img);
         vol_close(g_v);
         g_v = NULL;
         return -1;
@@ -415,7 +415,7 @@ static void check_add_before_remove(void)
 static void scenario(const char *img)
 {
     base_snap before;
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("overlay scenario (WP-M11)\n");
 
@@ -454,7 +454,7 @@ static void verify(const char *img)
     uint64_t child = 0;
     dir_capture cap;
 
-    if (open_v3(img) != 0)
+    if (open_img(img) != 0)
         exit(2);
     printf("overlay verify (WP-M11 remount)\n");
 

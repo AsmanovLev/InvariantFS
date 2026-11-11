@@ -80,7 +80,7 @@ partial downloads (`curl -C -`).
 ## 5. Status
 
 **Benchmark not yet run.** The InvariantFS side is blocked on the current fix
-wave — the e2e helper link lists (WP74) and the Meta-v3 sweep transcode/batch
+wave — the e2e helper link lists (WP74) and the metadata store sweep transcode/batch
 parity gap — because the benchmark exercises the sweep and qcow2 containerpack
 paths. Corpus is ready and frozen; results will be appended here (or in
 `QCOW2-COMPRESSION-BENCHMARK.md`) once the fixes land.

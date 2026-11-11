@@ -9,7 +9,7 @@
  *
  * There is no second engine here. The coarse WP21 sweep checkpoint this
  * replaced had no writer once the v2 metadata machinery went, so there was
- * never a v3 volume carrying one and nothing to fall back to.
+ * never a  volume carrying one and nothing to fall back to.
  *
  * Exit codes: 0 = rolled back; 1 = no save point (nothing to roll back);
  * 5 = io/internal error (re-run: the phases are idempotent, a killed run

@@ -83,7 +83,7 @@ inode count, not its byte count.**
 
 ### It is deliberate — and it was deferred "until measured"
 
-`docs/adr/ADR-009-v3-durability-contract.md`, Decision 3:
+`docs/adr/ADR-009--durability-contract.md`, Decision 3:
 
 > **The per-append delta barrier stays.** It is a durability ordering
 > (design §9) ... Relaxing it is deferred until measured, and would require a
@@ -131,12 +131,12 @@ in 15 minutes it would have imported ~1,150 files.
 | | |
 |---|---|
 | corpus | 4,000 files + 165 dirs, **542,462,714 bytes** of real `/usr` content |
-| image | `INVFS_META_FRAC=16 invf-mkfs k4k.img 6` (6 GiB, v3) |
+| image | `INVFS_META_FRAC=16 invf-mkfs k4k.img 6` (6 GiB, ) |
 | `invf-import` | **6,660.3 s (1.11 h)** — `imported: 165 dirs, 4000 files, 0 symlinks, 0 specials, 0 skipped` |
 | `invf-sweep` | **3,332 s (55.5 min)**, all 7 stages, **exit 0** |
 | **total** | **9,992 s (2.78 h)** |
 | volume after sweep | **540,450,816 bytes** real (`du -s`), 6 GiB apparent (sparse) |
-| sweep detail | dedupe merged 403 segments, freed 897 blocks (3.5 MiB); reclaim collected 21,772 orphaned v3 base pages |
+| sweep detail | dedupe merged 403 segments, freed 897 blocks (3.5 MiB); reclaim collected 21,772 orphaned  base pages |
 | bit-exactness | **4,000 / 4,000 identical, 0 mismatched** (§3) |
 | `invf-fsck` | **OK**, exit 0 (§3) |
 
@@ -213,7 +213,7 @@ OK
 
 ```
   state:        CLEAN
-  format:       v3 (metadata-v3 base tree)
+  format:        (metadata store base tree)
   root seq:     2011
   pages walked: 203
   base keys:    2122
@@ -232,7 +232,7 @@ OK
 (31 pages walked, 0 bad pages, 0 torn slots, 501/501 recipes load).
 
 The single orphan row in all three is the root inode; `fsck` states it is
-"not damage, not repairable" and by design (the v3 write order is
+"not damage, not repairable" and by design (the  write order is
 row-then-dirent).
 
 **Bit-exactness is intact through import and sweep. Throughput is what does
@@ -249,14 +249,14 @@ The brief's premise needs one correction: **the decline does not come from
 
 A real Copy-mode 7z of the **entire** corpus — **84,279 members,
 3,579,191,296 bytes** — built with
-`7za a -t7z -m0=Copy -mhc=off -mx=0`, imported into a v3 image
+`7za a -t7z -m0=Copy -mhc=off -mx=0`, imported into a  image
 (`IMPORT84_WALL=125s`), and swept with the p7z codecpack
 (`INVFS_CODECPACKS` pointed at a pack copy carrying a `bin/7zz` shim,
 `INVFS_TOOL_SCRATCH` on real disk). **The log line:**
 
 ```
   sweeping usr84k.7z (3579184377 bytes)...
-[sweep-v3] checking inode 2 (usr84k.7z)...
+[sweep-] checking inode 2 (usr84k.7z)...
 [cpack] enter usr84k.7z (decomp_gen=1 gen=1)
 [cpack] enumerate failed
 ```
@@ -416,7 +416,7 @@ the cap is the thing to raise.
    ADR-009 deferred it "until measured". It is now measured. Group commit —
    barrier once per batch of appends, with a `delta_durable` anchor so the
    acknowledged-write contract stays honest — is the obvious shape, and
-   `docs/adr/ADR-009-v3-durability-contract.md` already names the
+   `docs/adr/ADR-009--durability-contract.md` already names the
    prerequisites. Without it, rootfs-scale ingest is a multi-day operation.
 2. **Raise `CPACK_MAX_MEMBERS` past 65,536.** This is the single thing that
    makes an 84,279-file container ingestible, and it is untouched by the

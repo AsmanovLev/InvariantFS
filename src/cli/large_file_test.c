@@ -45,7 +45,7 @@ int main(int argc, char **argv)
     size_t read_len = 0;
     uint64_t id = 0;
 
-    snprintf(img, sizeof img, "%s/invf-large-v3-test.img", dir);
+    snprintf(img, sizeof img, "%s/invf-large--test.img", dir);
     unlink(img);
 
     printf("large_file_test (WP-M25): multi-chunk recipe blobs (> 7.7 MiB)\n");
@@ -59,7 +59,7 @@ int main(int argc, char **argv)
         orig_data[i] = (uint8_t)((i * 17 + 31) ^ (i >> 16));
     }
 
-    /* 1. mkfs v3 volume */
+    /* 1. mkfs  volume */
     {
         char cmd[512];
         snprintf(cmd, sizeof cmd, "./bin/invf-mkfs %s 64 >/dev/null 2>&1", img);

@@ -32,13 +32,13 @@
 # and mirror_resync -- sat in the v2 half of vol_flush, which the VOLF_META
 # branch returns out of (volume.c, the early return WP98 already had to fix
 # once for the tier/RAW-mirror indexes). The DEVT sync_seq was therefore
-# frozen at its mkfs value for the life of every v3 volume, so the staleness
+# frozen at its mkfs value for the life of every  volume, so the staleness
 # DETECTION could never fire; and leg 7's rewind, which rolls dev0's block 0
 # back, carries the RT30 root descriptor at 0x9D0, so with nothing to detect
 # or repair it the next publish published from a rolled-back generation and
 # dropped every delta record past it -- on BOTH devices, since the metadata
 # span is mirrored write-through. That is what leg 8's corruption was, and
-# invf-fsck reported OK throughout. WP99 wires the tail into the v3 flush,
+# invf-fsck reported OK throughout. WP99 wires the tail into the  flush,
 # makes the two staleness signals (DEVT sync_seq, block-0 root generation)
 # both readable, and puts the verdict in fsck + verify.
 #
@@ -99,7 +99,7 @@ AR_HI=$(sed -n 's/.*tier arena: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mk
 dd if="$D0" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev0"
 dd if="$D1" bs=1 skip=672 count=4 status=none | grep -q DEVT || fail "no DEVT on dev1"
 echo "geometry: raw $RAW_LO..$RAW_HI, arena $AR_LO..$AR_HI, shadow $SH_LO.."
-if vol_is_meta "$D0"; then echo "format: v3 (Meta-v3)"; else echo "format: v2"; fi
+if vol_is_meta "$D0"; then echo "format:  (metadata store)"; else echo "format: v2"; fi
 
 echo "== leg 2: import mixed corpus -> sweep -> verify --deep =="
 python3 - <<'PY'
@@ -163,10 +163,10 @@ grep -q "^tier: [1-9][0-9]* hot segment(s) copied to dev0" "$WORK/sweep2.log" \
     || { cat "$WORK/sweep2.log"; fail "no tier copies made"; }
 TC=$($B/invf-stats "$D0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/p')
 # WP98: the cross-open accounting is asserted on BOTH formats. It used to be
-# v2-only, with a byte-scan fallback for v3, because the two WP25 indexes were
+# v2-only, with a byte-scan fallback for , because the two WP25 indexes were
 # persisted through v2 owner records and wp25_index_load_one() read them back
 # with meta_read_record_by_id() -- a v2 record-stream lookup that finds nothing
-# on Meta, so both indexes were RAM-only across a reopen. On v3 the owner is
+# on Meta, so both indexes were RAM-only across a reopen. On  the owner is
 # a hidden file whose content IS the index (a recipe blob whose AST entries
 # carry each copy's pba and block count), published with
 # vol_publish_blob_inode and read back with vol_read_file. So invf-stats --
@@ -183,7 +183,7 @@ cmp <(dd if="$D0" bs=4096 skip="$DEV0P" count=1 status=none) \
     <(dd if="$D1" bs=4096 skip=$((CAN - AR_HI - 1)) count=1 status=none) \
     || fail "tier copy block differs from the canonical block"
 # and the bytes are there independently of the index: the canonical block must
-# appear byte-identical somewhere in the dev0 arena (the v3 fallback gate)
+# appear byte-identical somewhere in the dev0 arena (the  fallback gate)
 if ! python3 - "$D0" "$D1" "$AR_LO" "$AR_HI" "$CAN" <<'PY'
 import sys
 d0, d1, lo, hi = sys.argv[1], sys.argv[2], int(sys.argv[3]), int(sys.argv[4])
@@ -362,7 +362,7 @@ echo "== leg 7: mirror resync (stale dev0) =="
 # vol_flush, which the VOLF_META branch returns out of (the same early-return
 # trap WP98 hit for the tier/RAW-mirror indexes). A frozen sequence means
 # the divergence DETECTION below can never fire -- and the rewind this leg
-# performs rolls dev0's block 0 back, which on v3 carries the RT30 root
+# performs rolls dev0's block 0 back, which on  carries the RT30 root
 # descriptor at 0x9D0. So it is a real loss of the newest committed
 # generation, and with neither detection nor repair the next publish on the
 # stale copy dropped every delta record past it -- on BOTH devices, because

@@ -1,7 +1,7 @@
-/* symlink_test.c — WP-M24 offline test for v3 symlinks and special files.
+/* symlink_test.c — WP-M24 offline test for  symlinks and special files.
  *
  * Verifies:
- *   1. vol_create_symlink works on v3 (root and nested paths).
+ *   1. vol_create_symlink works on  (root and nested paths).
  *   2. vol_get_meta returns INVFS_ITYP_LNK, correct length, and target string.
  *   3. vol_read_inode reads the target string directly.
  *   4. vol_apply_meta updates symlink target correctly.
@@ -50,12 +50,12 @@ int main(int argc, char **argv)
     uint8_t *read_buf = NULL;
     size_t read_len = 0;
 
-    printf("symlink_test (WP-M24): v3 symlinks, special files, and mkfs v2 retirement\n");
+    printf("symlink_test (WP-M24):  symlinks, special files, and mkfs v2 retirement\n");
 
-    snprintf(img, sizeof img, "%s/invf-symlink-v3-test.img", dir);
+    snprintf(img, sizeof img, "%s/invf-symlink--test.img", dir);
     unlink(img);
 
-    /* 1. Format fresh v3 volume */
+    /* 1. Format fresh  volume */
     {
         char cmd[1024];
         snprintf(cmd, sizeof cmd,

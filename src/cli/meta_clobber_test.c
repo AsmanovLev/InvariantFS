@@ -24,7 +24,7 @@
  *
  *   rc == 0 ("no such inode row") is NORMAL. volume.c sets mbuf_ready
  *   unconditionally on open, so ready() never refuses, and on a volume
- *   whose records predate the v3 inode row -- every pre-v3 volume -- the row
+ *   whose records predate the  inode row -- every pre-metadata-store volume -- the row
  *   will never be found. Falling back to type defaults there is the
  *   documented v1->v2 upgrade path, and letting the patch apply on top is
  *   correct: there is no recorded mode to lose.
@@ -376,10 +376,10 @@ int main(int argc, char **argv)
      *
      * This is the leg a "just fail closed everywhere" fix fails. rc == 0
      * from vol_inode_get is not damage: it is a record with no metadata
-     * row, which is every pre-v3 volume, and the v1->v2 upgrade path is
+     * row, which is every pre-metadata-store volume, and the v1->v2 upgrade path is
      * built on answering it with type defaults and letting the patch apply
      * on top. Deleting the inode row out from under a live dirent
-     * constructs exactly that state on a v3 image. */
+     * constructs exactly that state on a  image. */
     {
         uint64_t other = vol_create_file_with_meta(v, "legacy", NULL, 0, &meta);
         pthread_mutex_lock(&g_io_lock);

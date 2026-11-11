@@ -14,7 +14,7 @@
  * rest of the WP10 write path, right after the storage-class helpers (they
  * need meta_rewrite/vol_stamp_class/vol_delete_inode). */
 
-/* WP-M4: the v3 validation path (RT30 + base-tree walk). Defined after the
+/* WP-M4: the  validation path (RT30 + base-tree walk). Defined after the
  * v2 helpers; vol_fsck_scan dispatches to it for VOLF_META volumes. WP86 added
  * the containment walk and the -f repair behind the same entry point. */
 static int fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
@@ -114,14 +114,14 @@ int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
      * INVFS_FSCK_CONTENT=1) and the seal2 repair (--repair) ran on the v2
      * inode-record stream only, so a data segment whose bytes were torn
      * after its recipe landed cannot be quarantined here yet. Both of those
-     * were deleted with that stream; the gap is now a gap in the v3
+     * were deleted with that stream; the gap is now a gap in the 
      * checker, not a branch that was never taken. */
     return fsck_scan(v, rep, fix, discard_reachable);
 }
 
-/* ================= WP-M4/WP86: metadata-v3 fsck ==========================
- * A v3 volume's namespace lives in the immutable base B+-tree anchored by the
- * RT30 root descriptor (design-meta-v3.md §7/§12/§16). This checker validates
+/* ================= WP-M4/WP86: metadata store fsck ==========================
+ * A  volume's namespace lives in the immutable base B+-tree anchored by the
+ * RT30 root descriptor (design-meta-.md §7/§12/§16). This checker validates
  * the root double-slot and walks every reachable base page.
  *
  * A page whose blkptr.checksum/gen does not match its bytes is a hard read
@@ -157,7 +157,7 @@ int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
 static void fsck_note(invfs_fsck_report *rep, const char *msg)
 {
     rep->damaged = 1;
-    fprintf(stderr, "fsck(v3): %s\n", msg);
+    fprintf(stderr, "fsck(): %s\n", msg);
 }
 
 /* The same sentence on stderr, WITHOUT the damage verdict. A condition an
@@ -168,7 +168,7 @@ static void fsck_note(invfs_fsck_report *rep, const char *msg)
  * needed. */
 static void fsck_info(const char *msg)
 {
-    fprintf(stderr, "fsck(v3): %s\n", msg);
+    fprintf(stderr, "fsck(): %s\n", msg);
 }
 
 /* Validate the RT30 descriptor itself (magic/version/page_size/CRC). Returns
@@ -476,7 +476,7 @@ static int fsck_lost_dirent_cb(void *ctx_, const char *name, size_t nlen,
         return 0;
     c->lost++;
     if (c->shown < 32)
-        fprintf(stderr, "fsck(v3): LOST: %s (inode %llu: its base page is "
+        fprintf(stderr, "fsck(): LOST: %s (inode %llu: its base page is "
                         "unreadable; the data is not recoverable)\n",
                 name, (unsigned long long)child);
     c->shown++;
@@ -492,7 +492,7 @@ static void fsck_lost_names(invfs_volume *v, invfs_fsck_report *rep)
     g_fsck_v = v;
     rc = vol_dirent_scan(v, INVFS_ROOT_INO, fsck_lost_dirent_cb, &c);
     if (rc != 0) {
-        fprintf(stderr, "fsck(v3): UNATTRIBUTABLE LOSS: the directory entries "
+        fprintf(stderr, "fsck(): UNATTRIBUTABLE LOSS: the directory entries "
                         "that named the lost files were themselves inside a "
                         "quarantined range, so the names cannot be listed. "
                         "Every key in the quarantined range is gone; restore "
@@ -501,11 +501,11 @@ static void fsck_lost_names(invfs_volume *v, invfs_fsck_report *rep)
     }
     rep->lost_names = c.lost;
     if (c.lost)
-        fprintf(stderr, "fsck(v3): %llu name(s) lost with the quarantined "
+        fprintf(stderr, "fsck(): %llu name(s) lost with the quarantined "
                         "pages%s\n", (unsigned long long)c.lost,
                 c.lost > c.shown ? " (list truncated)" : "");
     else
-        fprintf(stderr, "fsck(v3): no name is left pointing at a lost inode "
+        fprintf(stderr, "fsck(): no name is left pointing at a lost inode "
                         "row (the entries that named them were inside the "
                         "quarantined range too)\n");
 }
@@ -789,7 +789,7 @@ static void fsck_excise_dir_walk(fsck_excise_dir_ctx *d)
             d->rc = -1;
     }
     if (d->qn >= FSCK_EXCISE_DIRS_MAX)
-        fprintf(stderr, "fsck(v3): excision liveness: more than %d "
+        fprintf(stderr, "fsck(): excision liveness: more than %d "
                         "directories; the dirent walk stopped there\n",
                 FSCK_EXCISE_DIRS_MAX);
 }
@@ -816,7 +816,7 @@ static int fsck_excise_safety(invfs_volume *v, invfs_fsck_report *rep,
     c.q = q;
     lc.c = &c;
     if (discard_reachable) {
-        fprintf(stderr, "fsck(v3): --discard-reachable: excising every "
+        fprintf(stderr, "fsck(): --discard-reachable: excising every "
                         "quarantined key range even where a live inode still "
                         "needs a key inside it. Every key in those ranges is "
                         "about to be DESTROYED -- the files it belongs to lose "
@@ -884,16 +884,16 @@ static int fsck_excise_safety(invfs_volume *v, invfs_fsck_report *rep,
         fsck_note(rep, b);
     }
     if (c.nfault_total > c.nfault)
-        fprintf(stderr, "fsck(v3): excision liveness: %llu blocked live "
+        fprintf(stderr, "fsck(): excision liveness: %llu blocked live "
                         "inode(s) (the list above is truncated at %d)\n",
                 (unsigned long long)c.nfault_total, FSCK_EXCISE_FAULT_MAX);
     if (c.xa_unknown)
-        fprintf(stderr, "fsck(v3): excision liveness: %llu inode(s) could not "
+        fprintf(stderr, "fsck(): excision liveness: %llu inode(s) could not "
                         "have their xattr records enumerated (the scan's own "
                         "descent reached the damaged page), so the ranges "
                         "overlapping their 0x03 key space are not cleared\n",
                 (unsigned long long)c.xa_unknown);
-    fprintf(stderr, "fsck(v3): excision REFUSED for %d of %d quarantined key "
+    fprintf(stderr, "fsck(): excision REFUSED for %d of %d quarantined key "
                     "range(s): a live inode still needs a key inside them, and "
                     "a range that still holds it cannot be dropped without "
                     "destroying content the volume can still read. Those keys "
@@ -903,7 +903,7 @@ static int fsck_excise_safety(invfs_volume *v, invfs_fsck_report *rep,
                     "excise anyway and lose those files' content.\n",
             refused, q->n);
     if (rep->excise_partial)
-        fprintf(stderr, "fsck(v3): excision liveness is PARTIAL: a walk above "
+        fprintf(stderr, "fsck(): excision liveness is PARTIAL: a walk above "
                         "failed, so the ranges marked excisable are cleared by "
                         "a FLOOR, not a proof. Treat any future loss as "
                         "unexplained by this pass.\n");
@@ -1045,7 +1045,7 @@ static int fsck_repair(invfs_volume *v, invfs_fsck_report *rep,
      * root whose tree is damaged by definition. WP86: it is detected and
      * dropped here, never used (spt0_restore refuses such a save point too). */
     if (v->savepoint_live) {
-        fprintf(stderr, "fsck(v3): dropping the save point (its base tree is "
+        fprintf(stderr, "fsck(): dropping the save point (its base tree is "
                         "damaged and cannot be used as a rollback target)\n");
         if (spt0_drop(v) < 0) {
             fsck_note(rep, "could not drop the damaged save point");
@@ -1072,7 +1072,7 @@ static int fsck_repair(invfs_volume *v, invfs_fsck_report *rep,
 
     /* structure-before-reference (WP-M3): the new pages and the allocation
      * bitmap are durable before RT30 names the new root. */
-    if (vol_bitmap_flush(v) != 0 || vmux_barrier(v, "fsck v3 repair pages") < 0) {
+    if (vol_bitmap_flush(v) != 0 || vmux_barrier(v, "fsck  repair pages") < 0) {
         fsck_note(rep, "could not make the repaired pages durable; the "
                           "root was NOT published (the volume is unchanged)");
         return -1;
@@ -1094,7 +1094,7 @@ static int fsck_repair(invfs_volume *v, invfs_fsck_report *rep,
     /* Fold the delta back in: this restores every quarantined key the delta
      * still holds, and leaves the delta empty as a normal fold does. */
     if (vol_delta_count(v) > 0 && vol_fold(v) != 0)
-        fprintf(stderr, "fsck(v3): warning: the delta could not be folded "
+        fprintf(stderr, "fsck(): warning: the delta could not be folded "
                         "back in after the repair; its records are still in "
                         "the delta and will be re-applied by the next fold\n");
 
@@ -1135,9 +1135,9 @@ static void fsck_nlink_report(invfs_volume *v, invfs_fsck_report *rep)
     if (a.orphan_rows) {
         /* not damage (see vol_nlink_audit): a crash between the row and
          * its dirent leaves a row nobody names, and no repair removes it. */
-        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu live inode(s) have NO "
+        fprintf(stderr, "fsck(): nlink/fan-in: %llu live inode(s) have NO "
                         "directory entry naming them (orphan rows). Not "
-                        "counted as damage: the v3 write order is row then "
+                        "counted as damage: the  write order is row then "
                         "dirent, so a crash between the two leaves one, and "
                         "-f cannot remove it. The volume lists the files it "
                         "has; these rows are unreachable.\n",
@@ -1158,30 +1158,30 @@ static void fsck_nlink_report(invfs_volume *v, invfs_fsck_report *rep)
                            "than its nlink accounts for -- a name landed on "
                            "an inode it does not belong to, and the content "
                            "under the older name is gone)";
-        fprintf(stderr, "fsck(v3): nlink/fan-in: inode %llu (%s): nlink %u, "
+        fprintf(stderr, "fsck(): nlink/fan-in: inode %llu (%s): nlink %u, "
                         "%u name(s) resolve to it -- %s%s%s\n",
                 (unsigned long long)f->id, f->name[0] ? f->name : "?",
                 f->nlink, f->fanin, what,
                 a.nfault_total > a.nfault ? " [list truncated]" : "", "");
     }
     if (a.missing_names)
-        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) missing -- the "
+        fprintf(stderr, "fsck(): nlink/fan-in: %llu name(s) missing -- the "
                         "inode rows claim %llu more link(s) than the "
                         "directory tree has entries for\n",
                 (unsigned long long)a.missing_names,
                 (unsigned long long)a.missing_names);
     if (a.stale_dirents)
-        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu stale dirent(s) -- "
+        fprintf(stderr, "fsck(): nlink/fan-in: %llu stale dirent(s) -- "
                         "directory entries resolve to inodes whose rows do "
                         "not account for them; this is the shape of the "
                         "WP111b data loss (one name's content replaced by "
                         "another's)\n",
                 (unsigned long long)a.stale_dirents);
     if (a.dead_names)
-        fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) point at an "
+        fprintf(stderr, "fsck(): nlink/fan-in: %llu name(s) point at an "
                         "inode row that is not live\n",
                 (unsigned long long)a.dead_names);
-    fprintf(stderr, "fsck(v3): nlink/fan-in: %llu name(s) over %llu live "
+    fprintf(stderr, "fsck(): nlink/fan-in: %llu name(s) over %llu live "
                     "inode(s); %llu inode(s) do not balance. NOT REPAIRABLE "
                     "by -f: which of the colliding names is the intruder is "
                     "not decidable from the volume.\n",
@@ -1580,11 +1580,11 @@ static void fsck_recipe_report(invfs_volume *v, invfs_fsck_report *rep)
         fsck_note(rep, b);
     }
     if (a.bad && a.nfault_total > a.nfault)
-        fprintf(stderr, "fsck(v3): recipe blobs: %llu unreadable (the list "
+        fprintf(stderr, "fsck(): recipe blobs: %llu unreadable (the list "
                         "above is truncated at %d)\n",
                 (unsigned long long)a.nfault_total, INVFS_RECIPE_BAD_MAX);
     else if (a.bad)
-        fprintf(stderr, "fsck(v3): recipe blobs: %llu of %llu live inode(s) "
+        fprintf(stderr, "fsck(): recipe blobs: %llu of %llu live inode(s) "
                         "with content cannot be read\n",
                 (unsigned long long)a.bad, (unsigned long long)a.checked);
     free(oc.tab);
@@ -1633,7 +1633,7 @@ static int fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
                      (unsigned long long)v->rt.root_slot[1]);
             fsck_note(rep, b);
         } else if (!rep->damaged) {
-            fprintf(stderr, "fsck(v3): base tree empty (clean)\n");
+            fprintf(stderr, "fsck(): base tree empty (clean)\n");
         }
         return 0;
     }
@@ -1738,10 +1738,10 @@ static int fsck_scan(invfs_volume *v, invfs_fsck_report *rep, int fix,
      * missing name. The damage is already reported above; a namespace audit
      * on top of it would be noise, and a wrong one. */
     if (q.n || q.qfull) {
-        fprintf(stderr, "fsck(v3): nlink/fan-in check SKIPPED: the base tree "
+        fprintf(stderr, "fsck(): nlink/fan-in check SKIPPED: the base tree "
                         "is damaged, so a name that does not resolve cannot be "
                         "told from a lost one\n");
-        fprintf(stderr, "fsck(v3): recipe resolvability check SKIPPED for "
+        fprintf(stderr, "fsck(): recipe resolvability check SKIPPED for "
                         "the same reason: a recipe that will not load may be "
                         "inside a quarantined key range, which is damage -f "
                         "can address\n");

@@ -56,7 +56,7 @@ export REPO
 # tools/lib-scratch.sh).
 . "$REPO/tools/lib-scratch.sh"
 
-# the format-aware "volume is clean" gate (v3 has no L2P orphans counter)
+# the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
 B=$REPO/bin

@@ -475,7 +475,7 @@ static void leg_red(void)
            "not lose the earlier run's entries ==\n");
 
     /* PART A -- the deterministic assertion, at countdown position 1.
-     * Position 1 is not a guess: vol_tz_flush calls tz_flush_one_v3(v, 0)
+     * Position 1 is not a guess: vol_tz_flush calls tz_flush_one(v, 0)
      * first, and its FIRST act is tz_reg_load (vol_textzone.c:601), whose
      * first act is vol_find(TZ_OWNER_NAME) (:327) -> vol_path_lookup ->
      * one vol_dirent_get. Nothing else touches a dirent row before it. */

@@ -12,7 +12,7 @@
  * the day somebody needs the data.
  *
  * The end-to-end test for that (tools/test-seal.sh) CANNOT answer it: the seal
- * is v2-only, v2 is retired in v0.5.0 ("only v3 is supported"), so no volume
+ * is v2-only, v2 is retired in v0.5.0 ("only  is supported"), so no volume
  * with parity can be created and the recovery legs never run. The test SKIPs.
  * This file tests the math directly, with no volume and no filesystem, which
  * is where the question actually lives: rs.c has no idea what a stripe or an

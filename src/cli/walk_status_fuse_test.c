@@ -4,7 +4,7 @@
  * part a USER sees, and it is the sharpest evidence the finding is real
  * rather than theoretical:
  *
- *   3  src/cli/fuse_fs.c:228  build_file_table_v3() dropped vol_walk's
+ *   3  src/cli/fuse_fs.c:228  build_file_table() dropped vol_walk's
  *      status. Underneath, walk_dir() in vol_dirs.c did
  *      `if (vol_path_lookup(...) != 1) continue;` -- and because the
  *      recursion into a directory's contents is inside that same loop, ONE
@@ -27,7 +27,7 @@
  *      own recovery path, so this is unbounded dead-segment accumulation
  *      behind a clean log.
  *
- * invf_readdir, invf_sweep_worker and build_file_table_v3 are static in
+ * invf_readdir, invf_sweep_worker and build_file_table are static in
  * fuse_fs.c, so this includes it with `main` renamed and stubs the libfuse
  * and tmpstore symbols invf-fuse links -- the same shape as
  * readdir_error_test.c. The functions under test are NOT modified, stubbed

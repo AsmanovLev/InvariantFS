@@ -142,7 +142,7 @@ fi
 # 5. RETIRED-SURFACE TRIPWIRE. The mapping journal, the name index and
 #    the record stream were deleted (0c82a7a, 16d9ffc). This is NOT the
 #    proof that they are gone -- no_v2_surface_test is, because it looks
-#    at the reserved gap on a real v3 volume after a real write cycle and
+#    at the reserved gap on a real  volume after a real write cycle and
 #    finds it byte-for-byte zero, which any re-grown caller breaks
 #    whatever it is named. This is the narrower, complementary thing a
 #    disk scan cannot see: a retired NAME coming back into a header, a

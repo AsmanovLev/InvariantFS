@@ -5,10 +5,10 @@
  * by `invf-fsck` and CORRUPT by `invf-verify --deep` /
  * `vol_read_inode`. The read path said
  *
- *     vol_read_inode: v3 inode 24: recipe blob missing/corrupt
+ *     vol_read_inode:  inode 24: recipe blob missing/corrupt
  *
  * and fsck said OK, exit 0, because nothing in the fsck path ever
- * resolved the content address an inode row carries. A v3 inode row does
+ * resolved the content address an inode row carries. A  inode row does
  * not hold its content: it holds a 32-byte BLAKE3 address, and the recipe
  * blob lives under its own key (0x04 || addr) in the SAME base tree the
  * page walk already verified. A key that is gone leaves no trace in any
@@ -306,7 +306,7 @@ int main(int argc, char **argv)
 
     /* ---- leg F: a symlink is content, and it is not an AST recipe ----
      *
-     * A v3 symlink row carries size = target length and a REAL, non-zero
+     * A  symlink row carries size = target length and a REAL, non-zero
      * recipe_addr: the target string is stored content-addressed exactly
      * like a file's recipe (vol_create_node). It is not an AST -- the
      * read path hands the blob back verbatim and never parses it -- but
