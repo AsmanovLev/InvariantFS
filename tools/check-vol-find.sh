@@ -46,17 +46,17 @@ src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1724:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2029:SKIP
-src/cli/fuse_fs.c:2367:SKIP
-src/cli/fuse_fs.c:3076:SKIP
-src/cli/fuse_fs.c:3297:SKIP
-src/cli/fuse_fs.c:3352:SKIP
-src/cli/fuse_fs.c:3613:SKIP
-src/cli/fuse_fs.c:3818:SKIP
-src/cli/fuse_fs.c:3905:SKIP
-src/cli/fuse_fs.c:3940:SKIP
-src/cli/fuse_fs.c:3977:SKIP
+src/cli/fuse_fs.c:1735:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2040:SKIP
+src/cli/fuse_fs.c:2378:SKIP
+src/cli/fuse_fs.c:3087:SKIP
+src/cli/fuse_fs.c:3308:SKIP
+src/cli/fuse_fs.c:3363:SKIP
+src/cli/fuse_fs.c:3624:SKIP
+src/cli/fuse_fs.c:3829:SKIP
+src/cli/fuse_fs.c:3916:SKIP
+src/cli/fuse_fs.c:3951:SKIP
+src/cli/fuse_fs.c:3988:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row
@@ -136,7 +136,7 @@ src/core/vol_read.c:980:SKIP
 src/core/vol_read.c:997:SKIP
 src/core/vol_read.c:1057:SKIP
 src/core/vol_read.c:1132:SKIP
-src/core/vol_sweep.c:1935:SKIP
+src/core/vol_sweep.c:1936:SKIP
 src/core/vol_sweep.c:280:SKIP
 src/core/vol_sweep.c:585:ACTS
 src/core/vol_sweep.c:604:ACTS
@@ -146,8 +146,8 @@ src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
 src/core/volume.c:968:SKIP   # reserve scan: direct .ivpack file lookup
 src/core/volume.c:989:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1463:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1464:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:1468:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1469:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "
