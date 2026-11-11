@@ -423,6 +423,16 @@ static int bft_add(ftable_ctx *c, const char *name, uint64_t ino,
     return 0;
 }
 
+static inline int perf_trace_enabled(void)
+{
+    static int enabled = -1;
+    if (enabled < 0) {
+        const char *e = getenv("INVFS_PERF_TRACE");
+        enabled = (e && *e && strcmp(e, "0") != 0 && strcmp(e, "false") != 0);
+    }
+    return enabled;
+}
+
 static int bft_cb(void *ctx_, const char *path, uint64_t ino,
                      uint32_t type, uint64_t size, int64_t mtime)
 {
@@ -478,8 +488,9 @@ static void build_file_table(void)
     g_entries = c.v;
     g_nentries = c.n;
     g_cap = c.cap;
-    fprintf(stderr, "[perf-trace] build_file_table: total=%.3fs (walk=%.3fs, qsort=%.3fs, %d files)\n",
-            t_sort - t_start, t_walk - t_start, t_sort - t_walk, c.n);
+    if (perf_trace_enabled())
+        fprintf(stderr, "[perf-trace] build_file_table: total=%.3fs (walk=%.3fs, qsort=%.3fs, %d files)\n",
+                t_sort - t_start, t_walk - t_start, t_sort - t_walk, c.n);
     if (vol_walk_commit(&w) != 0) {
         g_table_degraded = 1;
         fprintf(stderr, "invf-fuse: the namespace walk did not complete; the "
@@ -4322,6 +4333,11 @@ int main(int argc, char *argv[])
             else if (strcmp(tok, "noraw_mirror") == 0) setenv("INVFS_RAW_MIRROR", "0", 1);
             else if (strcmp(tok, "lazy_reclaim") == 0) setenv("INVFS_LAZY_RECLAIM", "1", 1);
             else if (strcmp(tok, "direct_reclaim") == 0) setenv("INVFS_LAZY_RECLAIM", "0", 1);
+            else if (strcmp(tok, "reclaim=instant") == 0) setenv("INVFS_LAZY_RECLAIM", "0", 1);
+            else if (strcmp(tok, "reclaim=if-ready") == 0) { setenv("INVFS_LAZY_RECLAIM", "1", 1); setenv("INVFS_SWEEP_RECLAIM", "if-ready", 1); }
+            else if (strcmp(tok, "reclaim=on-demand") == 0) { setenv("INVFS_LAZY_RECLAIM", "1", 1); setenv("INVFS_SWEEP_RECLAIM", "on-demand", 1); }
+            else if (strcmp(tok, "pba_warmup") == 0) setenv("INVFS_PBA_WARMUP", "1", 1);
+            else if (strcmp(tok, "nopba_warmup") == 0) setenv("INVFS_PBA_WARMUP", "0", 1);
             if (strncmp(tok, "arc_limit=", 10) == 0) {
                 if (parse_size_opt(tok + 10, &arc_limit)) have_arc = 1;
                 else fprintf(stderr, "invf: bad -o arc_limit=%s; ignored\n",
@@ -4412,13 +4428,15 @@ int main(int argc, char *argv[])
         opts = fl ? fbuf : NULL;
     }
 
-    fprintf(stderr, "[perf-trace 0.000s] opening volume %s...\n", img);
+    if (perf_trace_enabled())
+        fprintf(stderr, "[perf-trace 0.000s] opening volume %s...\n", img);
     g_vol = vol_open(img, &err);
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
         return 1;
     }
-    fprintf(stderr, "[perf-trace %.3fs] volume open complete\n", fuse_now_sec() - t_main_start);
+    if (perf_trace_enabled())
+        fprintf(stderr, "[perf-trace %.3fs] volume open complete\n", fuse_now_sec() - t_main_start);
 
     /* WP59: codec-policy mount gate.
      * - No PCK0 (legacy volume): refuse unless -o ignore-missing-codecs.
@@ -4502,9 +4520,11 @@ int main(int argc, char *argv[])
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     snprintf(g_mnt_path, sizeof g_mnt_path, "%s", mnt);
     setvbuf(stderr, NULL, _IONBF, 0);
-    fprintf(stderr, "[perf-trace %.3fs] building file table...\n", fuse_now_sec() - t_main_start);
+    if (perf_trace_enabled())
+        fprintf(stderr, "[perf-trace %.3fs] building file table...\n", fuse_now_sec() - t_main_start);
     build_file_table();
-    fprintf(stderr, "[perf-trace %.3fs] file table complete (%d files)\n", fuse_now_sec() - t_main_start, g_nentries);
+    if (perf_trace_enabled())
+        fprintf(stderr, "[perf-trace %.3fs] file table complete (%d files)\n", fuse_now_sec() - t_main_start, g_nentries);
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
     if (!have_allow_other && geteuid() == 0)
         fprintf(stderr, "invf: note: mounted without -o allow_other; if using as a rootfs or chroot, mount with -o allow_other so non-root users have access\n");
@@ -4607,7 +4627,8 @@ int main(int argc, char *argv[])
             if (g_vol) { g_shutdown = 1; vol_close(g_vol); g_vol = NULL; }
             return 1;
         }
-        fprintf(stderr, "[perf-trace %.3fs] FUSE mounted at %s\n", fuse_now_sec() - t_main_start, mnt);
+        if (perf_trace_enabled())
+            fprintf(stderr, "[perf-trace %.3fs] FUSE mounted at %s\n", fuse_now_sec() - t_main_start, mnt);
         if (!fg) fuse_daemonize(0);
         se = fuse_get_session(f);
         fuse_set_signal_handlers(se);

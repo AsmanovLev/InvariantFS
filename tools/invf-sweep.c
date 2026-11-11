@@ -1473,6 +1473,20 @@ int main(int argc, char **argv)
     int fast = 0;
     int migrate_on = 1;    /* WP601: migrate stage defaults on (skipped by --fast/--dry-run) */
     int recompress = 0;    /* WP601: --recompress explicit policy recompress (implies migrate) */
+    enum {
+        RECLAIM_MODE_IF_READY = 0,
+        RECLAIM_MODE_INSTANT = 1,
+        RECLAIM_MODE_ON_DEMAND = 2
+    };
+    int reclaim_mode = RECLAIM_MODE_IF_READY;
+    {
+        const char *r_env = getenv("INVFS_SWEEP_RECLAIM");
+        if (r_env) {
+            if (strcmp(r_env, "instant") == 0) reclaim_mode = RECLAIM_MODE_INSTANT;
+            else if (strcmp(r_env, "on-demand") == 0) reclaim_mode = RECLAIM_MODE_ON_DEMAND;
+            else if (strcmp(r_env, "if-ready") == 0) reclaim_mode = RECLAIM_MODE_IF_READY;
+        }
+    }
     const char *extract_dir = NULL;    /* WP23 --extract-packs mode */
     const char *log_path = NULL;
     const char *color_arg = NULL;
@@ -1548,6 +1562,7 @@ int main(int argc, char **argv)
                 "              re-run the generic-ZSTD floor on demand (implies\n"
                 "              --migrate; skipped by --fast)\n"
                 "  --compact   run only the inode-area compaction pass\n"
+                "  --reclaim=if-ready|instant|on-demand (default: if-ready)\n"
                 "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
                 "                         volume's codepack dir to <dir>,\n"
                 "                         engine-side, no sweep, no FUSE)\n",
@@ -1588,6 +1603,7 @@ int main(int argc, char **argv)
                 "  --migrate/--no-migrate (WP601 migrate stage; default on)\n"
                 "  --recompress (WP601: re-run the generic-ZSTD floor on demand)\n"
                 "  --compact   run only the inode-area compaction pass\n"
+                "  --reclaim=if-ready|instant|on-demand (default: if-ready)\n"
                 "           [--extract-packs <dir>]  (WP23 sweepboot: copy the\n"
                 "                         volume's codepack dir to <dir>,\n"
                 "                         engine-side, no sweep, no FUSE)\n",
@@ -1612,6 +1628,30 @@ int main(int argc, char **argv)
             migrate_on = 1;
         } else if (strcmp(a, "--no-migrate") == 0) {
             migrate_on = 0;
+        } else if (strncmp(a, "--reclaim", 9) == 0) {
+            const char *v = NULL;
+            if (a[9] == '=')
+                v = a + 10;
+            else if (a[9] == '\0') {
+                if (i + 1 >= argc) {
+                    fprintf(stderr, "--reclaim: want if-ready|instant|on-demand\n");
+                    return 2;
+                }
+                v = argv[++i];
+            } else {
+                fprintf(stderr, "unknown flag '%s'\n", a);
+                return 2;
+            }
+            if (strcmp(v, "if-ready") == 0)
+                reclaim_mode = RECLAIM_MODE_IF_READY;
+            else if (strcmp(v, "instant") == 0)
+                reclaim_mode = RECLAIM_MODE_INSTANT;
+            else if (strcmp(v, "on-demand") == 0)
+                reclaim_mode = RECLAIM_MODE_ON_DEMAND;
+            else {
+                fprintf(stderr, "--reclaim: want if-ready|instant|on-demand, got '%s'\n", v);
+                return 2;
+            }
         } else if (strcmp(a, "--recompress") == 0) {
             recompress = 1;
             migrate_on = 1;   /* explicit recompress runs in the migrate stage */
@@ -2127,9 +2167,25 @@ int main(int argc, char **argv)
     }
     sw_stage_end(dry ? "dry-run policy ready" : "policy ready");
 
-    /* Ensure PBA reference map is populated for sweep operations */
-    vol->lazy_reclaim = 0;
-    pba_ref_ensure(vol);
+    /* Ensure PBA reference map is populated according to --reclaim mode */
+    if (reclaim_mode == RECLAIM_MODE_ON_DEMAND) {
+        vol->lazy_reclaim = 0;
+        pba_ref_ensure(vol);
+    } else if (reclaim_mode == RECLAIM_MODE_INSTANT) {
+        vol_pba_warmup_wait(vol);
+        vol->lazy_reclaim = 0;
+        pba_ref_ensure(vol);
+    } else { /* RECLAIM_MODE_IF_READY */
+        if (vol_pba_is_ready(vol)) {
+            vol->lazy_reclaim = 0;
+            if (!invfs_sweep_ui_active())
+                fprintf(stderr, "[sweep] PBA reference map ready; instant reclaim active\n");
+        } else {
+            vol->lazy_reclaim = 1;
+            if (!invfs_sweep_ui_active())
+                fprintf(stderr, "[sweep] PBA reference map not ready; skipping scan (--reclaim=if-ready)\n");
+        }
+    }
     sw_stage_begin(2, "collect", 0, "walking live inodes");
 
 

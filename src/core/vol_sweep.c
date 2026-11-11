@@ -1469,7 +1469,8 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
             return -1;
         }
         memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
-        pba_ref_ensure(v);
+        if (!v->lazy_reclaim)
+            pba_ref_ensure(v);
 
         /* Parallel worker pool context: process in bounded chunks (e.g. 128 segments = 8 MiB)
          * to strictly bound memory regardless of file size (handles 32GB files on 8GB RAM). */

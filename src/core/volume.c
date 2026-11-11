@@ -1044,6 +1044,11 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * cache grows (realloc) and compacts on the lock-free read path, so it
      * carries its own leaf mutex rather than relying on a caller's. */
     cpack_locks_init(v);
+    (void)pthread_mutex_init(&v->pba_warmup_mu, NULL);
+    (void)pthread_cond_init(&v->pba_warmup_cv, NULL);
+    v->pba_warmup_started = 0;
+    v->pba_warmup_done = 0;
+    v->pba_warmup_stop = 0;
 
     /* "W:" is the shorthand a user types; CreateFileW needs "\\.\W:". Store
        the normalized form, so diagnostics name what was actually opened. */
@@ -1642,6 +1647,11 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     }
     if (!v->lazy_reclaim) {
         pba_ref_ensure(v);
+    } else {
+        const char *wu_env = getenv("INVFS_PBA_WARMUP");
+        if (!wu_env || (strcmp(wu_env, "0") != 0 && strcmp(wu_env, "false") != 0)) {
+            vol_pba_warmup_start(v);
+        }
     }
     t_after_pba = vol_now_sec();
     *err = 0;
@@ -1687,13 +1697,18 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         v->needs_recovery = 1;   /* a degraded mount is always read-only */
     vol_load_volume_packs(v);
     t_after_cpacks = vol_now_sec();
-    fprintf(stderr, "[perf-trace] vol_open(%s): total=%.3fs (sb=%.3fs, mbuf=%.3fs, delta=%.3fs, pba_ref=%.3fs, cpacks=%.3fs)\n",
-            real, t_after_cpacks - t_open_start,
-            t_after_sb - t_open_start,
-            t_after_mbuf - t_after_sb,
-            t_after_delta - t_after_mbuf,
-            t_after_pba - t_after_delta,
-            t_after_cpacks - t_after_pba);
+    {
+        const char *pt_env = getenv("INVFS_PERF_TRACE");
+        if (pt_env && *pt_env && strcmp(pt_env, "0") != 0 && strcmp(pt_env, "false") != 0) {
+            fprintf(stderr, "[perf-trace] vol_open(%s): total=%.3fs (sb=%.3fs, mbuf=%.3fs, delta=%.3fs, pba_ref=%.3fs, cpacks=%.3fs)\n",
+                    real, t_after_cpacks - t_open_start,
+                    t_after_sb - t_open_start,
+                    t_after_mbuf - t_after_sb,
+                    t_after_delta - t_after_mbuf,
+                    t_after_pba - t_after_delta,
+                    t_after_cpacks - t_after_pba);
+        }
+    }
     return v;
 fail:
     vol_delta_close(v);   /* WP-M10: free any replay index (no-op if none) */
@@ -1735,6 +1750,11 @@ invfs_volume *vol_open(const char *path, int *err)
 
 void vol_close(invfs_volume *v)
 {
+    if (v) {
+        vol_pba_warmup_stop(v);
+        pthread_mutex_destroy(&v->pba_warmup_mu);
+        pthread_cond_destroy(&v->pba_warmup_cv);
+    }
     /* Reserve/bootstrap: evict this volume's pack section first (no
      * volume state involved; later teardown must not see stale
      * entries, and no new lookup may resolve through them). */
@@ -2969,6 +2989,81 @@ int pba_ref_ensure(invfs_volume *v)
     rc = pba_ref_ensure_locked(v);
     pthread_mutex_unlock(&g_pba_ref_mu);
     return rc;
+}
+
+/* ------------------------------------------------------------------ */
+/* PBA warmup background worker                                       */
+/* ------------------------------------------------------------------ */
+
+static void *pba_warmup_worker(void *arg)
+{
+    invfs_volume *v = (invfs_volume *)arg;
+    if (!v) return NULL;
+#ifndef _WIN32
+    (void)nice(19);
+#endif
+    pba_ref_ensure(v);
+
+    pthread_mutex_lock(&v->pba_warmup_mu);
+    v->pba_warmup_done = 1;
+    pthread_cond_broadcast(&v->pba_warmup_cv);
+    pthread_mutex_unlock(&v->pba_warmup_mu);
+    return NULL;
+}
+
+int vol_pba_warmup_start(invfs_volume *v)
+{
+    if (!v) return -1;
+    pthread_mutex_lock(&v->pba_warmup_mu);
+    if (v->pba_warmup_started) {
+        pthread_mutex_unlock(&v->pba_warmup_mu);
+        return 0;
+    }
+    v->pba_warmup_started = 1;
+    v->pba_warmup_done = 0;
+    v->pba_warmup_stop = 0;
+    if (pthread_create(&v->pba_warmup_th, NULL, pba_warmup_worker, v) != 0) {
+        v->pba_warmup_started = 0;
+        pthread_mutex_unlock(&v->pba_warmup_mu);
+        return -1;
+    }
+    pthread_mutex_unlock(&v->pba_warmup_mu);
+    return 0;
+}
+
+void vol_pba_warmup_wait(invfs_volume *v)
+{
+    if (!v) return;
+    pthread_mutex_lock(&v->pba_warmup_mu);
+    while (v->pba_warmup_started && !v->pba_warmup_done && !v->pba_warmup_stop) {
+        pthread_cond_wait(&v->pba_warmup_cv, &v->pba_warmup_mu);
+    }
+    pthread_mutex_unlock(&v->pba_warmup_mu);
+}
+
+void vol_pba_warmup_stop(invfs_volume *v)
+{
+    if (!v) return;
+    pthread_mutex_lock(&v->pba_warmup_mu);
+    if (v->pba_warmup_started) {
+        v->pba_warmup_stop = 1;
+        pthread_cond_broadcast(&v->pba_warmup_cv);
+        pthread_mutex_unlock(&v->pba_warmup_mu);
+        pthread_join(v->pba_warmup_th, NULL);
+        pthread_mutex_lock(&v->pba_warmup_mu);
+        v->pba_warmup_started = 0;
+    }
+    pthread_mutex_unlock(&v->pba_warmup_mu);
+}
+
+int vol_pba_is_ready(invfs_volume *v)
+{
+    int ready = 0;
+    if (!v) return 0;
+    pba_ref_lock();
+    ready = (v->pba_ref_on && !v->pba_ref_stale);
+    pthread_mutex_unlock(&g_pba_ref_mu);
+    return ready;
 }
 
 

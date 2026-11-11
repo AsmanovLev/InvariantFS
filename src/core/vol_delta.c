@@ -936,8 +936,10 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
         }
     }
     if (need_map) {
-        pba_ref_reset(v);
-        pba_ref_ensure(v);
+        if (!v->lazy_reclaim) {
+            pba_ref_reset(v);
+            pba_ref_ensure(v);
+        }
     }
     for (i = 0; i < n; i++) {
         delta_retire_ent *e = &list[i];

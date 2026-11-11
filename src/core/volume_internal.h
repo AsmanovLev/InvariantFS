@@ -438,6 +438,13 @@ typedef struct invfs_volume {
      * predates an inode. Without it the count reads 0 for a pba a live
      * recipe still names -- the wrong-free direction, not the leak one. */
     int pba_ref_stale;
+    /* PBA warmup worker state */
+    pthread_t        pba_warmup_th;
+    pthread_mutex_t  pba_warmup_mu;
+    pthread_cond_t   pba_warmup_cv;
+    int              pba_warmup_started;
+    int              pba_warmup_done;
+    int              pba_warmup_stop;
     /* WP48: set once the id->position index has been reconciled against
      * the (authoritative) name index after a stale hint was detected.
      * Record compaction/rewrites during a session can leave the id index
@@ -1532,6 +1539,10 @@ void pba_ref_reset(invfs_volume *v);
  * never a free on a count that predates an inode. */
 void pba_ref_invalidate(invfs_volume *v);
 void pba_ref_validate(invfs_volume *v);
+int  vol_pba_warmup_start(invfs_volume *v);
+void vol_pba_warmup_wait(invfs_volume *v);
+void vol_pba_warmup_stop(invfs_volume *v);
+int  vol_pba_is_ready(invfs_volume *v);
 
 /* WP unlink-takes-map-after-dirent-drop: span a critical section over the
  * MAP that is not a single function call.
