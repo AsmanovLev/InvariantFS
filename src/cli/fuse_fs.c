@@ -300,9 +300,10 @@ static void invf_sweep_worker(int arm_ckp);   /* defined below sweep thread */
 static void table_rebuild_locked(void);   /* fwd (defined below) */
 
 /* Mutations only mark the name table stale; the next consumer pays for one
- * rebuild instead of every close paying one. tar/cp imports fire thousands
- * of closes -- rebuilding per close scanned the whole inode area each time
- * and made imports O(N^2). */
+ * rebuild (vol_walk_strict over the whole namespace, then qsort: O(N log N))
+ * instead of every close paying one. Per-file import cost is therefore flat
+ * in the number of files already imported -- measured, see
+ * docs/benchmarks/import-cost.md. */
 static int g_table_stale = 0;
 /* WP135: set when a rebuild finished but the walk behind it did not. The
  * table is usable for what it holds; it is not authority on what the volume
