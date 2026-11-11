@@ -8,7 +8,7 @@
  * a recipe by address alone. invfs_ast_hdr_parse (src/core/invarifs.h)
  * accepts ANY blob whose first four bytes are a v1 or v2 AST version word,
  * so a symlink that false-parses donates its fabricated block entries to the
- * pass, and those entries reach dedup_remap_file_v3 -- which republishes a
+ * pass, and those entries reach dedup_remap_file_impl -- which republishes a
  * SYNTHESISED recipe over the link and moves refcounts.
  *
  * THE TRIGGER IS NOT REACHABLE TODAY, and leg R proves it rather than
@@ -134,7 +134,7 @@ static int mkfs_image(const char *img)
 /* f0 = [DUP content, unique content]; f1 = [DUP content]. The shared segment
  * is the dedupe loser-to-be, so a forged entry naming it becomes a merge
  * intent against the canonical copy -- exactly the shape that reaches
- * dedup_remap_file_v3. */
+ * dedup_remap_file_impl. */
 static uint8_t *g_dup = NULL, *g_uniq = NULL;
 
 static invfs_volume *make_volume(const char *img, int with_link)

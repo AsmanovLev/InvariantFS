@@ -177,7 +177,7 @@ static int merge_ent_cmp(const void *a, const void *b)
  * under a live checkpoint -- the caller stops the pass cleanly, keeping
  * what merged); -1 = error. *freed_out takes the reclaimed block count,
  * *applied_out the count of intents actually applied. */
-static int dedup_remap_file_v3(invfs_volume *v, uint64_t inode,
+static int dedup_remap_file_impl(invfs_volume *v, uint64_t inode,
                                const merge_ent *ms, size_t nm,
                                uint64_t *freed_out, size_t *applied_out,
                                size_t *cross_applied_out)
@@ -338,7 +338,7 @@ static int dedup_remap_file(invfs_volume *v, uint64_t inode,
                             size_t *cross_applied_out)
 {
     *cross_applied_out = 0;
-    return dedup_remap_file_v3(v, inode, ms, nm, freed_out, applied_out,
+    return dedup_remap_file_impl(v, inode, ms, nm, freed_out, applied_out,
                                cross_applied_out);
 }
 
@@ -364,7 +364,7 @@ static int dedup_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
      * does not say "AST". invfs_ast_hdr_parse accepts any blob whose first
      * four bytes are a v1/v2 AST version word, so a symlink that
      * false-parses donates attacker-chosen block entries to this pass and
-     * they reach dedup_remap_file_v3, which republishes a SYNTHESISED
+     * they reach dedup_remap_file_impl, which republishes a SYNTHESISED
      * recipe over the link. Stated through the predicate the READ path
      * dispatches on (src/core/volume.h) so the two cannot drift again.
      *
@@ -553,7 +553,7 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                                  * recover. The guard belongs here too
                                  * because this leg is what actually feeds
                                  * cur_pba -- and therefore
-                                 * dedup_remap_file_v3 -- and it must not be
+                                 * dedup_remap_file_impl -- and it must not be
                                  * reachable only by way of the collector
                                  * having already filtered. */
                                 if (invfs_inode_content_is_raw_blob(in.type)) {

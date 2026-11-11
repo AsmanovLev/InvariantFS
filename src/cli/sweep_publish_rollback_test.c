@@ -10,7 +10,7 @@
  * want of space; the blocks written before it are, until then, allocated and
  * referenced by nothing.
  *
- * That rollback lived in `vol_sweep_one_v3` (src/core/vol_sweep.c). A merge
+ * That rollback lived in `vol_sweep_one_impl` (src/core/vol_sweep.c). A merge
  * rewrote the publish block and mis-braced it: the `else` carrying the
  * rollback was bound to the `vol_ast_recipe_serialize` test instead of the
  * `vol_recipe_store` test. `vol_ast_recipe_serialize` essentially never

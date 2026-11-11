@@ -2027,7 +2027,7 @@ int record_owns_siblings(const uint8_t *rec, uint32_t rl);
 /* The sibling-ownership RULE, on a parsed AST: does a file with this
  * header and these entries own "name!..." siblings that must die with it?
  * Both record_owns_siblings (v2 records) and the  write session's
- * wsession_load_old_v3 ask this one function, so an overwrite retires the
+ * wsession_load_old_impl ask this one function, so an overwrite retires the
  * same siblings on both formats. 1 = siblings possible. */
 int ast_owns_siblings(const invfs_ast_hdr *ah,
                       const invfs_ast_block_entry *ents, size_t nents);

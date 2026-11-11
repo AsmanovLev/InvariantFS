@@ -1005,7 +1005,7 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
  * This is the ONE rule, on the parsed AST rather than on a container
  * format's bytes. Both callers ask it: the v2 record
  * (record_owns_siblings) and the  recipe blob
- * (wsession_load_old_v3, vol_write.c), so an overwrite retires exactly the
+ * (wsession_load_old_impl, vol_write.c), so an overwrite retires exactly the
  * siblings its counterpart format retires. 1 = siblings possible. */
 
 

@@ -419,7 +419,7 @@ static void *decode_thread_worker(void *arg_) {
  * vol_delta_read_value() pread per delta-resident child (see the note on
  * vol_path_of in vol_btree.c). Resolving it eagerly therefore made every
  * whole-file read cost O(number of inodes in the volume) -- and the sweep
- * reads every file whole exactly once (vol_sweep_one_v3), so its transform
+ * reads every file whole exactly once (vol_sweep_one_impl), so its transform
  * stage grew superlinearly. On one content mix held constant, that stage
  * took 0.47 s at 1,017 inodes, 113 s at 4,270 and 2,086 s at 21,342 -- a
  * three-point log-log fit of T = 4.6e-9 * N^2.74, dominated by pread(2)

@@ -6,7 +6,7 @@
  *
  *     if (s->owns_siblings) vol_delete_siblings(v, s->name);
  *
- * (src/core/vol_write.c:1131) and the  commit (vol_write_commit_v3) had
+ * (src/core/vol_write.c:1131) and the  commit (vol_write_commit_impl) had
  * no such leg. On  a decomposed container keeps its payload in sibling
  * INODES -- vol_create_tar_file calls vol_create_blob_file("%s!part%u"),
  * which on  lands as a real dirent -- so overwriting a swept a.tar left

@@ -400,7 +400,7 @@ typedef struct {
  * the dirent tree via vol_walk. Files land under their path; directories
  * additionally land under "path/" so meta_for_path's anchor lookup (shared
  * with the v2 path) finds them. pos is unused after the build. */
-/* File-table builder ctx (was v3_bft_ctx; renamed: bft_ctx was taken
+/* File-table builder ctx (renamed from bft_ctx: that name was taken
  * by the WP49 pass-1 collector above -- distinct structs, distinct jobs. */
 typedef struct { fs_entry *v; int n, cap; } ftable_ctx;
 

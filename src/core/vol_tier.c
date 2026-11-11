@@ -212,7 +212,7 @@ uint64_t vol_rawm_count(invfs_volume *v, uint64_t *blocks_out)
  * index key (the raw-zone pba for rawm, the canonical dev1 pba for tier),
  * block_id = the WAL ordinal, length = the copy's extent in bytes, pba =
  * the copy's address. */
-static int wp25_owner_write_v3(invfs_volume *v, uint64_t *owner_slot,
+static int wp25_owner_write_impl(invfs_volume *v, uint64_t *owner_slot,
                                const char *name, const wp25_ent *ents, size_t n)
 {
     invfs_ast_block_entry *ae = NULL;
@@ -271,13 +271,13 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
      * appended [INOD][DELT] into the inode area and re-keyed the owner's
      * L2P mappings. */
     (void)ext_slot;
-    return wp25_owner_write_v3(v, owner_slot, name, ents, n);
+    return wp25_owner_write_impl(v, owner_slot, name, ents, n);
 }
 
 
 /* WP98: the metadata store index load. The owner is a hidden file (vol_find
  * resolves a 0x01 name through the  dirent tree, like the tz registry's
- * "\x01tzb"), its content is the recipe blob wp25_owner_write_v3
+ * "\x01tzb"), its content is the recipe blob wp25_owner_write_impl
  * published, and each copy's pba and extent ride in its AST entries --
  * so there is no second mapping structure to consult, which is why this
  * is a re-expression of the v2 loader rather than a port of it.
@@ -287,7 +287,7 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
  * anything has validated the blob against the bitmap, and a bogus entry
  * would send a read to a wrong address. Skipping costs redundancy (the
  * read falls back to canonical), never correctness. */
-static void wp25_index_load_v3(invfs_volume *v, uint64_t *owner_slot,
+static void wp25_index_load_impl(invfs_volume *v, uint64_t *owner_slot,
                                const char *name, wp25_ent **tp, size_t *np,
                                size_t *cp, int is_rawm)
 {
@@ -348,8 +348,8 @@ static void wp25_index_load_one(invfs_volume *v, uint64_t owner,
     /* the  loader resolves the owner by name itself rather than
      * trusting the caller's id: vol_find answers a 0x01 name through
      * the  dirent tree on both a full and a degraded open, and this
-     * is the same lookup the tz_v3 registry does (vol_textzone.c). */
-    wp25_index_load_v3(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
+     * is the same lookup the textzone registry does (vol_textzone.c). */
+    wp25_index_load_impl(v, is_rawm ? &v->rawm_owner : &v->tier_owner,
                        is_rawm ? "\x01rawm" : "\x01tier0",
                        tp, np, cp, is_rawm);
     return;
@@ -400,7 +400,7 @@ int wp25_owner_sync(invfs_volume *v)
  * flush's wp25_owner_sync rewrites with the live entries. WP98: on  the
  * owner is born with its (empty) index blob rather than as an empty node,
  * because vol_create_blob_file is the  create-with-content path; the
- * first flush's wp25_owner_write_v3 republishes it with the live entries. */
+ * first flush's wp25_owner_write_impl republishes it with the live entries. */
 static uint64_t wp25_owner_id(invfs_volume *v, int is_rawm)
 {
     uint64_t *slot = is_rawm ? &v->rawm_owner : &v->tier_owner;

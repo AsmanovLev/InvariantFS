@@ -687,7 +687,7 @@ static uint32_t wsession_filled(const invfs_wsession *s)
  * entries are copied into s->ents and aliased (their pbas stay owned by the
  * old recipe until commit, which frees the dropped ones). A missing/empty
  * recipe is an empty old file. */
-static int wsession_load_old_v3(invfs_wsession *s)
+static int wsession_load_old_impl(invfs_wsession *s)
 {
     static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN];
     invfs_inode in;
@@ -800,7 +800,7 @@ static int wsession_load_old(invfs_wsession *s)
     /* WP-M8: a  file's previous content lives in an immutable recipe
      * blob, not a record. Load it into the session's entry table so
      * ranged writes/truncate alias and re-encode the way they always did. */
-    return wsession_load_old_v3(s);
+    return wsession_load_old_impl(s);
 }
 
 
@@ -1043,7 +1043,7 @@ int vol_write_read(invfs_wsession *ws, uint64_t offset,
  * gets the new address + size (same inode id, so the dirent is untouched).
  * Data segments already landed through the normal write path. No delta,
  * no v2 record: the base tree is the authority. */
-static int vol_write_commit_v3(invfs_wsession *s)
+static int vol_write_commit_impl(invfs_wsession *s)
 {
     invfs_volume *v = s->v;
     uint8_t *blob = NULL;
@@ -1204,7 +1204,7 @@ static int vol_write_commit_v3(invfs_wsession *s)
 
     /* Retire the superseded content's "name!..." siblings -- the leg the v2
      * commit has always had (vol_write_commit:1131, gated on the same
-     * ast_owns_siblings answer the  loader now takes at wsession_load_old_v3).
+     * ast_owns_siblings answer the  loader now takes at wsession_load_old_impl).
      *
      * A decomposed container keeps its payload in sibling INODES on  too
      * (vol_create_tar_file -> vol_create_blob_file("%s!part%u")), so without
@@ -1250,7 +1250,7 @@ int vol_write_commit(invfs_wsession *ws)
      * The guard is a precondition on the session, not a format choice: vol_open
      * refuses a non- volume, so this only fires on a malformed session. */
     if (v && (v->sb.vol_flags & VOLF_META))
-        return vol_write_commit_v3(s);
+        return vol_write_commit_impl(s);
     return -1;
 }
 
@@ -1394,7 +1394,7 @@ uint64_t vol_write_bulk(invfs_volume *v, const char *name,
      * write, so it is reported rather than collapsed, and the id this call
      * already established is returned. `nid` is that id in both branches: on
      * the present path it is the row the commit updated in place
-     * (vol_write_commit_v3, s->have_old), and on the create path it is the
+     * (vol_write_commit_impl, s->have_old), and on the create path it is the
      * row vol_create_node installed, which vol_write_begin then resolved
      * and the commit updated. */
     {

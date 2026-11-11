@@ -22,7 +22,7 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
  * the right size. Batch deferral is once again unconditional; only the
  * PPMd decode-memory policy keeps a file on the generic floor. */
 
-static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
+static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
                             const char *name,
                             invfs_sweep_file_progress_fn progress,
                             void *progress_user);
@@ -149,13 +149,13 @@ typedef struct {
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 {
     /* WP-M23:  volumes route directly to the id-keyed  sweep.
-     * vol_sweep_one_v3 returns: 1 = swept, 0 = skipped/noop, -1 = err.
+     * vol_sweep_one_impl returns: 1 = swept, 0 = skipped/noop, -1 = err.
      * Returns: 0 = swept, 1 = skipped/noop, -1 = err. */
     int rc;
     if (!v || !inode_id) return -1;
     if (vol_write_active_id(v, inode_id))
         return 1;   /* skipped -- active write session */
-    rc = vol_sweep_one_v3(v, inode_id, NULL, NULL, NULL);
+    rc = vol_sweep_one_impl(v, inode_id, NULL, NULL, NULL);
     if (rc > 0) return 0;
     if (rc == 0) return 1;
     return -1;
@@ -1214,7 +1214,7 @@ static void *sweep_thread_worker(void *arg_) {
     return NULL;
 }
 
-static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
+static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
                             const char *name,
                             invfs_sweep_file_progress_fn progress,
                             void *progress_user)
@@ -1943,7 +1943,7 @@ int vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
             live = n;
         }
     }
-    return vol_sweep_one_v3(v, live, name, progress, progress_user);
+    return vol_sweep_one_impl(v, live, name, progress, progress_user);
 }
 
 int vol_sweep_one(invfs_volume *v, uint64_t inode_id, const char *name)
