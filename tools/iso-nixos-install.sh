@@ -18,7 +18,7 @@ ISO_VER="24.11.719113.50ab793786d9"
 ISO_URL="https://releases.nixos.org/nixos/24.11/nixos-$ISO_VER/nixos-minimal-$ISO_VER-x86_64-linux.iso"
 ISO_SHA256="acdcf8239f64e5acd20cf49c63f83e4c1b823b31d9f669033b48876b29b52177  nixos-minimal-$ISO_VER-x86_64-linux.iso"
 PORT="${INVFS_ISO_PORT:-8004}"
-MEM="${INVFS_ISO_MEM:-4G}"
+MEM="${INVFS_ISO_MEM:-8G}"
 TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-120}"
 ACCEL="${INVFS_ACCEL:-auto}"
 

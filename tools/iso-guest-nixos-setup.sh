@@ -153,6 +153,19 @@ mount -o remount,exec,dev,suid /mnt 2>/dev/null || true
 mkdir -p /mnt/boot
 mount "$P1" /mnt/boot || exit 1
 
+# Protect invf-fuse from OOM-killer
+for p in $(pgrep -f nvf-fuse); do
+    echo -1000 > /proc/$p/oom_score_adj 2>/dev/null || true
+done
+
+# Setup 2GB swapfile in live env to prevent OOM during closure copy
+if ! swapon --show 2>/dev/null | grep -q "/"; then
+    say "enabling 2GB swapfile in live env..."
+    dd if=/dev/zero of=/tmp/swapfile bs=1M count=2048 status=none 2>/dev/null || true
+    chmod 600 /tmp/swapfile 2>/dev/null || true
+    mkswap /tmp/swapfile >/dev/null 2>&1 && swapon /tmp/swapfile 2>/dev/null || true
+fi
+
 # ---- phase 4: generate NixOS config & install ----
 say "generating nixos-generate-config..."
 if command -v nixos-generate-config >/dev/null 2>&1; then
@@ -368,6 +381,8 @@ invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 inv
 # ---- phase 5: clean unmount & validation ----
 say "unmounting guest filesystems..."
 sync
+swapoff /tmp/swapfile 2>/dev/null || true
+rm -f /tmp/swapfile 2>/dev/null || true
 umount /mnt/tmp 2>/dev/null || true
 umount /mnt/var/tmp 2>/dev/null || true
 umount /mnt/boot 2>/dev/null || true
