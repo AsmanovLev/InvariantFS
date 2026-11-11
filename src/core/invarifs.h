@@ -33,21 +33,32 @@
    If it ever moves, it moves in format v2 with a compatibility path. */
 #define INVFS_MAGIC       "InvariFS\0"   /* 8 bytes */
 #define INVFS_BLOCK_SIZE  4096
-/* Wire version of the AST block entry (WP27: entries carry the physical
- * block address, 24B -> 32B) and of the INO2 metadata extension. This
- * number is NOT the volume format: the format marker is VOLF_META in
- * sb.vol_flags, and vol_open refuses every volume without it. */
-#define INVFS_VERSION     2
-/* Format generation label: this tree writes generation 0 (no stable
- * release exists yet, so the count starts here). This is the number
- * user-facing messages print ("format v0"). It is deliberately NOT the
- * same thing as either of the other two numbers, and confusing them has
- * caused real bugs, so:
- *   - INVFS_VERSION above is the WIRE version of AST/INO2 entries.
- *   - sb.format_version below is the on-disk compatibility encoding
- *     (0 = legacy read-only volume, 1 = current Meta layout); its 0 does
- *     NOT mean "generation 0". Do not renumber it. */
-#define INVFS_FORMAT_VERSION 0
+/* ---- The format markers: one question, one answer -------------------
+ *
+ * There is exactly ONE marker per question about "what format is this".
+ * Four numbers used to live here; two of them (INVFS_VERSION, VOLF_ASTV2)
+ * answered the same question twice and a third (VOLF_META2) answered nothing
+ * at all, so "INVFS_VERSION=2", "format_version=0" and "MET0" were each read
+ * as "the version" by someone, and they drew three different conclusions.
+ *
+ *   question                                marker                    role
+ *   is this a metadata store volume?           sb.vol_flags & VOLF_META  gate
+ *   which generation of the layout?         sb.format_version         gate
+ *   which revision of THIS descriptor?      <descriptor>.version      per desc
+ *   which build am I talking to?            INVFS_VERSION_STRING      message
+ *
+ * Nothing else is a version. In particular the AST/INO2 wire layout is not
+ * labelled anywhere, because there is only one: invfs_ast_entry is 32 bytes
+ * and carries the segment pba (WP27). That definition is the source of
+ * truth -- the counter that used to sit next to it was read by no code path.
+ *
+ * Generation: this tree writes generation 1. Generation 0 is retired -- it
+ * means "written before the layout was numbered" and vol_open refuses it by
+ * number, loudly, with the image untouched. Renumbering is a format decision
+ * with its own WP; it must never happen silently. The pre-flip images once
+ * stamped 3 (byte-wise readable, renumbered out from under themselves) are
+ * the reason the rule exists. */
+#define INVFS_FORMAT_VERSION 1
 /* Reserved gap in the metadata zone, between the metadata extent mapper and
  * the record area: 32 MiB, never read and never written by this build. The
  * record area's block number is DERIVED from it (volume.c, vol_open), so the
@@ -132,7 +143,7 @@
 /* Storage-class flag (WP10): persisted as internal xattr "invfs.class" in the
  * INO2 ext block, value = invfs_class_tlv. Records WHY a file is stored the
  * way it is so sweep can skip/retry without re-deriving from content.
- * On Meta-v3 it lives in the named-xattr tree; the v2 INO2 ext blob that
+ * On metadata store it lives in the named-xattr tree; the v2 INO2 ext blob that
  * also carried it is retired. */
 #define INVFS_XATTR_CLASS "invfs.class"
 
@@ -224,21 +235,21 @@ typedef struct {
 
 /* volume flags (sb.vol_flags) */
 #define VOLF_READONLY 0x00000001
-#define VOLF_META2    0x00000002  /* records may carry "INO2" metadata ext */
-/* WP27: format v2 -- AST entries are 32B and carry the segment pba (the
- * L2P journal is the owner-scoped WAL only). Set by mkfs from format v2 on
- * and by invf-convert on a converted v1 volume; a v2 reader refuses a
- * volume without it (no dual readers -- invf-migrate-v2 is the bridge).
- * Old binaries ignore the bit (it sits outside the superblock checksum)
- * and read the volume as-is, which fails loudly at the first 32B entry. */
-#define VOLF_ASTV2    0x00000008
-/* WP-M1: format v3 (metadata-v3 programme, design-meta-v3.md). A v3 volume
+/* RETIRED: 0x00000002 (was VOLF_META2, "records may carry the INO2 metadata
+ * ext") and 0x00000008 (was VOLF_ASTV2, "AST entries are 32B and carry the
+ * segment pba"). Nothing writes them and nothing reads them: the INO2 ext
+ * and the 32B AST entry are the only layouts this build knows, so both bits
+ * encoded a choice that no longer exists. Volumes written before the
+ * retirement still carry them SET, which is harmless precisely because no
+ * code tests them -- and that is why the values must not be reused for
+ * anything new: such an image would read as if it had the new meaning. */
+/* WP-M1: format  (metadata store programme, design-meta-.md). A  volume
  * replaces the v2 append-only inode records + owner WAL with a two-tier
  * metadata store (immutable B+-tree base + append-only delta). VOLF_META is
- * the authoritative format marker: vol_open checks it BEFORE the VOLF_ASTV2
- * reader gate, because a v3 volume carries no v2 record stream. Lives
- * outside the superblock checksum, like every other policy flag. The v3
- * on-disk skeleton is the RT30 root-area descriptor (block 0, 0x9D0). */
+ * the authoritative format marker -- the ONE gate, checked before anything
+ * else about the image is read. Lives outside the superblock checksum, like
+ * every other policy flag. The  on-disk skeleton is the RT30 root-area
+ * descriptor (block 0, 0x9D0). */
 #define VOLF_META       0x00000010
 /* WP22a/H5: WHY the volume is read-only. alloc_blocks raises VOLF_READONLY
  * together with VOLF_RO_SPACE when the free count hits hard_min (the space
@@ -354,14 +365,14 @@ typedef struct {
 #pragma pack(pop)
 
 /* 0x220..0x258 of block 0 is RESERVED and stays reserved-zero: it held the
- * WP21 sweep-checkpoint descriptor, which format v3 retired with the inode
+ * WP21 sweep-checkpoint descriptor, which format  retired with the inode
  * area it described (the record area no longer carries the absolute
  * append-pointer tombstones a checkpoint could protect). Nothing in this
- * build writes there and nothing reads it; v3's rollback window is the SPT0
+ * build writes there and nothing reads it; 's rollback window is the SPT0
  * save point at 0xA00. The bytes are not renumbered -- see the layout notes
  * below, which still account for the span. */
 
-/* WP-M21: CMP0/CMPS gone. The v3 inode area is a sequence of dynamic
+/* WP-M21: CMP0/CMPS gone. The  inode area is a sequence of dynamic
  * metadata extents in the mapper; no in-place compaction machinery exists.
  * The reserved span 0x220..0x258 and 0x260..0x290 both stay reserved-zero;
  * the next descriptor after them is DEVT (0x2A0). */
@@ -505,6 +516,8 @@ typedef struct {
  *   0x3C0  u32 crc32c           over the descriptor with this field 0
  * 36 bytes total; the rest of block 0 stays reserved-zero. */
 #define INVFS_MET0_OFF 0x3A0
+#define INVFS_MET0_MAGIC   "MET0"   /* 4 bytes at 0x3A0 */
+#define INVFS_MET0_VERSION 1u       /* 0x3A4; bumped only with a layout change */
 #pragma pack(push, 1)
 typedef struct {
     char     magic[4];          /* 0x3A0 "MET0" */
@@ -571,19 +584,19 @@ typedef struct {
 } invfs_pck0;                   /* ~1548 bytes; ends well within block 0 */
 #pragma pack(pop)
 
-/* ---- WP-M1: RT30 v3 root-area descriptor (block 0 reserved area) ----
+/* ---- WP-M1: RT30  root-area descriptor (block 0 reserved area) ----
  * Lives at byte offset 0x9D0 of block 0 -- the first FREE 16-byte-aligned
  * offset after the existing descriptors. Used ranges (read from this
  * header, not invented): superblock 0x00..0x90, RDP0 0x100..0x118,
  * RSZ0 0x140..0x20C, the reserved spans 0x220..0x258 and 0x260..0x290,
  * DEVT 0x2A0..0x35C, CVT0 0x360..0x39C, MET0 0x3A0..0x3C4, and PCK0
  * 0x3C4..0x9D0. PCK0 is a fixed-size struct (63 codec refs max), so it
- * always ends at exactly 0x9D0, which is 16-byte aligned; a pre-v3 image
+ * always ends at exactly 0x9D0, which is 16-byte aligned; a pre-metadata-store image
  * carries zeros there, which read as "absent" (magic mismatch) -- the
  * RDP0 convention. The descriptor is 48 bytes and ends at 0xA00, still
  * well inside block 0.
  *
- * The descriptor anchors the metadata-v3 base root (double-slot A/B) and
+ * The descriptor anchors the metadata store base root (double-slot A/B) and
  * the active delta segment. `seq` is the root generation and the atomicity
  * anchor: on recovery the highest CRC-valid seq wins (the l2p_replay
  * idiom). mkfs writes seq=0 with empty root slots and no delta; the
@@ -612,7 +625,7 @@ typedef struct {
 } invfs_rt;                   /* 0x9D0 + 48 -> ends 0xA00 */
 #pragma pack(pop)
 
-/* ---- WP-M16: SPT0 v3 save-point descriptor (block 0 reserved area) ----
+/* ---- WP-M16: SPT0  save-point descriptor (block 0 reserved area) ----
  * Lives at byte offset 0xA00 of block 0, past the superblock (0x00..0x90),
  * RDP0 (0x100), RSZ0 (0x140), the reserved spans 0x220 and 0x260, DEVT
  * (0x2A0), CVT0 (0x360), MET0 (0x3A0), PCK0 (0x3C4..0x9CC) and RT30 (0x9D0..0xA00).
@@ -650,7 +663,7 @@ typedef struct {
 } invfs_spt0;                   /* 0xA00 + 32 -> ends 0xA20 */
 #pragma pack(pop)
 
-/* ---- WP96: SPN0 v3 save-point DATA pin (block 0 reserved area) --------
+/* ---- WP96: SPN0  save-point DATA pin (block 0 reserved area) --------
  * Lives at byte offset 0xA20 of block 0, immediately past SPT0 (0xA00..0xA20).
  * Volumes written before WP96 carry zeros there, which read as "absent".
  *
@@ -659,7 +672,7 @@ typedef struct {
  * the pinned state naming blocks whose content now belongs to somebody else:
  * invf-rollback returns 0, invf-fsck says OK, and the first read of the
  * restored file fails with "segment CRC mismatch" (impl_docs/AUDIT.md, P0).
- * This descriptor is the only v3 data pin: while a save point is armed,
+ * This descriptor is the only  data pin: while a save point is armed,
  * vol_free_blocks frees nothing. (WP21's v2 answer was a coarse sweep
  * checkpoint plus a "\x01reten" registry; both went with the v2 metadata
  * machinery.) `pba` names a run of `blocks` blocks
@@ -713,7 +726,7 @@ typedef struct {
  * the whole header were the two recipe-entry stride asserts further down.
  * That means growing a field here was a SILENT overlap into the next slot --
  * and the slots are load-bearing in the order they sit, because RT30 is the
- * base-tree root, SPN0 is the only v3 savepoint, and an overlap shows up as
+ * base-tree root, SPN0 is the only  savepoint, and an overlap shows up as
  * a savepoint that will not verify, i.e. a volume that cannot be rolled back.
  *
  * Each assertion states the invariant in its message so a failure reads as a
@@ -722,6 +735,11 @@ typedef struct {
  * no two slots may overlap. The runtime half (the bytes on a real volume)
  * is tools/test-block0-layout.c; an assertion grid cannot see a WRITE that
  * lands on a neighbour, only a layout that stopped fitting. */
+_Static_assert(sizeof(invfs_met0) == 36,
+               "MET0 is 36 bytes: 0x3A0..0x3C4, and PCK0 starts at 0x3C4");
+_Static_assert(INVFS_MET0_OFF + sizeof(invfs_met0) <= INVFS_PCK0_OFF,
+               "MET0 must end at or before PCK0 (0x3C4): the codec-policy "
+               "table follows it with no slack between them");
 _Static_assert(INVFS_RT_OFF == 0x9D0,
                "RT30 must stay at 0x9D0 (block 0 reserved area)");
 _Static_assert(sizeof(invfs_rt) == 48,
@@ -809,7 +827,7 @@ typedef struct {
 } invfs_anc0;                   /* 124 bytes at offset 0 of the tail block */
 #pragma pack(pop)
 
-/* ---- WP-M1: v3 base-page + block-pointer wire format (design §12) ----
+/* ---- WP-M1:  base-page + block-pointer wire format (design §12) ----
  * Frozen here so WP-M2 (page format + allocator) and WP-M3 (delta/fold)
  * share one definition instead of each inventing its own. A base page is a
  * fixed page_size blob:
@@ -840,7 +858,7 @@ typedef struct {
 } invfs_blkptr;                 /* 24 bytes */
 #pragma pack(pop)
 
-/* ---- WP-M10: v3 delta-log wire format (design §4/§12, decision D1) ----
+/* ---- WP-M10:  delta-log wire format (design §4/§12, decision D1) ----
  * The recent tier is an append-only, coalescing log of namespace mutations
  * (create/unlink/rename/attr/xattr). Records are written back-to-back after
  * a per-segment header; segments chain oldest <- newest through prev_pba and
@@ -974,7 +992,7 @@ typedef struct {
     uint64_t pba;                   /* physical block address (WP27) */
 } invfs_ast_block_entry;            /* 32 bytes */
 
-/* WP639 — recipe entry v3 (40 bytes, on-disk). The 32-bit entry word is
+/* WP639 — recipe entry  (40 bytes, on-disk). The 32-bit entry word is
  * full (zone:2 + algo:6 + block_id:24), with no free bits to steal, so a
  * wider entry is a new stride, not a wider bitfield. Packing math (kept):
  * 40 % 8 == 0, so every u64 field stays 8-byte aligned with no pragma and
@@ -985,7 +1003,7 @@ typedef struct {
  * recipe-size wall binds orders of magnitude before the count wall).
  *
  * The on-disk image is assembled ARITHMETICALLY (shifts/masks in the
- * pack helper below), never by memcping this struct — so the v3 image
+ * pack helper below), never by memcping this struct — so the  image
  * does not depend on toolchain bitfield layout, unlike the v1/v2 memcpy
  * discipline it replaces. The in-memory struct keeps its bitfield shape
  * for debugger/lane convenience, but nothing serializes it directly.
@@ -1018,7 +1036,7 @@ typedef struct {
 _Static_assert(sizeof(invfs_ast_block_entry) == 32,
                 "v1/v2 recipe entry stride moved");
 _Static_assert(sizeof(invfs_ast_block_entry_v3) == 40,
-                "v3 recipe entry stride moved");
+                " recipe entry stride moved");
 
 /* ADR-010 amendment 2 -- the window table.
  *
@@ -1179,11 +1197,11 @@ typedef struct {
 #define INVFS_AST_VERSION_V3  3u
 #define INVFS_AST_HDR_V1_LEN  16u
 #define INVFS_AST_HDR_V2_LEN  24u
-#define INVFS_AST_HDR_V3_LEN  24u
+#define INVFS_AST_HDR_LEN  24u
 
 /* Entry stride by recipe version. v1/v2 headers both lead 32 B entries
  * (the 24 B v1 entry lives only in retired v2 volumes, via invf-convert);
- * v3 headers lead 40 B entries. 0 = unknown version (refuse). */
+ *  headers lead 40 B entries. 0 = unknown version (refuse). */
 static inline size_t invfs_ast_entry_stride(uint32_t version)
 {
     if (version == INVFS_AST_VERSION_V1 ||
@@ -1256,7 +1274,7 @@ static inline int invfs_ast_hdr_parse(const void *buf, size_t avail,
     if (ver == INVFS_AST_VERSION_V3) {
         uint64_t fs;
         uint32_t nb, nc, ck;
-        if (avail < INVFS_AST_HDR_V3_LEN) return -1;
+        if (avail < INVFS_AST_HDR_LEN) return -1;
         memcpy(&fs, p + 4, 8);
         memcpy(&nb, p + 12, 4);
         memcpy(&nc, p + 16, 4);
@@ -1266,7 +1284,7 @@ static inline int invfs_ast_hdr_parse(const void *buf, size_t avail,
         out->num_blocks   = nb;
         out->num_children = nc;
         out->checksum     = ck;
-        out->hdr_len      = INVFS_AST_HDR_V3_LEN;
+        out->hdr_len      = INVFS_AST_HDR_LEN;
         /* WP639: same count caps as v2 for now (fail closed). Wider
          * counts arrive with the stream-cap raise, never before it. */
         if (out->file_size > MAX_FILE_SIZE ||
@@ -1311,9 +1329,9 @@ static inline size_t invfs_ast_hdr_write(void *buf, uint64_t file_size,
     }
 }
 
-/* AST recipe header, v3 (24 bytes, same length as v2). Same field widths
- * as v2; only the version differs — the ENTRY stride is what v3 changes
- * (40 B, see invfs_ast_block_entry_v3). Written only by the v3 serialize
+/* AST recipe header,  (24 bytes, same length as v2). Same field widths
+ * as v2; only the version differs — the ENTRY stride is what  changes
+ * (40 B, see invfs_ast_block_entry_v3). Written only by the  serialize
  * path (WP639: force-knob until a producer needs wide fields); readers
  * branch on version via invfs_ast_entry_stride. Values past the format
  * caps return 0 (refuse, never fold). */
@@ -1323,9 +1341,9 @@ typedef struct {
     uint32_t num_blocks;
     uint32_t num_children;
     uint32_t checksum;              /* reserved: 0 (same rule as v1/v2) */
-} invfs_ast_recipe_header_v3;       /* 24 bytes */
+} invfs_ast_recipe_header;       /* 24 bytes */
 
-/* Serialize a v3 header. buf must hold INVFS_AST_HDR_V3_LEN bytes. */
+/* Serialize a  header. buf must hold INVFS_AST_HDR_LEN bytes. */
 static inline size_t invfs_ast_hdr_write_v3(void *buf, uint64_t file_size,
                                             uint32_t num_blocks,
                                             uint32_t num_children)
@@ -1333,14 +1351,14 @@ static inline size_t invfs_ast_hdr_write_v3(void *buf, uint64_t file_size,
     if (file_size > MAX_FILE_SIZE || num_blocks > MAX_SEGMENTS_V2)
         return 0;
     {
-        invfs_ast_recipe_header_v3 h;
+        invfs_ast_recipe_header h;
         memset(&h, 0, sizeof h);
         h.version      = INVFS_AST_VERSION_V3;
         h.file_size    = file_size;
         h.num_blocks   = num_blocks;
         h.num_children = num_children;
         memcpy(buf, &h, sizeof h);
-        return INVFS_AST_HDR_V3_LEN;
+        return INVFS_AST_HDR_LEN;
     }
 }
 
@@ -1382,12 +1400,12 @@ typedef struct invfs_inode_rec {
     uint64_t file_size;
     uint64_t ctime;
     uint32_t name_len;     /* 0..INVFS_MAX_NAME (255) */
-    char     name[];       /* WP58a v3: name_len bytes, NUL at name[name_len] */
+    char     name[];       /* WP58a : name_len bytes, NUL at name[name_len] */
     /* followed by: recipe header (v1 16B / v2 24B) + entries[] [+ children] */
 } invfs_inode_rec;
 #pragma pack(pop)
 
-/* WP58a v3: the record is a 36-byte fixed prefix + a variable-length name
+/* WP58a : the record is a 36-byte fixed prefix + a variable-length name
  * (flexible array member, raw bytes, NUL-terminated at name[name_len]) + the
  * body (recipe header / entries / children / INO2). The body begins at
  * invfs_rec_body(rec); sizeof(invfs_inode_rec) is only the prefix, never the
@@ -1434,8 +1452,8 @@ typedef struct invfs_meta_ext_hdr {
 } invfs_meta_ext_hdr;    /* 48 bytes */
 #pragma pack(pop)
 
-/* ---- WP-M5: metadata-v3 inode row (base B+-tree value) ----------------
- * The v3 stable tier keeps one row per inode in the base B+-tree, keyed by
+/* ---- WP-M5: metadata store inode row (base B+-tree value) ----------------
+ * The  stable tier keeps one row per inode in the base B+-tree, keyed by
  * inode_id. WP-M5 freezes the key as u64 big-endian (byte-lexicographic
  * order == numeric order; see vol_btree.c); WP-M6's dirent keys are a
  * separate namespace and never collide with it.
@@ -1515,7 +1533,7 @@ typedef struct {
 /* WP-M7: xattr key prefix. Named xattrs live in the base B+-tree under a
  * third key namespace, keyed by
  *     0x03 || inode_id:u64 BE || name_len:u16 BE || name
- * (design-meta-v3.md §12/§15.2; key frozen by the WP-M7 doc). The 0x03 first
+ * (design-meta-.md §12/§15.2; key frozen by the WP-M7 doc). The 0x03 first
  * byte keeps xattr keys disjoint from and after WP-M5's 8-byte inode keys and
  * WP-M6's `parent:u64 BE || name_len || name` dirent keys, whose first byte is
  * the (small) high byte of an inode id. The value is the raw xattr value
@@ -1662,7 +1680,7 @@ static inline uint32_t pck0_crc(const invfs_pck0 *p)
     return invfs_crc32c(&t, sizeof t);
 }
 
-/* WP639 — v3 entry pack/unpack/verify. The image is assembled
+/* WP639 —  entry pack/unpack/verify. The image is assembled
  * arithmetically (shifts/masks + memcpy of LE scalars), so the on-disk
  * bytes do not depend on toolchain bitfield layout. CRC32C covers the
  * 40-byte image with the crc field read as zero (RDP0 rule).
@@ -1670,7 +1688,7 @@ static inline uint32_t pck0_crc(const invfs_pck0 *p)
  * Field offsets: [0:8] file_offset, [8:16] length, [16:24] flags
  * (zone:6 | algo:10<<6 | block_id:32<<16, rsv MUST be 0),
  * [24:28] block_offset, [28:32] crc32c, [32:40] pba. */
-static inline void invfs_ast_entry_v3_pack(uint8_t out[40],
+static inline void invfs_ast_entry_pack(uint8_t out[40],
                                            uint64_t file_offset,
                                            uint64_t length,
                                            uint64_t zone, uint64_t algo,
@@ -1692,10 +1710,10 @@ static inline void invfs_ast_entry_v3_pack(uint8_t out[40],
     memcpy(out + 28, &crc, 4);
 }
 
-/* Verify a v3 entry image in place. 0 = ok; -1 = CRC mismatch, nonzero
+/* Verify a  entry image in place. 0 = ok; -1 = CRC mismatch, nonzero
  * reserved bits, or truncation. Wide values are NOT range-checked here —
  * that is the unpack step's job (fail closed at representation). */
-static inline int invfs_ast_entry_v3_verify(const uint8_t *img, size_t avail)
+static inline int invfs_ast_entry_verify(const uint8_t *img, size_t avail)
 {
     uint64_t flags;
     uint32_t want, got;
@@ -1711,11 +1729,11 @@ static inline int invfs_ast_entry_v3_verify(const uint8_t *img, size_t avail)
     return 0;
 }
 
-/* Unpack a VERIFIED v3 entry into the 32 B in-memory shape. Values that do
+/* Unpack a VERIFIED  entry into the 32 B in-memory shape. Values that do
  * not fit the in-memory widths (zone > 3, algo > 63, block_id > 2^24-1)
  * are refused loudly — in-memory widening arrives with the stream-cap
  * raise, never before it. 0 = ok, -1 = unrepresentable (fail closed). */
-static inline int invfs_ast_entry_v3_unpack(const uint8_t *img,
+static inline int invfs_ast_entry_unpack(const uint8_t *img,
                                             invfs_ast_block_entry *out)
 {
     uint64_t file_offset, length, flags, pba;

@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-meta-recipe.sh — WP-M8 e2e: content-addressed recipe blobs + v3 read.
+# test-meta-recipe.sh — WP-M8 e2e: content-addressed recipe blobs +  read.
 #
 # A VOLF_META volume stores a file's AST recipe as an immutable,
 # content-addressed blob (key 0x04||BLAKE3-256(recipe)) referenced from the
@@ -69,12 +69,12 @@ cmp_offline() {
         || fail "$1: offline read differs from the source bytes"
 }
 
-echo "== WP-M8: content-addressed recipe blobs + verified v3 read path =="
+echo "== WP-M8: content-addressed recipe blobs + verified  read path =="
 
-# --- mkfs v3 -------------------------------------------------------------
+# --- mkfs  -------------------------------------------------------------
 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 
 # --- source files covering the AST shapes -------------------------------
@@ -98,7 +98,7 @@ echo "sources: $(for n in $NAMES; do printf '%s(%s) ' "$n" "$(stat -c %s "$SRC/$
 
 # --- write through FUSE and read back identical -------------------------
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 for n in $NAMES; do
     cp "$SRC/$n" "$MNT/$n" || fail "FUSE write of $n failed"

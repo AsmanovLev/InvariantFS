@@ -1,12 +1,12 @@
 #!/bin/bash
-# test-meta-inode.sh — WP-M5 e2e: the metadata-v3 inode tree.
+# test-meta-inode.sh — WP-M5 e2e: the metadata store inode tree.
 #
-# A v3 volume must be writable enough to create a regular file's inode and
+# A  volume must be writable enough to create a regular file's inode and
 # stat it, and that inode must survive unmount/remount. WP-M6 (dirents) is
-# not landed yet, so there is no name -> inode resolution on a v3 volume and
+# not landed yet, so there is no name -> inode resolution on a  volume and
 # this leg drives the inode tree by id with invf-vnode (the offline
 # counterpart of a FUSE create/stat). A real FUSE mount/unmount round-trip
-# is included to prove a populated v3 base tree still mounts cleanly.
+# is included to prove a populated  base tree still mounts cleanly.
 #
 # Run from the repo root after `make`:
 #   bash tools/run-e2e.sh tools/test-meta-inode.sh
@@ -70,12 +70,12 @@ get_absent() {
     fi
 }
 
-echo "== WP-M5: v3 inode tree (create -> stat -> remount) =="
+echo "== WP-M5:  inode tree (create -> stat -> remount) =="
 
-# --- mkfs v3 -------------------------------------------------------------
+# --- mkfs  -------------------------------------------------------------
 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 
 # --- create a regular file's inode and stat it ---------------------------
@@ -86,10 +86,10 @@ echo "created: inode 42 (REG 0640 uid=1000 gid=1000) stat ok"
 
 # --- FUSE round-trip: a populated base tree still mounts cleanly ---------
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
-LS=$(ls -A "$MNT") || { cat "$WORK/fuse.log"; fail "cannot list v3 mount"; }
-[ -z "$LS" ] || { echo "unexpected entries: $LS"; fail "v3 root not empty (no dirents yet)"; }
+LS=$(ls -A "$MNT") || { cat "$WORK/fuse.log"; fail "cannot list  mount"; }
+[ -z "$LS" ] || { echo "unexpected entries: $LS"; fail " root not empty (no dirents yet)"; }
 mnt_down
 get_ok "$IMG" 42 "type=0 mode=0640 uid=1000 gid=1000 nlink=1 size=0"
 echo "remount: inode 42 survived a FUSE mount/unmount round-trip"

@@ -6,7 +6,7 @@ This guide covers the primary command-line tools for formatting, inspecting, cop
 
 ## 1. Creating a Volume: `invf-mkfs`
 
-Creates a new InvariantFS volume formatted with Meta-v3 by default:
+Creates a new InvariantFS volume formatted with metadata store by default:
 
 ```bash
 # Create a 32 GiB volume
@@ -126,7 +126,7 @@ Rules: only `-y` repairs (and even it never passes
 `--discard-reachable`); `-a`/`-p`/`-n` and the bare default only check.
 Exit codes follow `fsck(8)`: 0 clean, 1 corrected (REPAIRED),
 4 uncorrected (DAMAGED), 8 operational error, 16 usage.
-`-L`/`-U` are refused: format v0 has a generated UUID and no label field.
+`-L`/`-U` are refused: format v1 has a generated UUID and no label field.
 `blkid` does not know the superblock magic yet, so fstab `UUID=` lookups
 do not resolve -- use device paths (the initramfs identifies volumes with
 `invf-fuse --probe-uuid`).

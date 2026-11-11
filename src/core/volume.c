@@ -13,7 +13,7 @@
  *   [bitmap_blocks+mapper .. +res):  reserved (unused on this format)
  *   [bitmap_blocks+reserved .. end): append-only record area
  *
- * The v3 namespace itself is NOT here: it is the RT30 double slot plus a
+ * The  namespace itself is NOT here: it is the RT30 double slot plus a
  * COW B+ tree base and an append-only Delta Log (vol_metabuf.c,
  * vol_delta.c, vol_btree.c, vol_fold.c). The record area above is the
  * metadata EXTENT pool the tree's base pages are allocated from.
@@ -378,11 +378,11 @@ uint32_t devt_crc(const invfs_devt *d)
  *
  * WP99: this wrote the WHOLE of block 0 back (read-modify-write of 4 KiB)
  * with only the 188 DEVT bytes patched. Block 0 is the one region every
- * v3 publisher rewrites: the RT30 root descriptor (0x9D0) is stored there
+ *  publisher rewrites: the RT30 root descriptor (0x9D0) is stored there
  * by mbuf_rt30_store / mbuf_root_publish, and the SPT0 save-point
  * descriptor (0xA00) likewise. A read-modify-write of the block is
  * therefore a lost-update against any of them, and the DEVT bump is about
- * to run on every Meta-v3 flush (WP99), which turns that race from a rare
+ * to run on every metadata store flush (WP99), which turns that race from a rare
  * interleaving into a per-flush one. The DEVT occupies 0x2A0..0x35C, which
  * overlaps neither the superblock (0x00..0x90) nor the RT30/SPT0
  * descriptors, so writing just the descriptor is equivalent for the DEVT
@@ -492,18 +492,18 @@ static int mirror_resync(invfs_volume *v)
  * fire, and a divergence detected some other way (a dev0 barrier failure,
  * which does bump the DEVT from inside vmux_barrier) was never repaired.
  * The failure was silent and it was data loss: rewinding dev0's block 0
- * rolls the RT30 root descriptor (0x9D0, inside block 0 on v3) back, the
+ * rolls the RT30 root descriptor (0x9D0, inside block 0 on ) back, the
  * stale generation is adopted as live, and the next publish drops every
  * delta record written past it -- on BOTH devices, because the mirror is
  * write-through -- while invf-fsck still walked the tree it could reach
  * and printed OK.
  *
- * The v3 caller runs this AFTER the barrier that made the published root
+ * The  caller runs this AFTER the barrier that made the published root
  * durable, so the DEVT bump certifies a generation both devices hold. It is
- * deliberately NOT accompanied by a bare vol_write_sb here: on v3 the
+ * deliberately NOT accompanied by a bare vol_write_sb here: on  the
  * superblock's live neighbour in block 0 is the RT30 root, which the
  * publish path already stores and barriers, and v->sb.state is the v2
- * crash-state machine, whose v3 activation is a separate question. The
+ * crash-state machine, whose  activation is a separate question. The
  * block-0 image that reaches the devices does get rewritten every flush
  * anyway, because the DEVT lives in it. */
 static int vol_commit_mirror(invfs_volume *v)
@@ -582,7 +582,7 @@ void vol_st_devt_commit(invfs_volume *v, const invfs_devt *dt)
  *   DEVT.sync_seq   the protocol's own sequence, bumped once per
  *                   two-device flush (vol_commit_mirror). It is blind on
  *                   any volume whose flushes never reached the bump --
- *                   which, before WP99, was EVERY Meta-v3 volume, because
+ *                   which, before WP99, was EVERY metadata store volume, because
  *                   vol_flush returned out of its VOLF_META branch above the
  *                   tail that holds the bump. The DEVT on such a volume
  *                   still carries its mkfs value forever, so a rewound (or
@@ -846,17 +846,14 @@ static int wp25_open_degraded(invfs_volume *v)
         invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) !=
             v->sb.checksum)
         goto bad;
-    /* The degraded leg is the same format gate as the primary one in
-     * vol_open, and says the same thing: the mirror's superblock decides
-     * the format, and this build reads v3 only. */
-    if (!(v->sb.vol_flags & VOLF_META)) {
-        fprintf(stderr, "vol_open: %s: this is not a format v%d volume: the "
-                "device 1 image reports %s (VOLF_META is not set). This build "
-                "reads format v%d only (INVFS_VERSION=%s).\n",
-                d1, INVFS_FORMAT_VERSION,
-                (v->sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_FORMAT_VERSION, INVFS_VERSION_STRING);
-        goto bad;
+    /* The degraded leg is the same format gate as the primary one: the
+     * mirror's superblock decides, through invfs_format_accept. */
+    {
+        char why[512];
+        if (invfs_format_accept(&v->sb, d1, why, sizeof why) < 0) {
+            fprintf(stderr, "vol_open: %s\n", why);
+            goto bad;
+        }
     }
     memcpy(&d2, blk + INVFS_DEVT_OFF, sizeof d2);
     if (memcmp(d2.magic, "DEVT", 4) != 0 || devt_crc(&d2) != d2.crc32c ||
@@ -900,25 +897,25 @@ bad:
 }
 
 
-/* WP-M1: log the RT30 v3 root-area descriptor the open settled on. This used
+/* WP-M1: log the RT30  root-area descriptor the open settled on. This used
  * to do its own read of block 0 and complain on failure; it now reports the
  * state mbuf_rt30_load() already resolved, because a volume that recovered
  * off the ANC0 tail anchor has a perfectly good descriptor and must not also
  * be told it is "presenting an empty namespace". A descriptor that really is
  * absent or torn is still a warning, not a refusal -- the RDP0 "absent"
- * convention, which keeps a v3 mkfs interrupted before the RT30 write
+ * convention, which keeps a  mkfs interrupted before the RT30 write
  * openable. */
 static void probe_rt30(invfs_volume *v)
 {
     const invfs_rt *rt = &v->rt;
 
     if (!v->rt_present) {
-        fprintf(stderr, "vol_open: %s: RT30 v3 root descriptor absent or "
+        fprintf(stderr, "vol_open: %s: RT30  root descriptor absent or "
                 "torn; presenting an empty namespace\n", v->path);
         return;
     }
     if (getenv("INVFS_DEBUG"))
-        fprintf(stderr, "vol_open: v3 root descriptor: page_size=%u "
+        fprintf(stderr, "vol_open:  root descriptor: page_size=%u "
                 "seq=%llu root_slot=%llu/%llu delta_pba=%llu%s\n",
                 (unsigned)rt->page_size,
                 (unsigned long long)rt->seq,
@@ -1031,7 +1028,6 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     char devbuf[64];
     const char *real;
     int rc;
-    int is_meta = 0;
     invfs_volume *v = (invfs_volume *)calloc(1, sizeof(invfs_volume));
     if (!v) { *err = -1; return NULL; }
     (void)pthread_rwlock_init(&v->meta_lock, NULL);
@@ -1112,48 +1108,20 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     if (invfs_crc32c(&v->sb, offsetof(invfs_superblock, checksum)) != v->sb.checksum)
         { *err = -5; goto fail; }
 
-    /* VOLF_META is the authoritative format marker, and it is the first thing
-     * checked. Every structure below this line is read through it.
-     *
-     * A volume without it is not readable by this build. Say so plainly, and
-     * say what the operator can do -- but do not write a migration advisory
-     * for a format that is not going to come back: there is no converter to
-     * name (invf-migrate-v2 went with the machinery it migrated, and no
-     * v1/v2 -> v3 path has ever existed in-tree; invf-mkfs has refused to
-     * CREATE such a volume since v0.5.0). The two facts that are worth the
-     * operator's time are the one they already half-know (this build reads
-     * v3 only) and the one they cannot guess (their image is untouched, so
-     * trying something else cannot hurt it). */
-    is_meta = (v->sb.vol_flags & VOLF_META) != 0;
-    if (!is_meta) {
-        const int is_v1 = !(v->sb.vol_flags & VOLF_ASTV2);
-        fprintf(stderr,
-                "vol_open: %s: this is not a format v%d volume: the image "
-                "reports %s (VOLF_META is not set). This build reads format v%d "
-                "only (INVFS_VERSION=%s) and carries no reader for any other "
-                "format.\n"
-                "  The image is untouched by this attempt. To get at the data, "
-                "create a new volume with invf-mkfs and re-import from a copy "
-                "of the source tree, or restore from a backup.\n",
-                real, INVFS_FORMAT_VERSION,
-                is_v1 ? "format v1" : "format v2", INVFS_FORMAT_VERSION,
-                INVFS_VERSION_STRING);
-        *err = -12;
-        goto fail;
-    }
-
-    /* Generation gate: only INVFS_FORMAT_VERSION opens. A volume stamped
-     * otherwise (including pre-flip images stamped 3, which are byte-wise
-     * readable but renumbered out from under themselves) is refused by
-     * number, loudly, with the image untouched -- same contract as the
-     * flag refusal above. */
-    if (v->sb.format_version != INVFS_FORMAT_VERSION) {
-        fprintf(stderr,
-                "vol_open: %s: format version %u refused; this build reads "
-                "format v%d only. The image is untouched by this attempt.\n",
-                real, v->sb.format_version, INVFS_FORMAT_VERSION);
-        *err = -13;
-        goto fail;
+    /* Format gate: VOLF_META (authoritative marker) then generation, decided
+     * once in invfs_format_accept. Every structure below this line is read
+     * through that gate. A refused volume is untouched: there is no converter
+     * (invf-migrate-v2 went with the machinery it migrated, and no v1/v2->
+     * path ever existed in-tree), so the honest advice is "re-import from a
+     * copy or restore from backup". */
+    {
+        char why[512];
+        int rc = invfs_format_accept(&v->sb, real, why, sizeof why);
+        if (rc < 0) {
+            fprintf(stderr, "vol_open: %s\n", why);
+            *err = rc;
+            goto fail;
+        }
     }
 
     /* WP25: the DEVT device table at 0x2A0 (block 0 reserved area, the
@@ -1231,16 +1199,17 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     /* WP30 Phase 3: load MET0 descriptor at 0x3A0.
      * Dynamic metadata extents are mandatory: every volume this build
      * opens carries VOLF_META, and every volume it writes stamps
-     * format_version 0 WITH a MET0. The old format_version-0-means-legacy
-     * fallback is gone with the legacy numbering itself -- there is no
-     * read-only past to fall back to, only the current layout or refusal
-     * (above). A missing/invalid MET0 below is corruption, not legacy. */
+     * format_version INVFS_FORMAT_VERSION (1) WITH a MET0. There is no
+     * "no descriptor" layout left to fall back to, only the current layout
+     * or refusal (above). A missing/invalid MET0 below is corruption, not
+     * generation 0. */
     {
         invfs_met0 m0;
         if (io_seek(&v->io, INVFS_MET0_OFF) == 0 &&
             io_read(&v->io, &m0, sizeof(m0)) == 0 &&
-            memcmp(m0.magic, "MET0", 4) == 0) {
-            if (meta_met0_crc(&m0) == m0.crc32c && m0.version == 1) {
+            memcmp(m0.magic, INVFS_MET0_MAGIC, 4) == 0) {
+            if (meta_met0_crc(&m0) == m0.crc32c &&
+                m0.version == INVFS_MET0_VERSION) {
                 v->met0 = m0;
                 v->met0_present = 1;
                 v->meta_active_extent = m0.active_extent;
@@ -1368,10 +1337,10 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         io_read(&v->io, v->bitmap, (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE) != 0)
         { *err = -7; goto fail; }
 
-    /* WP30 Phase 5: load metadata extent mapper table (v0.3.0+ only).
-     * For format_version=0 (read-only legacy) there is no MET0/mapper; the
-     * legacy contiguous inode area is read-only in v3 (vol_open refused
-     * writes via VOLF_READONLY). */
+    /* WP30 Phase 5: load metadata extent mapper table. Every volume this
+     * build opens carries a valid MET0 (Phase 3 refuses otherwise), so
+     * met0_present is always set here; the else branch below is defensive
+     * dead code, not a legacy path. */
     if (v->met0_present) {
         if (meta_mapper_load(v) != 0) { *err = -7; goto fail; }
         v->journal_start = v->sb.metadata_zone_start + v->bitmap_blocks +
@@ -1403,14 +1372,14 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         }
     }
 
-    /* WP-M1: bring up the metadata-v3 engine. The RT30 descriptor is
+    /* WP-M1: bring up the metadata store engine. The RT30 descriptor is
      * validated for the round-trip.
      *
-     * WP-M5: bring the metadata-v3 base-tree engine up. The root lives
+     * WP-M5: bring the metadata store base-tree engine up. The root lives
      * in RT30 and the allocator + dirty-bitmap flush are owned by
      * vol_metabuf/vol_btree; the inode API (vol_inode_*) writes the
      * base tree directly (no delta yet). The v2 write engine still does
-     * not apply to a v3 namespace, so refuse its mutations: keep
+     * not apply to a  namespace, so refuse its mutations: keep
      * needs_recovery = 1 (the engine-level backstop vol_write_enabled /
      * vol_mark_dirty consult). VOLF_READONLY is cleared *only* so the
      * shared metadata allocator (alloc_blocks) can hand out base pages;
@@ -1418,7 +1387,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * root, the superblock is never rewritten, so the on-disk READONLY
      * state is untouched. */
     /* WP-M21: idx_init retired (the in-memory name index is gone;
-     * v3 resolves names through the dirent btree). */
+     *  resolves names through the dirent btree). */
     /* ANC0 tail anchor, probed ONCE here and before anything reads
      * block 0's descriptors. The probe is what decides whether the tail
      * block is this volume's anchor at all: on a volume made before the
@@ -1427,7 +1396,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * that block is never written. A refusal (a valid anchor belonging
      * to some other geometry) leaves v->anchor_state as a refusal, which
      * is deliberately NOT the same answer as "absent" -- see
-     * vol_anchor.c. Only a v3 volume probes: a v2 volume has no RT30 or
+     * vol_anchor.c. Only a  volume probes: a v2 volume has no RT30 or
      * SPT0 to mirror and its tail is never touched. */
     t_after_sb = vol_now_sec();
     anchor_probe(v, NULL);
@@ -1441,9 +1410,9 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
     v->mb_boot_cursor = v->mb_boot_end;
     v->mbuf_ready = 1;
     v->needs_recovery = 1;
-    /* WP-M19: a degraded v3 mount (dev0 absent) serves only from the
+    /* WP-M19: a degraded  mount (dev0 absent) serves only from the
      * dev1 metadata mirror; keep it READ-ONLY, exactly like the v2
-     * degraded leg. A full two-device v3 mount needs the READONLY bit
+     * degraded leg. A full two-device  mount needs the READONLY bit
      * clear so the shared metadata allocator can hand out base pages. */
     if (v->st.degraded)
         v->sb.vol_flags |= VOLF_READONLY;
@@ -1777,7 +1746,7 @@ void vol_close(invfs_volume *v)
     {
         size_t unclaimed = vol_walk_reap(v);
         if (unclaimed)
-            fprintf(stderr, "vol_close: %zu v3 walk%s on this volume stopped "
+            fprintf(stderr, "vol_close: %zu  walk%s on this volume stopped "
                     "early and %s never accounted for the result. Anything "
                     "that acted on the output of those walks acted on a "
                     "partial listing.\n",
@@ -1799,7 +1768,7 @@ void vol_close(invfs_volume *v)
        dirtied the device (vol_mark_dirty refuses), so there is nothing to
        flush and the CLEAN mark is not this view's to write. */
     if (v->dirty) {
-        /* WP80/A: v3 sets needs_recovery unconditionally at open (the M5
+        /* WP80/A:  sets needs_recovery unconditionally at open (the M5
          * backstop), so it cannot distinguish a real this-session io error
          * there -- io_latched can. A latched volume must never write CLEAN:
          * its in-RAM state may sit past bytes that never reached the device. */
@@ -1954,7 +1923,7 @@ int vol_flush(invfs_volume *v)
      * flush of this process reports -1 without touching the image. It is
      * here, at the top of the function, so it fires for every caller --
      * the durability point at the end of a sweep, the seal tail, the
-     * in-FUSE worker's close -- and not only on the v3 branch below. */
+     * in-FUSE worker's close -- and not only on the  branch below. */
     if (v->flush_fail_at && --v->flush_fail_at == 0) {
         vol_io_error_latch(v, "flush (INVFS_FLUSH_FAIL_AT)");
         return -1;
@@ -1975,14 +1944,14 @@ int vol_flush(invfs_volume *v)
      * Structure-before-reference: make the bitmap durable before
      * returning, mirroring publish. */
     if (vol_bitmap_flush(v) != 0) {
-        vol_io_error_latch(v, "v3 bitmap flush");
+        vol_io_error_latch(v, " bitmap flush");
         return -1;
     }
     /* WP607: heal retained spans before this barrier flushes them raw
      * (close-flush after a doom, with no intervening drain, committed
      * failed mutations durably -- the leg5 r17 remount-ghost). */
     vol_delta_heal(v);
-    if (vmux_barrier(v, "v3 bitmap") < 0) {
+    if (vmux_barrier(v, " bitmap") < 0) {
         /* WP605/WP606: a refused flush barrier leaves staged delta bytes
          * (which this barrier would have covered) of unknown fate: doom
          * the staged set (failed mutations stay dead) and heal at the
@@ -2035,7 +2004,7 @@ int vol_sync(invfs_volume *v)
     /* WP24-lite: nothing of this handle's can be in flight (mutations are
      * refused), so the durability contract is already met without touching
      * the device. */
-    /* WP80/A: v3 is the default full format now, not the empty/read-only
+    /* WP80/A:  is the default full format now, not the empty/read-only
      * skeleton the WP-M1 comment described. Its pending state is the dirty
      * block bitmap, which vol_flush persists (WP75); staged delta records
      * are fenced by the drain below (WP602 group commit: appends stage
@@ -2048,10 +2017,10 @@ int vol_sync(invfs_volume *v)
     /* WP22c test hook (tools/test-flushfail.sh): the Nth vol_sync of the
      * process simulates the error window -- the un-barriered inode-area
      * tail dies in "writeback" (zeroed on the image) and the barrier
-     * reports EIO. WP80: the hook now runs on v3 too (the early return
-     * above used to hide it). v3 has no v2 inode area, so the zeroing is a
+     * reports EIO. WP80: the hook now runs on  too (the early return
+     * above used to hide it).  has no v2 inode area, so the zeroing is a
      * no-op there -- but the latch, the refused later mutations and the
-     * no-CLEAN close are exercised on v3, which is the failure path that
+     * no-CLEAN close are exercised on , which is the failure path that
      * matters now. */
     if (v->sync_fail_at && --v->sync_fail_at == 0) {
         if (v->inode_area_pos > v->inode_area_durable) {
@@ -2070,7 +2039,7 @@ int vol_sync(invfs_volume *v)
     }
 #endif
     /* WP602: fence the staged delta group before acknowledging the sync.
-     * The flush above usually already covered it (its "v3 bitmap" barrier
+     * The flush above usually already covered it (its " bitmap" barrier
      * fenced the whole handle, so the drain's barrier is skipped by the
      * blkio watermark at zero extra fsyncs); the drain is what makes the
      * ack exact -- vol_sync returning 0 means every staged record durable,
@@ -2644,7 +2613,7 @@ static void pba_ref_free(invfs_volume *v)
     v->pba_ref_stale = 0;
 }
 
-/* WP pba-ref-v3-incremental: a recipe was published by a path that does not
+/* WP pba-ref-incremental: a recipe was published by a path that does not
  * adjust the map itself (vol_inode_delta_put with a new recipe_addr).
  * The next pba_ref_ensure rebuilds from the live set before any free gate
  * can read a count that predates that publish. */
@@ -2797,7 +2766,7 @@ typedef struct { invfs_volume *v; } pba_ref_ensure_ctx;
 
 
 
-static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+static int pba_ref_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                               uint32_t type, uint64_t size, int64_t mtime)
 {
     pba_ref_ensure_ctx *c = (pba_ref_ensure_ctx *)ctx_;
@@ -2921,8 +2890,8 @@ static int pba_ref_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
 static int pba_ref_ensure_locked(invfs_volume *v)
 {
     pba_ref_ensure_ctx c;
-    /* WP pba-ref-v3-incremental: an existing map is only reused when nothing
-     * has published a recipe behind its back. v3 has no per-record birth /
+    /* WP pba-ref-incremental: an existing map is only reused when nothing
+     * has published a recipe behind its back.  has no per-record birth /
      * death hook (vol_inode_delta_put is the single choke point and it
      * used to be silent here), so a map built at vol_open over an EMPTY
      * volume stayed "on" and authoritative-looking for the rest of the
@@ -2945,7 +2914,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      *
      * Both halves of that are the fix. The walk is strict because a row it
      * cannot read is a live reference the map would not hold, and
-     * pba_ref_v3_walk_cb now aborts the walk when that happens (and when a
+     * pba_ref_walk_cb now aborts the walk when that happens (and when a
      * recipe blob will not load or parse, which is the same wrong free by a
      * different route). The status is checked because an unchecked walk
      * status is how the walk's answer was being thrown away: it returned 0
@@ -2973,7 +2942,7 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      * not be read may well be readable a moment later (that is the whole
      * shape of a fold racing a read), and a permanent failure costs a walk
      * per attempt on a volume that is already damaged. */
-    if (vol_walk_strict(v, pba_ref_v3_walk_cb, &c) != 0) {
+    if (vol_walk_strict(v, pba_ref_walk_cb, &c) != 0) {
         pba_ref_free(v);
         v->pba_ref_stale = 1;
         return -1;
@@ -3134,8 +3103,7 @@ uint64_t vol_inode_next(invfs_volume *v, uint64_t pos, uint32_t *magic_out,
      * the Mapper. The scan walks one extent at a time; bounds are defined
      * by the extent sizes, NOT by inode_area_end. inode_area_pos still
      * marks the CRC-validated tail of the active extent (vol_open trims at
-     * the first torn record). For legacy format_version=0 the contiguous
-     * inode area is still valid, so we fall back to it. */
+     * the first torn record). */
     for (;;) {
         uint64_t end;
         size_t cur_ei = 0;
@@ -3298,16 +3266,16 @@ int vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len)
 /* ENOSPC policy helpers */
 int vol_write_enabled(invfs_volume *v)
 {
-    /* WP-M6: a v3 volume has no v2 record stream; the M5 backstop keeps
+    /* WP-M6: a  volume has no v2 record stream; the M5 backstop keeps
      * needs_recovery set for the whole session (vol_open sets it
      * unconditionally), so it cannot be the gate here -- an inherited DIRTY
      * state is replayed at open and the namespace must be writable through
      * FUSE. Only the READONLY latch applies.
-     * WP-M19: a degraded v3 mount (dev0 absent) is read-only by
+     * WP-M19: a degraded  mount (dev0 absent) is read-only by
      * construction too -- it is serving from the dev1 metadata mirror.
      * WP80/A: io_latched is different from needs_recovery -- it means a
      * flush/sync barrier failed THIS session, so the append tail is past
-     * unpersisted bytes. The v3 namespace must refuse mutations then just
+     * unpersisted bytes. The  namespace must refuse mutations then just
      * like v2, or a latched volume keeps appending into the hole. */
     if (v->sb.vol_flags & VOLF_META)
         return !(v->sb.vol_flags & VOLF_READONLY) && !v->st.degraded &&
@@ -3435,7 +3403,7 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     uint64_t end = pba + nblocks;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
-    /* WP96: the v3 save point's DATA pin, the one and only hold a v3 volume
+    /* WP96: the  save point's DATA pin, the one and only hold a  volume
      * has (WP21's coarse checkpoint and its retention registry went with the
      * v2 metadata machinery). It keys on the on-disk pin (v->spn_armed,
      * loaded at open) rather than on this session having armed anything: the
@@ -3443,7 +3411,7 @@ void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)
      * FUSE write's retire path, a delete, or a later
      * process' sweep must all see the hold. Sitting HERE rather than at the
      * publishers that replace recipes is the point -- vol_free_recipe_
-     * blocks has four v3 call sites and the drain frees directly, and a
+     * blocks has four  call sites and the drain frees directly, and a
      * missing one is exactly the silent corruption this refuses: a rollback
      * republishing a recipe over a block somebody else now owns. The blocks
      * stay ALLOCATED (that is what bars reuse) and the next save-point

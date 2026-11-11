@@ -1,9 +1,9 @@
 #!/bin/bash
-# test-meta-multidev.sh — WP-M19 e2e: v3 two-device placement + metadata
+# test-meta-multidev.sh — WP-M19 e2e:  two-device placement + metadata
 # mirror.
 #
-# A v3 volume over dev0 (fast: metadata + base tree) + dev1 (capacity:
-# metadata mirror + Shadow). The v3 base B+-tree draws its pages from the
+# A  volume over dev0 (fast: metadata + base tree) + dev1 (capacity:
+# metadata mirror + Shadow). The  base B+-tree draws its pages from the
 # dev0 metadata span (mirrored by the WP25 DEVT/mux), never from the dev1
 # shadow fallback; RT30 and DEVT are written consistently on both devices;
 # the metadata span stays byte-identical.
@@ -78,11 +78,11 @@ print(slot0, slot1, delta, seq)
 PY
 }
 
-echo "== leg 1: build the v3 two-device volume =="
+echo "== leg 1: build the  two-device volume =="
 $B/invf-mkfs "$D0" 0.125 "$D1" 0.25 > "$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "two-device mkfs failed"; }
 grep -q "devices:         2" "$WORK/mkfs.log" || fail "mkfs did not report 2 devices"
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 META_HI=$(sed -n 's/.*metadata zone: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs.log")
 [ -n "$META_HI" ] || fail "could not parse the metadata geometry"
@@ -94,7 +94,7 @@ for d in "$D0" "$D1"; do
     [ "$(dd if="$d" bs=1 skip=$((0x2A0)) count=4 status=none)" = "DEVT" ] \
         || fail "no DEVT on $d"
 done
-echo "built: format v0, DEVT + RT30 on both devices (metadata zone ends at $META_HI)"
+echo "built: format v1, DEVT + RT30 on both devices (metadata zone ends at $META_HI)"
 
 echo "== leg 2: placement — metadata span mirrored, base pages in it =="
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \
@@ -103,7 +103,7 @@ echo "metadata span ($((META_HI + 1)) blocks) byte-identical on both devices"
 
 echo "== leg 3: FUSE mount, create namespace =="
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 mkdir -p "$MNT/dir/sub"
 touch "$MNT/hello.txt" "$MNT/dir/sub/deep"
@@ -112,7 +112,7 @@ touch "$MNT/hello.txt" "$MNT/dir/sub/deep"
 echo "created: hello.txt + dir/sub/deep"
 mnt_down
 
-# The live v3 metadata anchor must resolve inside the mirrored dev0 span.
+# The live  metadata anchor must resolve inside the mirrored dev0 span.
 # WP-M12 makes create/unlink/rename append to the DELTA (the base root stays
 # empty until a fold), so after a create the anchor is the delta segment; a
 # volume whose base has folded anchors on the base root slot instead.
@@ -121,7 +121,7 @@ ANCHOR=$RS0; ANCHOR_NAME="base root slot 0"
 if [ "$RS0" -eq 0 ]; then ANCHOR=$DELTA; ANCHOR_NAME="delta"; fi
 [ "$ANCHOR" -gt 0 ] && [ "$ANCHOR" -lt "$META_SPAN" ] \
     || fail "$ANCHOR_NAME pba $ANCHOR outside the metadata span (metadata not dev0-resident)"
-echo "live v3 metadata anchor ($ANCHOR_NAME) pba $ANCHOR in the dev0 metadata span (mirrored)"
+echo "live  metadata anchor ($ANCHOR_NAME) pba $ANCHOR in the dev0 metadata span (mirrored)"
 
 echo "== leg 4: remount, namespace persists =="
 mnt_up
@@ -137,7 +137,7 @@ echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "$FSCK" | grep -q "format:       v0" || { echo "$FSCK"; fail "fsck not v0"; }
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \
     || fail "metadata span differs after writes"
-echo "fsck OK (v3 base tree); metadata mirror byte-identical after writes"
+echo "fsck OK ( base tree); metadata mirror byte-identical after writes"
 
 echo "== leg 6: DEGRADED mount (dev0 withheld) =="
 mv "$D0" "$D0.hidden"
@@ -164,4 +164,4 @@ mnt_down
 echo "reattach: RW resumed, writes land"
 
 echo
-echo "PASS: v3 two-device (dev0 base + metadata mirror + degraded read)"
+echo "PASS:  two-device (dev0 base + metadata mirror + degraded read)"

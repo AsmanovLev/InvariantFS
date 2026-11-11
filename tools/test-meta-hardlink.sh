@@ -5,7 +5,7 @@
 # `ln` inserts a second dirent and increments nlink; `unlink` drops the dirent
 # and decrements, and only the last unlink deletes the row (and, through
 # vol_inode_delete, its xattr keys). getattr exposes nlink. Everything must
-# survive unmount/remount. v3 nodes are still empty (recipes are WP-M8), so
+# survive unmount/remount.  nodes are still empty (recipes are WP-M8), so
 # the "content" that must stay alive is the shared inode row + its xattrs.
 #
 # WP118: this suite is also the POSITIVE CONTROL for the nlink / dirent
@@ -60,16 +60,16 @@ trap cleanup EXIT
 
 nlink_of() { stat -c %h "$1"; }
 
-echo "== WP-M17: v3 hardlinks (link/nlink/unlink-at-zero/xattr cascade/remount) =="
+echo "== WP-M17:  hardlinks (link/nlink/unlink-at-zero/xattr cascade/remount) =="
 
-# --- mkfs v3 -------------------------------------------------------------
+# --- mkfs  -------------------------------------------------------------
 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 # --- first namespace object, then calibrate its engine inode id ----------

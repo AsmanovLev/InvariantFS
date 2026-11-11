@@ -1,6 +1,6 @@
-/* vnode.c — WP-M5 e2e driver for the metadata-v3 inode tree.
+/* vnode.c — WP-M5 e2e driver for the metadata store inode tree.
  *
- * Until WP-M6 (dirents) lands there is no name -> inode resolution on a v3
+ * Until WP-M6 (dirents) lands there is no name -> inode resolution on a 
  * volume, so the inode tree is exercised directly by id. This tool is the
  * offline counterpart of a FUSE create/stat: it opens the volume (a mount
  * at the library level), mutates/reads one inode row, and closes cleanly.
@@ -137,7 +137,7 @@ static int cmd_nlink(const char *img, int argc, char **argv)
             return 1;
         }
         in.nlink = (uint32_t)strtoul(argv[5], NULL, 0);
-        /* delta tier, like vol_v3_hardlink: a base put is shadowed by the
+        /* delta tier, like vol_hardlink: a base put is shadowed by the
          * delta's copy of the same row */
         if (vol_inode_delta_put(v, id, &in) != 0) {
             fprintf(stderr, "vol_inode_delta_put(%llu) failed\n",
@@ -182,11 +182,13 @@ static int open_vol(const char *path, invfs_volume **out)
         fprintf(stderr, "vol_open(%s) failed: err=%d\n", path, err);
         return -1;
     }
-    if (!(vol_sb(v)->vol_flags & VOLF_META)) {
-        fprintf(stderr, "%s: not a v3 volume (vol_flags=0x%08x)\n",
-                path, (unsigned)vol_sb(v)->vol_flags);
-        vol_close(v);
-        return -1;
+    {
+        char why[512];
+        if (invfs_format_accept(vol_sb(v), path, why, sizeof why) < 0) {
+            fprintf(stderr, "%s\n", why);
+            vol_close(v);
+            return -1;
+        }
     }
     *out = v;
     return 0;
@@ -255,7 +257,7 @@ static int cmd_get(const char *img, int argc, char **argv)
            (unsigned long long)in.rdev,
            (unsigned long long)in.recipe.pba, (long long)in.mtime);
 
-    /* exercise the public stat surface too (vol_get_meta v3 branch) */
+    /* exercise the public stat surface too (vol_get_meta  branch) */
     if (vol_get_meta(v, id, &m) != 0) {
         fprintf(stderr, "vol_get_meta(%llu) failed after a get\n",
                 (unsigned long long)id);

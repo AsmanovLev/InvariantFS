@@ -1,8 +1,8 @@
 #!/bin/bash
-# test-meta-delta.sh — WP-M10 e2e: the metadata-v3 delta log.
+# test-meta-delta.sh — WP-M10 e2e: the metadata store delta log.
 #
 # Exercises the recent-changes tier end to end on a real VOLF_META image:
-#   leg 0  mkfs v3 leaves RT30.delta_pba == 0 (empty recent tier);
+#   leg 0  mkfs  leaves RT30.delta_pba == 0 (empty recent tier);
 #   leg 1  appending through the engine fills the active segment and RT30
 #          now names it (structure-before-reference);
 #   leg 2  a fresh mount replays the segment chain into the in-memory index
@@ -37,10 +37,10 @@ fi
 
 N=40
 
-echo "== leg 0: mkfs v3 (empty recent tier) =="
+echo "== leg 0: mkfs  (empty recent tier) =="
 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 python3 - "$IMG" <<'PY' || fail "RT30 not empty at mkfs"
 import struct, sys

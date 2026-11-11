@@ -11,7 +11,7 @@
 uint64_t vol_create_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
-    /* WP-M6: a v3 node is a dirent + inode row; content goes through the
+    /* WP-M6: a  node is a dirent + inode row; content goes through the
      * WP-M9 session path (WP-M21b glue: vol_write_bulk).
      *
      * WP135: THIS IS A LANE-CAPABLE FUNCTION, NOT A USER-NAME BOUNDARY, and
@@ -43,7 +43,7 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
                                    const uint8_t *data, size_t len,
                                    const invfs_meta_pub *meta)
 {
-    /* WP-M6: a v3 node is a dirent + inode row; content goes through the
+    /* WP-M6: a  node is a dirent + inode row; content goes through the
      * WP-M9 session path (WP-M21b glue: vol_write_bulk).
      *
      * WP135: this IS a user-name boundary -- invf-import is its only caller
@@ -107,7 +107,7 @@ uint64_t vol_create_file_with_meta(invfs_volume *v, const char *name,
 
 
 
-/* v3 retires an inode by moving the dirent, not by retiring a record:
+/*  retires an inode by moving the dirent, not by retiring a record:
  * vol_unlink drops the dirent and vol_free_recipe_blocks frees the
  * segments when the last name goes. There is nothing left for a
  * record-level retire to do. */
@@ -121,11 +121,11 @@ int vol_delete_inode(invfs_volume *v, uint64_t inode_id, const char *name)
 }
 
 
-/* Does this recipe own "name!..." siblings? Asked by the v3 write session
+/* Does this recipe own "name!..." siblings? Asked by the  write session
  * before it republishes the row (vol_write.c), so the answer comes off the
  * OLD content's recipe. The v2 loader answered the same question off the
  * old record and the v2 commit retired them; both are gone, and one rule
- * answering once is why the v3 path does not strand the siblings. */
+ * answering once is why the  path does not strand the siblings. */
 int ast_owns_siblings(const invfs_ast_hdr *ah,
                       const invfs_ast_block_entry *ents, size_t nents)
 {
@@ -433,7 +433,7 @@ static int del_siblings_cb(void *ctx_, const char *path, uint64_t ino,
  * `!recipe` / `!mbrt` blobs, whatever the lane that wrote them called them.
  * Returns the number unlinked.
  *
- * WP-delete-siblings-short-walk-leaves-orphans. The enumeration is a v3
+ * WP-delete-siblings-short-walk-leaves-orphans. The enumeration is a 
  * WALK, and a walk is FALLIBLE: walk_dir stops at a quarantined base page,
  * a failed listing, a depth cap or an OOM, and returns -1 having delivered a
  * PREFIX of the namespace. A stopped walk reports found == n -- it saw
@@ -464,7 +464,7 @@ static int del_siblings_cb(void *ctx_, const char *path, uint64_t ino,
  *              `name!exr0` (src/core/vol_exer.c:265), and vol_transcode_abort
  *              runs on every abort of the lane that left them. The two
  *              callers with no later pass are vol_unlink's cascade
- *              (src/core/vol_dirs.c:663) and the v3 write commit
+ *              (src/core/vol_dirs.c:663) and the  write commit
  *              (src/core/vol_write.c:905); those are exactly the two where
  *              the space does not come back, and the message says so.
  *   prefix  -> costs CORRECTNESS, permanently and silently.
@@ -596,7 +596,7 @@ int vol_delete_siblings(invfs_volume *v, const char *name)
                 "container is stored TWICE on the volume: the superseded "
                 "siblings below, and whatever the caller wrote to replace "
                 "them. The two callers with no later pass are an unlink of a "
-                "container (vol_unlink) and a v3 overwrite of one "
+                "container (vol_unlink) and a  overwrite of one "
                 "(vol_write_commit); for those the space stays until the "
                 "volume is rebuilt from a backup or the names are removed by "
                 "hand.\n",
@@ -715,7 +715,7 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
  *   -ENOENT  the row is not there. NORMAL, and the answer the v1->v2
  *            metadata upgrade path is built on: volume.c sets
  *            mbuf_ready unconditionally on open, so on a volume whose
- *            records predate the v3 inode row -- i.e. every pre-v3 volume,
+ *            records predate the  inode row -- i.e. every pre-metadata-store volume,
  *            see the contract note in volume.h -- vol_inode_get answers
  *            0 and no row will ever be found. A caller stamping metadata
  *            onto such a record legitimately starts from type defaults
@@ -781,7 +781,7 @@ int vol_get_meta_rc(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
 uint64_t vol_apply_meta(invfs_volume *v, const char *name,
                         const invfs_meta_pub *meta)
 {
-    /* WP-M6: update the v3 inode row behind the name (no INO2 ext). */
+    /* WP-M6: update the  inode row behind the name (no INO2 ext). */
     return vol_set_meta(v, name, meta);
 }
 
@@ -832,7 +832,7 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
 int vol_get_xattr(invfs_volume *v, uint64_t inode_id, const char *xn,
                   void *val, size_t *vlen)
 {
-    /* WP-M7: v3 named xattrs live in the base B+-tree, not the INO2 ext. */
+    /* WP-M7:  named xattrs live in the base B+-tree, not the INO2 ext. */
     return vol_xattr_get(v, inode_id, xn, val, vlen);
 }
 
@@ -850,7 +850,7 @@ int vol_remove_xattr(invfs_volume *v, uint64_t inode_id, const char *xn)
 }
 
 
-/* WP-M7: listxattr adapter over the v3 xattr tree. The tree orders keys by
+/* WP-M7: listxattr adapter over the  xattr tree. The tree orders keys by
  * (name_len, name), so collect and sort by name to match the v2 listing
  * expectation, then apply the v2 buffer semantics: positive = total bytes
  * needed, -2 = buffer too small. */
@@ -1004,7 +1004,7 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
  *
  * This is the ONE rule, on the parsed AST rather than on a container
  * format's bytes. Both callers ask it: the v2 record
- * (record_owns_siblings) and the v3 recipe blob
+ * (record_owns_siblings) and the  recipe blob
  * (wsession_load_old_v3, vol_write.c), so an overwrite retires exactly the
  * siblings its counterpart format retires. 1 = siblings possible. */
 
@@ -1019,20 +1019,17 @@ int vol_stamp_class(invfs_volume *v, uint64_t inode_id,
 
 
 
-/* WP-M21: vol_inode_compact / CMP0 / CMPS retired. The v3 inode area lives
+/* WP-M21: vol_inode_compact / CMP0 / CMPS retired. The  inode area lives
  * in dynamic metadata extents (WP30); per-extent reclaim and the online
- * fold live in vol_fold.c / vol_reclaim.c. inode_area_make_room still
- * rejects ENOSPC on legacy (format_version=0) volumes -- those open
- * read-only, so the legacy fallback path never executes anyway. */
+ * fold live in vol_fold.c / vol_reclaim.c. The legacy inode-area fallback
+ * is dead code (every volume this build opens has a mapper). */
 
 /* WP27 fold-churn backstop: the inode area is append-only and format v2
  * churns it harder than v1 ever did (every rewrite/meta-stamp/heat fold
  * appends). The fold path (vol_fold) reclaims dead prefix bytes; with
  * vol_inode_compact gone, inode_area_make_room's mapper-extent allocator
- * is the only path that takes a v3 append from ENOSPC back to 0, and the
- * legacy inode area (format_version=0) is read-only on mount so no
- * reclaim is possible there.
- * and the caller re-checks. Returns 0 when `need` bytes fit. */
+ * is the only path that takes a  append from ENOSPC back to 0.
+ * Returns 0 when `need` bytes fit. */
 int inode_area_make_room(invfs_volume *v, uint64_t need)
 {
     /* WP30: for v0.3.0+ the "inode area" is a sequence of dynamic metadata
@@ -1041,7 +1038,7 @@ int inode_area_make_room(invfs_volume *v, uint64_t need)
      * "can the next append land somewhere?" -- which means either
      *   (a) the active extent has room for `need` more bytes, OR
      *   (b) we can allocate a fresh extent (mapper + shadow zone free).
-     * For legacy format_version=0 we fall back to the linear-end check. */
+     * The linear-end check below is defensive dead code. */
     if (v->met0_present && v->meta_mapper) {
         uint64_t entry = meta_mapper_get(v, (size_t)v->met0.active_extent);
         if (entry && (v->met0.active_offset + need) <=
@@ -1067,11 +1064,9 @@ int inode_area_make_room(invfs_volume *v, uint64_t need)
     } else if (v->inode_area_pos + need <= v->inode_area_end) {
         return 0;
     }
-    /* WP-M21: vol_inode_compact was the only way to reclaim inode-area bytes
-     * on legacy (format_version=0) volumes. Those volumes open read-only in
-     * v3 (see volume.c vol_open), so this branch is unreachable -- leaving
-     * ENOSPC (a slow climb toward the metadata-zone end, exactly what the
-     * read-only mount guards against). */
+    /* WP-M21: vol_inode_compact was the only way to reclaim inode-area bytes.
+     * This branch is unreachable -- every volume this build opens has a
+     * mapper (Phase 3 refuses otherwise) -- leaving ENOSPC. */
     (void)need;
     return -1;
 }

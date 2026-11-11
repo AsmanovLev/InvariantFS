@@ -20,8 +20,7 @@ int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
  * appends) now go through the extent-sized, flush-safe vol_append_slot, so
  * a sealed batch's owner record can land in a dynamic metadata extent of
  * the right size. Batch deferral is once again unconditional; only the
- * PPMd decode-memory policy keeps a file on the generic floor. Legacy
- * format_version=0 behaviour is unchanged. */
+ * PPMd decode-memory policy keeps a file on the generic floor. */
 
 static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                             const char *name,
@@ -149,7 +148,7 @@ typedef struct {
 
 int vol_sweep_file(invfs_volume *v, uint64_t inode_id)
 {
-    /* WP-M23: v3 volumes route directly to the id-keyed v3 sweep.
+    /* WP-M23:  volumes route directly to the id-keyed  sweep.
      * vol_sweep_one_v3 returns: 1 = swept, 0 = skipped/noop, -1 = err.
      * Returns: 0 = swept, 1 = skipped/noop, -1 = err. */
     int rc;
@@ -407,10 +406,10 @@ int vol_exer_retry(invfs_volume *v, uint64_t inode_id, const char *name)
 
 
 /* WP78: shared per-file transcode decision. Both the v2 record path and the
- * v3 blob path read the whole file and hand it here; every bit-exactness
+ *  blob path read the whole file and hand it here; every bit-exactness
  * guard lives in the helpers this dispatches to (containerpack/pack sweeps
  * decode-back-and-memcmp, the builtin container builders carry their own
- * rebuild guards). `v3` selects v3-safe publication: on a v3 volume
+ * rebuild guards). `` selects -safe publication: on a  volume
  * vol_create_blob_file supersedes the inode row IN PLACE (same id), so the
  * caller must NOT vol_delete_inode() the old id afterwards. Returns
  * SWEEP_DECLINED when no lane claimed the content -- the caller then runs
@@ -814,7 +813,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
                                                 (uint64_t)full_len);
             free(pmp);
             if (!nino) return 0;
-            /* WP202: on v3 the lane SUPERSEDED the row in place, so the old
+            /* WP202: on  the lane SUPERSEDED the row in place, so the old
              * recipe's data segments are the lane's to release; on v2 the row
              * still exists and the tombstone is the whole job. */
             vol_release_superseded_blob(v, inode_id, old_addr);
@@ -1054,7 +1053,7 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
 }
 
 
-/* WP78: the v3 generic floor stores the file as a whole-file ZSTD blob. A
+/* WP78: the  generic floor stores the file as a whole-file ZSTD blob. A
  * class stamp a declined codec/container pack set during the dispatch
  * (GENERIC_MEMLIMIT / GENERIC_GUARD) carries retry semantics the gain
  * verdict knows nothing about, so it must win -- mirrors
@@ -1072,21 +1071,21 @@ static void stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
 }
 
 
-/* WP-M21b: the v3 sweep path. The v2 full path below operates on the
+/* WP-M21b: the  sweep path. The v2 full path below operates on the
  * record stream (sweep_locate_record, L2P maps, atomic new-id records)
- * which does not exist on a v3 volume -- it fails every file with -1
- * (measured: "sweep done: failed=5" on a 5-file v3 volume). The v3
+ * which does not exist on a  volume -- it fails every file with -1
+ * (measured: "sweep done: failed=5" on a 5-file  volume). The 
  * drain with the same invariants: read the whole file (M8 recipe read)
  * -> ZSTD encode -> decode round-trip guard (publish only bit-exact)
- * -> publish via vol_create_blob_file's v3 branch (content-addressed
+ * -> publish via vol_create_blob_file's  branch (content-addressed
  * recipe blob + in-place row supersede; the superseded RAW data segments
  * are retired to the fence via vol_retire_pbas, WP612 -- the row publish
  * is staged, so freeing them inline would hand live-again rows reused
  * blocks when a fence-failure doom unwinds it).
- * Class stamps (v3 xattrs, WP-M7) keep the WP10 policy: drained files
+ * Class stamps ( xattrs, WP-M7) keep the WP10 policy: drained files
  * skip, uncompressible files are generation-gated, ENOSPC defers.
  * Deliberate M18-remainder gaps (v2 owner-record machinery, not yet
- * re-expressed on the v3 trees): per-segment Shadow clustering (the
+ * re-expressed on the  trees): per-segment Shadow clustering (the
  * whole-file entry is arc-budget bounded instead), text PPMd / binary
  * ZSTD batching, and container-pack transcode dispatch. Text and
  * binary both take generic ZSTD -- a weaker ratio than batching,
@@ -1234,7 +1233,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* WP-M23: active write session guard by inode_id and name */
     if (!invfs_sweep_ui_active()) {
-        fprintf(stderr, "[sweep-v3] checking inode %llu (%s)...\n",
+        fprintf(stderr, "[sweep-] checking inode %llu (%s)...\n",
                 (unsigned long long)inode_id, name ? name : "NULL");
         fflush(stderr);
     }
@@ -1324,9 +1323,9 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* WP78: whole-file transcode dispatch -- the same decision the v2 path
      * runs (builtin containers, codec/container packs, text/binary batching,
-     * EXER carve), so a v3 volume gets full sweep parity. Above the
+     * EXER carve), so a  volume gets full sweep parity. Above the
      * whole-file memory cap only the container packs still get a head
-     * sniff (their prior v3 behavior). */
+     * sniff (their prior  behavior). */
     {
         uint64_t max_sweep_size = 256ULL * 1024ULL * 1024ULL;
         const char *env_max = getenv("INVFS_SWEEP_MAX_FILE");
@@ -1690,7 +1689,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
                             "mid-pass); rolling back\n",
                             name ? name : "?");
                 /* WP612: no hand-kept refcount moves across the publish any
-                 * more (the WP pba-ref-v3-incremental shape retired with
+                 * more (the WP pba-ref-incremental shape retired with
                  * them). The -1 per retired pba / +1 per new one used to run
                  * here, under a staged row: a fence-failure doom restores
                  * the old recipe while the map already discharged it, so a
@@ -1828,7 +1827,7 @@ static int vol_sweep_one_v3(invfs_volume *v, uint64_t inode_id,
 
     /* WP-B1: the profile ladder. invfs_profile_generic_algo() already states
      * the intent (turbo = store verbatim, fastest = LZ4, else ZSTD) and the v2
-     * record writer honours it -- but this v3 blob path compressed with ZSTD
+     * record writer honours it -- but this  blob path compressed with ZSTD
      * unconditionally, so on the default format INVFS_PROFILE=turbo wrote
      * LESS than balanced: the exact opposite of what the knob promises, and
      * silently so. The test that caught it is test-heat leg 3. */
@@ -2051,7 +2050,7 @@ int vol_sweep_pending_cap(invfs_volume *v, size_t cap)
         vol_unmark_pending(v, id);
         seen++;
         /* WP135: == 1, not "non-zero". vol_sweep_name_of propagates the -1
-         * that a stopped v3 walk now produces, and a truthiness test would
+         * that a stopped  walk now produces, and a truthiness test would
          * have fed that -1 straight into vol_sweep_one with an EMPTY name --
          * a rewrite keyed on a name the volume could not supply. */
         if (found == 1) {
@@ -2217,7 +2216,7 @@ typedef struct {
 
 
 
-/* WP-M21b: collector callback for the v3 live-set iterator. Internal
+/* WP-M21b: collector callback for the  live-set iterator. Internal
  * (\x01) rows and nameless rows are not sweep targets; the iterator has
  * already dropped deleted rows and de-duplicated nlink-shared inodes. */
 struct sweep_ids { uint64_t *ids; size_t max, n; size_t found; int full; };
@@ -2376,7 +2375,7 @@ uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_b
 
 
 
-/* WP-M21b: per-inode body of the v3 stats pass -- type straight from the
+/* WP-M21b: per-inode body of the  stats pass -- type straight from the
  * row (invfs_inode.type), logical bytes from the row size. Internal
  * \x01 owners are excluded from the file count (the v2 body's rule).
  * WP78: a live recipe's zone==TEXT entries also feed the TEXT accounting
@@ -2496,7 +2495,7 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         have_ms = 1;   /* degrade: physical zeros, not a lie */
 
     /* WP-M21b: population from the live-set iterator (type comes from the
-     * inode row itself), physical from the zone bitmaps: the v3 data plane
+     * inode row itself), physical from the zone bitmaps: the  data plane
      * still allocates RAW segments into the RAW zone and blob/drain segments
      * into Shadow, so region attribution is exact. The per-class physical
      * breakdown comes from the same recipe parse (each entry's zone tag over

@@ -168,7 +168,7 @@ int main(int argc, char **argv)
      * and still REFUSES, so a script that carries it fails loudly instead
      * of silently getting a volume it did not ask for. (INVFS_V3 was an
      * accepted no-op; it is gone -- see INVFS_FORMAT_VERSION.) */
-    /* no generation switch: this build writes format v0, unconditionally. */
+    /* no generation switch: this build writes format v1, unconditionally. */
     /* ANC0 tail anchor: the reserved block, reported by mkfs so the
      * reservation is visible in the format summary rather than only in the
      * bitmap. */
@@ -382,9 +382,9 @@ int main(int argc, char **argv)
      * ordinary writes must keep (reserved + hard_min) free */
     sb.reserved_blocks = (uint32_t)(sb.total_blocks / 128 + 64);
     sb.hard_min_blocks = (uint32_t)(sb.total_blocks / 1024 + 16);
-    sb.vol_flags = VOLF_META2 | VOLF_ASTV2 | VOLF_META;
+    sb.vol_flags = VOLF_META;
     sb.pad2 = 0;
-    sb.format_version = INVFS_FORMAT_VERSION;  /* 0 = current (unstable) generation */
+    sb.format_version = INVFS_FORMAT_VERSION;  /* 1 = current generation */
     sb.pad3[0] = sb.pad3[1] = sb.pad3[2] = 0;
     sb.checksum = invfs_crc32c(&sb, offsetof(invfs_superblock, checksum));
 
@@ -497,11 +497,11 @@ int main(int argc, char **argv)
     uint64_t mapper_pba = sb.metadata_zone_start + bitmap_blocks_mkfs;
     uint64_t first_extent_pba = sb.shadow_zone_start;  /* Not pre-allocated */
     uint64_t extent_blocks = 0;  /* Not pre-allocated */
-    /* WP-M19: the reserved v3 root-area location. On a two-device volume
-     * the region AFTER it is left free in the bitmap so the v3 metadata
+    /* WP-M19: the reserved  root-area location. On a two-device volume
+     * the region AFTER it is left free in the bitmap so the  metadata
      * allocator (mbuf_alloc/mb_alloc_meta_zone) hands out dev0-resident
      * base pages -- inside the mirrored metadata span the mux dual-writes.
-     * Single-device v3 keeps the whole metadata zone allocated (byte-
+     * Single-device  keeps the whole metadata zone allocated (byte-
      * identical to WP-M1). */
     uint64_t root_pba = mapper_pba + INVFS_META_EXT_BLOCKS;
 
@@ -509,8 +509,8 @@ int main(int argc, char **argv)
     {
         invfs_met0 m0;
         memset(&m0, 0, sizeof m0);
-        memcpy(m0.magic, "MET0", 4);
-        m0.version = 1;
+        memcpy(m0.magic, INVFS_MET0_MAGIC, 4);
+        m0.version = INVFS_MET0_VERSION;
         m0.active_extent = 0;
         m0.active_offset = 0;
         m0.extent_count = 0;
@@ -590,11 +590,11 @@ int main(int argc, char **argv)
         for (i = dev0_blocks; i < sb.shadow_zone_start; i++)
             bitmap[i / 8] |= (uint8_t)(1u << ((i) % 8));
     }
-    /* WP-M19: v3 two-device leaves the metadata-zone tail free so the v3
+    /* WP-M19:  two-device leaves the metadata-zone tail free so the 
      * base-page allocator draws from dev0's metadata span (mirrored by the
      * mux), instead of the dev1 shadow fallback. The reserved root area
      * (mb_boot_cursor) stays marked used -- it is skipped at open and must
-     * never be re-handed. Single-device v3 keeps every bit set. */
+     * never be re-handed. Single-device  keeps every bit set. */
     if (twodev) {
         uint64_t base_lo = root_pba + 2;
         uint64_t base_hi = sb.metadata_zone_start + metadata_blocks;
@@ -663,7 +663,7 @@ int main(int argc, char **argv)
     sb.meta_mapper_pba = mapper_pba;
     sb.meta_mapper_blocks = INVFS_META_EXT_BLOCKS;
 
-    /* v3 root area. Reserve two metadata pages immediately after the
+    /*  root area. Reserve two metadata pages immediately after the
      * mapper table -- the first free metadata blocks -- and zero them,
      * making the span durable
      * before the RT30 descriptor that anchors the root area is written. On

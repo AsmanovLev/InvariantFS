@@ -6,7 +6,7 @@
 # B+-tree, publishes the new root through the WP-M2 double slot, and only
 # then resets the delta. This leg proves the whole contract on a real
 # VOLF_META image through the public engine surface:
-#   leg 0  mkfs v3 (empty base, empty recent tier);
+#   leg 0  mkfs  (empty base, empty recent tier);
 #   leg 1  base rows are written, delta records update a base inode, delete
 #          a base inode, add a delta-only inode and dirent, and delete a
 #          base dirent; the base root is captured; fold runs (invf-fold_test
@@ -47,12 +47,12 @@ if [ ! -x "$B/invf-fold_test" ]; then
         || fail "cannot build bin/invf-fold_test"
 fi
 
-echo "== leg 0: mkfs v3 =="
+echo "== leg 0: mkfs  =="
 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
-echo "mkfs: v3 metadata skeleton"
+echo "mkfs:  metadata skeleton"
 
 echo "== leg 1: append deltas then fold (base merged, delta reset) =="
 $B/invf-fold_test scenario "$IMG" >"$WORK/scenario.log" 2>&1 \

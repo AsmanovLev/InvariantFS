@@ -125,7 +125,7 @@ static uint64_t parse_size(const char *s)
  * creates and nothing in it has been written since the mapping log went
  * away, so the walk is the only shape there is: entries from js_byte until
  * the first CRC failure (replay's own rule). The flat log is empty on a
- * v3 volume, so this returns 0 used bytes -- stated here because "the scan
+ *  volume, so this returns 0 used bytes -- stated here because "the scan
  * found nothing" and "the scan is looking in the wrong place" have to be
  * told apart by a reader. */
 static int scan_journal(blkio *io, uint64_t js_byte, uint64_t *src_out,
@@ -427,14 +427,13 @@ int main(int argc, char **argv)
         blkio_close(&io);
         return 1;
     }
-    if (!(sb.vol_flags & VOLF_META)) {
-        fprintf(stderr, "invf-resize: %s: volume reports %s (VOLF_META is not set). "
-                "This build operates on format v%d only.\n",
-                path,
-                (sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_FORMAT_VERSION);
-        blkio_close(&io);
-        return 1;
+    {
+        char why[512];
+        if (invfs_format_accept(&sb, path, why, sizeof why) < 0) {
+            fprintf(stderr, "invf-resize: %s\n", why);
+            blkio_close(&io);
+            return 1;
+        }
     }
 
     /* an armed resize from a killed run takes precedence: complete it (the

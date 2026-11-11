@@ -134,10 +134,10 @@ static int cmp_deep_ent_id(const void *a, const void *b)
     return 0;
 }
 
-/* WP-M21b: v3 collector for the deep pass -- same deep_ent array, fed by
+/* WP-M21b:  collector for the deep pass -- same deep_ent array, fed by
  * vol_walk in a single O(n) hierarchical walk instead of reverse-resolving
  * leaves. Sizes come straight from the inode row. */
-static int deep_v3_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
+static int deep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
                            uint32_t type, uint64_t size, int64_t mtime)
 {
     deep_ctx *c = (deep_ctx *)ctx_;
@@ -240,18 +240,12 @@ int main(int argc, char **argv)
      * a format this build cannot read is a verdict about a volume the tool
      * never opened and no tool can open: the same defect as a confident
      * zero. Name what the image is, and refuse. */
-    if (!(sb.vol_flags & VOLF_META)) {
-        fprintf(stderr,
-                "FAIL: %s: this is not a format v%d volume: the image reports "
-                "%s (VOLF_META is not set). This build reads format v%d only "
-                "(INVFS_VERSION=%s) and carries no reader for any other "
-                "format, so there is nothing here it can verify.\n"
-                "  The image is untouched by this attempt.\n",
-                path,
-                INVFS_FORMAT_VERSION,
-                (sb.vol_flags & VOLF_ASTV2) ? "format v2" : "format v1",
-                INVFS_FORMAT_VERSION, INVFS_VERSION_STRING);
-        return 1;
+    {
+        char why[512];
+        if (invfs_format_accept(&sb, path, why, sizeof why) < 0) {
+            fprintf(stderr, "FAIL: %s\n", why);
+            return 1;
+        }
     }
 
     /* 2. checksum */
@@ -373,12 +367,12 @@ int main(int argc, char **argv)
             free_blocks++;
     }
     /* metadata region (superblock + metadata zone) must be fully allocated.
-     * WP76: on a Meta-v3 volume the metadata-zone tail is deliberately left
-     * free as the dev0-resident v3 base-page pool (WP-M19, mkfs.c); the
+     * WP76: on a metadata store volume the metadata-zone tail is deliberately left
+     * free as the dev0-resident  base-page pool (WP-M19, mkfs.c); the
      * base-page allocator hands those blocks out on demand. The region that
      * must already be allocated ends just past the mapper table plus the two
      * reserved boot pages (INVFS_MBUF_BOOT_PAGES), which sit at
-     * meta_mapper_pba + meta_mapper_blocks. Non-v3 volumes, and v3 volumes
+     * meta_mapper_pba + meta_mapper_blocks. Non- volumes, and  volumes
      * with no mapper recorded, keep the whole-region rule. */
     uint64_t meta_reserved_end = sb.metadata_zone_start + sb.metadata_zone_blocks;
     if ((sb.vol_flags & VOLF_META) && sb.meta_mapper_pba && sb.meta_mapper_blocks) {
@@ -479,7 +473,7 @@ int main(int argc, char **argv)
             vol_walk_init(&w, vol, "verify --deep namespace walk");
             /* WP135: the STRICT walk -- a deep pass that skipped a
              * subtree would report a short volume as a clean one. */
-            wrc = vol_walk_strict(vol, deep_v3_walk_cb, &dc);
+            wrc = vol_walk_strict(vol, deep_walk_cb, &dc);
             vol_walk_result(&w, wrc, dc.nents, dc.nents);
             if (vol_walk_commit(&w) != 0) {
                 printf("  CORRUPT: the deep pass could not walk the whole "

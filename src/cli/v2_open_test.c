@@ -1,6 +1,6 @@
 /* v2_open_test.c — a format-v2 volume must be REFUSED, by name.
  *
- * Meta-v3 retired the v2 name index (WP-M21) and left the idx_* entry points
+ * metadata store retired the v2 name index (WP-M21) and left the idx_* entry points
  * as no-ops. vol_open refused format v1 but let v2 through, and a v2 volume
  * that opens cannot name a single file: idx_get() returns NULL for every
  * lookup, idx_dir_live() returns 0, and idx_id_live() returning 0 makes
@@ -13,7 +13,7 @@
  *
  * The control cell matters as much as the assertion. "refused" is trivially
  * satisfiable by an vol_open that refuses EVERYTHING, so the first case opens
- * an untouched v3 volume and requires it to open. If the gate ever grew too
+ * an untouched  volume and requires it to open. If the gate ever grew too
  * wide, that cell fails.
  */
 #include <stdio.h>
@@ -42,9 +42,11 @@ static void fail(const char *fmt, ...)
 }
 
 /* Rewrite the superblock with VOLF_META cleared (and the CRC repaired), which
- * is exactly what a pre-v0.5 volume carries: VOLF_ASTV2 set, VOLF_META clear.
- * mkfs writes VOLF_ASTV2 unconditionally (src/cli/mkfs.c:385), so clearing
- * the v3 bit is the whole edit -- no other field distinguishes the two. */
+ * is exactly what a pre-v0.5 volume carries: no  metadata store.
+ * VOLF_META is the only format marker mkfs writes (src/cli/mkfs.c), so
+ * clearing the  bit is the whole edit -- no other field distinguishes
+ * the two. The old VOLF_ASTV2 bit is gone: it is retired and read by
+ * nothing, so the demoted image no longer carries it either. */
 static int demote_to_v2(const char *img)
 {
     blkio io;
@@ -54,8 +56,8 @@ static int demote_to_v2(const char *img)
     if (blkio_open(&io, img, 0) != 0)
         return -1;
     if (blkio_pread(&io, 0, &sb, sizeof sb) == 0) {
-        if (!(sb.vol_flags & VOLF_ASTV2)) {
-            fprintf(stderr, "  image lacks VOLF_ASTV2; cannot demote\n");
+        if (!(sb.vol_flags & VOLF_META)) {
+            fprintf(stderr, "  image lacks VOLF_META; cannot demote\n");
             goto out;
         }
         sb.vol_flags &= ~VOLF_META;
@@ -149,13 +151,13 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    /* --- cell 1: CONTROL. An untouched v3 volume opens. Without this the
+    /* --- cell 1: CONTROL. An untouched  volume opens. Without this the
      * whole test could go green on a vol_open that refuses everything. --- */
     if (!try_open(img, errp, &err))
-        fail("CONTROL: a fresh v3 volume was refused (err=%d) -- the gate is "
+        fail("CONTROL: a fresh  volume was refused (err=%d) -- the gate is "
              "too wide", err);
     else
-        printf("ok  CONTROL  v3 volume opens\n");
+        printf("ok  CONTROL   volume opens\n");
 
     /* --- cell 2: the assertion. Demote to v2 and require a refusal. --- */
     if (demote_to_v2(img) != 0) {
@@ -163,20 +165,21 @@ int main(int argc, char **argv)
         return fails ? 1 : 0;
     }
     if (try_open(img, errp, &err))
-        fail("format v2 volume OPENED -- the retired v2 branches are gone; "
-             "opening it yields a volume no name resolves on");
+        fail("pre-metadata-store volume (VOLF_META cleared) OPENED -- the retired v2 "
+             "branches are gone; opening it yields a volume no name resolves "
+             "on");
     else
-        printf("ok  REFUSED  format v2 volume refused\n");
+        printf("ok  REFUSED  pre-metadata-store volume refused\n");
 
     /* --- cell 3: the message has to NAME the format. A refusal that says
      * "unsupported" tells an operator nothing about what they hold. --- */
     msg = slurp(errp);
     if (!msg || !*msg) {
         fail("vol_open refused silently; the operator is told nothing");
-    } else if (!strstr(msg, "v2")) {
-        fail("refusal does not name the format v2:\n%s", msg);
+    } else if (!strstr(msg, "metadata store")) {
+        fail("refusal does not name the format:\n%s", msg);
     } else {
-        printf("ok  MESSAGE  refusal names the format v2\n");
+        printf("ok  MESSAGE  refusal names the format\n");
         printf("---- vol_open said ----\n%s----------------------\n", msg);
     }
     free(msg);

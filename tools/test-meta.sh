@@ -1,13 +1,13 @@
 #!/bin/bash
-# test-meta.sh — WP-M1 e2e leg 0: the metadata-v3 on-disk skeleton.
+# test-meta.sh — WP-M1 e2e leg 0: the metadata store on-disk skeleton.
 #
-# mkfs writes format_version=0 (v0 generation) + VOLF_META, a zeroed root area and
+# mkfs writes format_version=1 (current generation) + VOLF_META, a zeroed root area and
 # the RT30 root-area descriptor (seq=0, empty root slots, no delta). The
 # mount presents an empty namespace and closes CLEAN; fsck accepts it.
 #
-# This leg freezes the v3 on-disk interface (design-meta-v3.md §12) before
+# This leg freezes the  on-disk interface (design-meta-.md §12) before
 # the WP-M2 engine exists. It is not a data-path test: nothing is written
-# through the v3 namespace yet.
+# through the  namespace yet.
 #
 # Run from the repo root after `make`:  bash tools/run-e2e.sh tools/test-meta.sh
 set -e
@@ -56,22 +56,22 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "== leg 0: v3 format skeleton (mkfs/open/close/fsck) =="
+echo "== leg 0:  format skeleton (mkfs/open/close/fsck) =="
 
-# --- mkfs v3 -------------------------------------------------------------
+# --- mkfs  -------------------------------------------------------------
 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
-    || fail "mkfs did not report the v0 format"
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
+    || fail "mkfs did not report the v1 format"
 
-# --- on-disk marker: format_version=0, VOLF_META, RT30 descriptor ----------
-python3 - "$IMG" <<'PY' || fail "v3 on-disk marker/RT30 descriptor wrong"
+# --- on-disk marker: format_version=1, VOLF_META, RT30 descriptor ----------
+python3 - "$IMG" <<'PY' || fail " on-disk marker/RT30 descriptor wrong"
 import struct, sys
 blk = open(sys.argv[1], 'rb').read(4096)
 assert len(blk) == 4096, "short block 0"
 fmt = blk[0x90]
 flags = struct.unpack_from('<I', blk, 0x88)[0]
-assert fmt == 0, "format_version=%d, want 0 (v0)" % fmt
+assert fmt == 1, "format_version=%d, want 1 (v1)" % fmt
 assert flags & 0x10, "VOLF_META not set (vol_flags=0x%08x)" % flags
 off = 0x9D0
 magic = blk[off:off+4]
@@ -83,22 +83,22 @@ assert page_size == 4096, "RT30 page_size %d" % page_size
 assert slot0 == 0 and slot1 == 0, "root slots not empty: %d/%d" % (slot0, slot1)
 assert delta == 0, "delta_pba not empty: %d" % delta
 assert seq == 0, "seq not 0: %d" % seq
-print("on-disk: format_version=0 VOLF_META set RT30 version=1 page_size=%d "
+print("on-disk: format_version=1 VOLF_META set RT30 version=1 page_size=%d "
       "slots empty seq=0" % page_size)
 PY
 
 # --- offline open: empty namespace --------------------------------------
 OUT=$($B/invf-ls "$IMG" 2>"$WORK/ls.log") \
-    || { cat "$WORK/ls.log"; fail "offline invf-ls failed on v3 volume"; }
+    || { cat "$WORK/ls.log"; fail "offline invf-ls failed on  volume"; }
 echo "$OUT" | grep -q "0 file(s)" \
-    || { echo "$OUT"; fail "offline v3 namespace is not empty"; }
+    || { echo "$OUT"; fail "offline  namespace is not empty"; }
 
 # --- FUSE mount: empty root, clean unmount ------------------------------
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
-LS=$(ls -A "$MNT") || { cat "$WORK/fuse.log"; fail "cannot list v3 mount"; }
-[ -z "$LS" ] || { echo "unexpected entries: $LS"; fail "v3 root is not empty"; }
+LS=$(ls -A "$MNT") || { cat "$WORK/fuse.log"; fail "cannot list  mount"; }
+[ -z "$LS" ] || { echo "unexpected entries: $LS"; fail " root is not empty"; }
 echo "mounted: root lists empty"
 mnt_down   # daemon must exit on unmount (blocks otherwise)
 # after a clean unmount the superblock must still read CLEAN (0xCA)
@@ -112,22 +112,22 @@ PY
 # --- fsck accepts and reports clean -------------------------------------
 FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "$FSCK" | grep -q "format:       v0" \
-    || { echo "$FSCK"; fail "fsck did not report v3"; }
+echo "$FSCK" | grep -q "format:       v1" \
+    || { echo "$FSCK"; fail "fsck did not report "; }
 
-echo "leg 0 OK: v3 skeleton round-trips (mkfs -> mount -> empty -> clean -> fsck)"
+echo "leg 0 OK:  skeleton round-trips (mkfs -> mount -> empty -> clean -> fsck)"
 
 echo
 echo "== leg 1: mount replay (write -> unmount -> remount -> verify) =="
 
-# Re-use the same IMG but first re-mkfs to get a fresh v3 volume
+# Re-use the same IMG but first re-mkfs to get a fresh  volume
 rm -f "$IMG"
 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs2.log" 2>&1 \
     || { cat "$WORK/mkfs2.log"; fail "mkfs failed"; }
 
 mnt_up
-# Write files through the v3 mount
-echo "hello v3 world" > "$MNT/test.txt"
+# Write files through the  mount
+echo "hello  world" > "$MNT/test.txt"
 mkdir -p "$MNT/subdir"
 echo "content in subdir" > "$MNT/subdir/file.txt"
 head -c 102400 /dev/urandom > "$WORK/ref/random.bin"

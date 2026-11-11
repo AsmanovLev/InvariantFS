@@ -324,13 +324,13 @@ typedef struct invfs_volume {
      * was a synchronous ~250 ms per file on flash regardless of file size. */
     uint64_t bm_lo, bm_hi;
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
-    /* WP135: unclaimed short v3 walks (src/core/vol_walk.h). A walk that
+    /* WP135: unclaimed short  walks (src/core/vol_walk.h). A walk that
      * stopped and that nobody committed or explicitly abandoned is an open
      * question about this volume; vol_close and the reporting surfaces read
      * and clear it. Relaxed-atomic -- see vol_walk.c. */
     unsigned VOL_WALK_LATCH_FIELD;
     uint64_t next_inode_id;
-    /* WP111: the v3 inode-id allocator recovers next_inode_id from the
+    /* WP111: the  inode-id allocator recovers next_inode_id from the
      * base tree + delta exactly ONCE per mount. That recovery used to be
      * gated on `next_inode_id <= INVFS_ROOT_INO` -- i.e. on the counter
      * still holding its post-vol_open sentinel -- so ANY other code path
@@ -416,7 +416,7 @@ typedef struct invfs_volume {
      * plugin.mu -> heat.mu and arc.mu -> heat.mu -- never the reverse -- and it
      * can never be the outer half of a cycle. heat_fold() deliberately drops
      * it before the per-record xattr work, because vol_get_xattr /
-     * vol_set_xattr descend into the v3 tree and those locks sit above this
+     * vol_set_xattr descend into the  tree and those locks sit above this
      * one. Read the summary flags through heat_any_rhot()/heat_any_whot(),
      * never directly. */
     pthread_mutex_t heat_mu;
@@ -431,7 +431,7 @@ typedef struct invfs_volume {
     pba_ref_ent *pba_ref;
     size_t pba_ref_mask, pba_ref_n;
     int pba_ref_on;
-    /* WP pba-ref-v3-incremental: set when a recipe was published on a path
+    /* WP pba-ref-incremental: set when a recipe was published on a path
      * that does not adjust the map itself (every vol_inode_delta_put
      * that CHANGES recipe_addr). pba_ref_ensure rebuilds from the live set
      * when it sees this, so the map can never gate a free on a count that
@@ -474,7 +474,7 @@ typedef struct invfs_volume {
      * cpacks_mu is a STRICT LEAF: every region holding it is straight-line
      * code over these fields and the entry struct plus strcmp/strdup/free/
      * memset. The map LOAD runs with it DROPPED, because it calls
-     * vol_find / vol_read_file / cpack_recipe_seg and the v3 tree, delta and
+     * vol_find / vol_read_file / cpack_recipe_seg and the  tree, delta and
      * plugin locks sit above it. So the only orders ever observed are
      * g_io_lock -> cpacks.mu, vol_btree -> cpacks.mu,
      * vol_plugin_client -> cpacks.mu, arc.mu -> cpacks.mu and
@@ -546,7 +546,7 @@ typedef struct invfs_volume {
      * every inode-area byte appended since the last successful barrier
      * dies in "writeback" (zeroed on the image) and the barrier reports
      * EIO. The engine must latch + re-anchor, and every later mutation
-     * must fail loudly. 0 = off. WP80: the hook runs on v3 too; v3 has no
+     * must fail loudly. 0 = off. WP80: the hook runs on  too;  has no
      * v2 inode area, so there the zeroing is a no-op and the latch + the
      * refused mutations are what is exercised. */
     uint64_t sync_fail_at;
@@ -619,7 +619,7 @@ typedef struct invfs_volume {
     uint64_t meta_active_offset;    /* byte offset within active extent */
     uint64_t meta_free_blocks;      /* metadata free block counter */
     uint8_t *meta_type_bitmap;      /* per-block type (DATA=0/META=1), allocated */
-    /* ---- WP-M2: metadata-v3 base-page state (design §12, D3) ----------
+    /* ---- WP-M2: metadata store base-page state (design §12, D3) ----------
      * rt is the RT30 root-area descriptor as loaded from block 0 and
      * CRC-validated (mbuf_rt30_load); rt_present is 1 exactly when that
      * validation passed. The descriptor's root_slot[2] is the double-slot
@@ -629,7 +629,7 @@ typedef struct invfs_volume {
      * skeleton log line (it used to do its own read of block 0, which made
      * a volume that had just recovered off the ANC0 tail anchor also print
      * "presenting an empty namespace"); wiring it to mbuf_rt30_load belongs to the
-     * WP that makes v3 writable, because volume.c is outside WP-M2's file
+     * WP that makes  writable, because volume.c is outside WP-M2's file
      * scope. The allocator's bootstrap cursor hands out the two root-area
      * pages WP-M1 reserved after the mapper table before falling through
      * to the free-space pool; mb_alloc_cursor/fail_run are the per-pool
@@ -651,7 +651,7 @@ typedef struct invfs_volume {
     int      anchor_adopted;          /* 1 = recovered off the anchor */
     int      anchor_refresh_failed;   /* sticky: a refresh write failed */
     invfs_anc0 anchor;                /* the probe's descriptor, on OK */
-    /* WP-M5: the metadata-v3 base-tree engine has been brought up on this
+    /* WP-M5: the metadata store base-tree engine has been brought up on this
      * handle (mbuf_init called once). mbuf_init resets the bootstrap
      * cursor, so it must not run per operation. */
     int      mbuf_ready;
@@ -659,7 +659,7 @@ typedef struct invfs_volume {
     uint64_t mb_boot_end;           /* one past the reserved root-area pages */
     uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */
     uint64_t mb_alloc_fail_run;     /* smallest proven-unavailable run (0=?) */
-    /* ---- WP-M10: metadata-v3 delta-log state (recent tier) ------------
+    /* ---- WP-M10: metadata store delta-log state (recent tier) ------------
      * The append-only delta segment chain holds coalescing namespace
      * mutations; delta_index maps a namespace key to the winning record
      * {segment, offset, seq} (D1: append log + in-memory index). Mount
@@ -749,7 +749,7 @@ typedef struct invfs_volume {
      * Both restart at 0 when the delta is reset, exactly like delta_seq. */
     uint64_t delta_oldest_seq;         /* seq of the oldest live record (0=none) */
     uint64_t delta_oldest_when;        /* CLOCK_MONOTONIC seconds of that record */
-    /* ---- WP-M16: v3 save-point state (SPT0 descriptor) --------------- */
+    /* ---- WP-M16:  save-point state (SPT0 descriptor) --------------- */
     /* savepoint_live: SPT0 was present and CRC-valid at open. */
     /* pinned_root: the base_root pba captured at save-point creation. */
     /* The pin is permanent until the save point is dropped or rolled back; */
@@ -757,11 +757,11 @@ typedef struct invfs_volume {
     invfs_spt0 spt0;                   /* SPT0 descriptor (loaded from disk) */
     int      savepoint_live;            /* SPT0 was present and CRC-valid */
     invfs_blkptr pinned_root;           /* base_root at capture (zeroed = none) */
-    /* ---- WP96: v3 save-point DATA pin (SPN0 descriptor) ---------------- */
+    /* ---- WP96:  save-point DATA pin (SPN0 descriptor) ---------------- */
     /* SPT0 pins {base_root, delta_end} and nothing else, so a sweep that
      * re-encodes a file publishes a new recipe and frees the old segments --
      * which a later invf-rollback republishes over somebody else's bytes. The
-     * pin is the v3 re-expression of WP21's retmap: spn_bitmap is a bitmap
+     * pin is the  re-expression of WP21's retmap: spn_bitmap is a bitmap
      * over total_blocks (one bit per block, lazily loaded) whose set bits are
      * the blocks the live save point's recipes name. spn_armed mirrors the
      * SPN0 descriptor's ARMED bit and is what vol_free_blocks consults, so
@@ -811,7 +811,7 @@ typedef struct invfs_volume {
      * possibly free, instead of to the size of the volume.
      *
      * orph.pba/orph.n is the CANDIDATE SET: the blocks this handle
-     * believes are allocated v3 base pages. It is fed by two sources and
+     * believes are allocated  base pages. It is fed by two sources and
      * nothing else:
      *   (a) btree_orphan_note_alloc() at every mbuf_alloc() site that
      *       produces a base page -- exact, for anything allocated in this
@@ -970,7 +970,7 @@ typedef struct {
 
 #define TZ_OWNER_NAME "\x01tzb"
 
-/* One block extent the v3 batch registry (the hidden TZ_OWNER_NAME file) still
+/* One block extent the  batch registry (the hidden TZ_OWNER_NAME file) still
  * claims. The registry is an owner of blocks that is NOT a recipe: a batch no
  * live recipe names any more is dead, but its registry row outlives the batch
  * until the sweep's tz GC runs. Every other free path must therefore treat a
@@ -1056,7 +1056,7 @@ static inline int name_too_long_for_children(const char *name)
  * `rm a` DESTROYED it -- the purge's "is this my sibling" test was a prefix
  * match on "name!" with no shape check -- while reporting success. The
  * reservation is checked here, at the name-introduction sites
- * (vol_create_node, vol_mkdir, vol_rename, vol_v3_hardlink,
+ * (vol_create_node, vol_mkdir, vol_rename, vol_hardlink,
  * vol_write_begin), and NOT at lookup: a volume that already holds such a
  * name stays readable and unlinkable, so this is a restriction on creating
  * one, never a way to strand a file that is already there.
@@ -1184,7 +1184,7 @@ static inline void vol_bm_dirty(invfs_volume *v, uint64_t i)
     if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
 }
 
-/* THE v3 key ordering. One definition, three users: the base B+-tree's
+/* THE  key ordering. One definition, three users: the base B+-tree's
  * search/insert/split and page-range check (vol_btree.c), the delta log's
  * index and ordered range cursor (vol_delta.c), and the fold's deterministic
  * pre-apply sort (vol_fold.c). Those three were byte-identical private
@@ -1405,7 +1405,7 @@ int vol_write_sb(invfs_volume *v);
  * ordering is delegated to the host filesystem and device. WP80: the barrier
  * before CLEAN is the default everywhere -- vol_close barriers before it
  * writes the CLEAN superblock (INVFS_CLOSE_NOBARRIER=1 is the documented
- * opt-out), and vol_sync does the same on v3 as on v2.
+ * opt-out), and vol_sync does the same on  as on v2.
  */
 int vol_mark_dirty(invfs_volume *v);
 
@@ -1469,8 +1469,8 @@ int meta_get_owner_append_pos(invfs_volume *v, uint64_t rec_size,
  * On a v0.3.0+ mapper volume this wraps meta_get_append_pos and returns
  * the absolute byte position in *rec_pos_out (the caller then io_seek()
  * there, writes, bumps v->met0.active_offset + v->inode_area_pos).
- * On a legacy (format_version=0) volume it falls back to inode_area_pos
- * so the old linear inode area keeps working. rc 0 = ok, -1 = error
+ * The inode_area_pos fallback is defensive dead code: every volume this
+ * build opens has a mapper. rc 0 = ok, -1 = error
  * (mapper missing / record does not fit its extent), -2 = ENOSPC.
  *
  * Flush-safety (WP52): meta_get_append_pos sizes the active extent (or
@@ -1530,9 +1530,9 @@ void pba_ref_modify(invfs_volume *v, uint64_t pba, int delta);
 uint32_t pba_ref_count(invfs_volume *v, uint64_t pba);
 /* drop the map; the next pba_ref_ensure rebuilds it from the live set */
 void pba_ref_reset(invfs_volume *v);
-/* WP pba-ref-v3-incremental: the v3 hook pair. vol_inode_delta_put calls
+/* WP pba-ref-incremental: the  hook pair. vol_inode_delta_put calls
  * pba_ref_invalidate when it publishes a DIFFERENT recipe_addr (the one
- * place every v3 recipe publish funnels through); the two callers that
+ * place every  recipe publish funnels through); the two callers that
  * adjust the map themselves (the sweep's segment remap, dedupe's remap)
  * call pba_ref_validate afterwards. pba_ref_ensure rebuilds whenever the
  * flag is set, so a site that forgets to invalidate can only cost a walk,
@@ -1735,7 +1735,7 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
 int vol_read_inode(invfs_volume *v, uint64_t inode_id, unsigned depth,
                           uint8_t **out, size_t *out_len);
 
-/* WP75: persist the dirty range of the v3 block bitmap (vol_btree.c). Called
+/* WP75: persist the dirty range of the  block bitmap (vol_btree.c). Called
  * by publish before it names a page, and by vol_flush so allocations and
  * frees that land after the last publish are not dropped at close. */
 int vol_bitmap_flush(invfs_volume *v);
@@ -1792,7 +1792,7 @@ int vol_ast_recipe_parse(const uint8_t *blob, size_t blen,
                          invfs_ast_hdr *hdr_out,
                          const invfs_ast_block_entry **ents_out,
                          size_t *nents_out);
-/* WP639: v3 parse heap-converts entries (see vol_ast.c ownership note).
+/* WP639:  parse heap-converts entries (see vol_ast.c ownership note).
  * Static inline (not a .c symbol) so partial links that compile subsets
  * of the core (cpack_map_conc_*: vol_cpack.c + a parse stub, no vol_ast.o)
  * keep resolving it: the only dependency is free(). No-op for v1/v2,
@@ -1947,9 +1947,8 @@ const uint8_t *meta_locate_ext(const uint8_t *rec, size_t rec_len,
                                        size_t *ext_len_out);
 
 /* WP-M21: no online compaction step remains. inode_area_make_room now
- * refuses ENOSPC on the legacy (format_version=0) inode area (which is
- * read-only on mount anyway); on v0.3.0+ it decides purely from the
- * metadata mapper (active extent's free tail OR an allocatable slot). */
+ * decides purely from the metadata mapper (active extent's free tail OR
+ * an allocatable slot); the legacy inode-area fallback is dead code. */
 int  inode_area_make_room(invfs_volume *v, uint64_t need);
 
 /* read the latest live record for an inode id; returns malloc'd buffer and
@@ -2027,7 +2026,7 @@ int record_owns_siblings(const uint8_t *rec, uint32_t rl);
 
 /* The sibling-ownership RULE, on a parsed AST: does a file with this
  * header and these entries own "name!..." siblings that must die with it?
- * Both record_owns_siblings (v2 records) and the v3 write session's
+ * Both record_owns_siblings (v2 records) and the  write session's
  * wsession_load_old_v3 ask this one function, so an overwrite retires the
  * same siblings on both formats. 1 = siblings possible. */
 int ast_owns_siblings(const invfs_ast_hdr *ah,
@@ -2154,7 +2153,7 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
  *                     not here -- they are size-dependent and are priced per
  *                     member by cpack_member_data_cost() below.
  *                     MEASURED, not guessed (tools/measure-file-meta-cost.sh):
- *                     importing 2000 / 4000 / 8000 one-byte files into a v3
+ *                     importing 2000 / 4000 / 8000 one-byte files into a 
  *                     volume and differencing the free-block count costs
  *                     721 / 717 B per file, and at that size the payloads
  *                     batch away to nothing, so all of it is bookkeeping.

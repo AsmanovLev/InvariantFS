@@ -5,7 +5,7 @@
 #   mkfs.invfs [-V] [-v] [-q] dev0 size0_gb dev1 size1_gb   (two-device)
 #
 # size is gigabytes (invf-mkfs unit). Label/UUID options (-L/-U) are
-# REFUSED, not ignored: format v0 has a generated volume UUID but no
+# REFUSED, not ignored: format v1 has a generated volume UUID but no
 # label field, and silently dropping a -L would be a lie the fstab
 # LABEL= lookup then pays for.
 PROG=mkfs.invfs
@@ -55,7 +55,7 @@ while [ $# -gt 0 ]; do
         -v|--verbose) VERBOSE=1; shift;;
         -q|--quiet) QUIET=1; shift;;
         -L|--label|-U|--uuid)
-            echo "$PROG: $1 is unsupported: format v0 carries a generated UUID and no label field" >&2
+            echo "$PROG: $1 is unsupported: format v1 carries a generated UUID and no label field" >&2
             exit 2;;
         -h|--help) usage;;
         --*) echo "$PROG: unknown option $1" >&2; exit 2;;

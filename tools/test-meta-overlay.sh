@@ -1,8 +1,8 @@
 #!/bin/bash
-# test-meta-overlay.sh — WP-M11 e2e: metadata-v3 overlay reads.
+# test-meta-overlay.sh — WP-M11 e2e: metadata store overlay reads.
 #
 # Proves the two-tier read contract end to end on a real VOLF_META image:
-#   leg 0  mkfs v3 (no base rows, empty recent tier);
+#   leg 0  mkfs  (no base rows, empty recent tier);
 #   leg 1  base rows are written, then delta records are appended through the
 #          WP-M10 API (invf-overlay_test scenario): a delta value shadows an
 #          existing base inode, a delta delete hides a base inode, a delta
@@ -38,12 +38,12 @@ if [ ! -x "$B/invf-overlay_test" ]; then
         || fail "cannot build bin/invf-overlay_test"
 fi
 
-echo "== leg 0: mkfs v3 =="
+echo "== leg 0: mkfs  =="
 $B/invf-mkfs "$IMG" 0.3 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
-echo "mkfs: v3 metadata skeleton"
+echo "mkfs:  metadata skeleton"
 
 echo "== leg 1: overlay reads (delta shadows base; base untouched) =="
 $B/invf-overlay_test scenario "$IMG" >"$WORK/scenario.log" 2>&1 \

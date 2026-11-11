@@ -1,5 +1,5 @@
 #!/bin/bash
-# test-meta-write.sh — WP-M9 e2e: the full v3 write path on the base tree.
+# test-meta-write.sh — WP-M9 e2e: the full  write path on the base tree.
 #
 # A VOLF_META volume must support the same streaming/ranged write session the
 # v2 path has (vol_write_begin / vol_write_range / vol_write_truncate /
@@ -111,12 +111,12 @@ cmp_fuse() {
         || fail "$1: FUSE read differs from the source bytes"
 }
 
-echo "== WP-M9: full v3 write path (ranged writes + truncate on the base tree) =="
+echo "== WP-M9: full  write path (ranged writes + truncate on the base tree) =="
 
-# --- mkfs v3 -------------------------------------------------------------
+# --- mkfs  -------------------------------------------------------------
 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
 
 # --- seed source files (built by the same op driver, then copied in) ------
@@ -125,7 +125,7 @@ head -c 200000 /dev/urandom > "$SRC/base"
 echo "base: $(stat -c %s "$SRC/base") bytes"
 
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 # --- create the base file through FUSE (multi-segment write) -------------

@@ -1,13 +1,13 @@
 #!/bin/bash
-# test-meta-mut.sh — WP-M12 e2e: v3 metadata mutations go to the delta.
+# test-meta-mut.sh — WP-M12 e2e:  metadata mutations go to the delta.
 #
 # A VOLF_META volume must route create/unlink/rename/setattr/xattr through the
 # WP-M10 delta append instead of a base B+-tree rewrite, so the base root
-# stays immutable between folds (design-meta-v3.md §1/§4/§13). The WP-M11
+# stays immutable between folds (design-meta-.md §1/§4/§13). The WP-M11
 # overlay (delta first, then base) must make every mutation visible
 # immediately and after a remount.
 #
-#   leg 0  mkfs v3;
+#   leg 0  mkfs ;
 #   leg 1  seed content so the base tree has a non-empty, stable root, then
 #          capture the RT30 root slots/seq and a hash of the active delta
 #          segment (baseline);
@@ -96,12 +96,12 @@ print(h.hexdigest())
 PY
 }
 
-echo "== leg 0: mkfs v3 =="
+echo "== leg 0: mkfs  =="
 $B/invf-mkfs "$IMG" 0.5 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-grep -q "format: v0 metadata skeleton" "$WORK/mkfs.log" \
+grep -q "format: v1 metadata skeleton" "$WORK/mkfs.log" \
     || fail "mkfs did not report the v0 format"
-echo "mkfs: v3 metadata skeleton"
+echo "mkfs:  metadata skeleton"
 
 echo "== leg 1: seed content (non-empty, stable base root) =="
 mnt_up
@@ -119,7 +119,7 @@ echo "baseline: base root slots $S0/$S1 seq $SSEQ; delta hash ${BEFORE_HASH:0:16
 
 echo "== leg 2: metadata mutations append to the delta =="
 mnt_up
-grep -q "format v0" "$WORK/fuse.log" \
+grep -q "format v1" "$WORK/fuse.log" \
     || { cat "$WORK/fuse.log"; fail "mount did not take the v0 open path"; }
 
 touch "$MNT/alpha" "$MNT/beta" "$MNT/doomed"
