@@ -9,8 +9,17 @@ permissions:
 # One active run per branch: at ~20-40 pushes a day of multi-hour
 # filesystem runs, concurrent runs would stack dozens deep. A new push
 # cancels the stale run -- only the newest tree needs a verdict.
+#
+# The tag is an escape hatch, not a knob for parallel runs. A queued run
+# whose jobs were never materialised holds its group forever and cannot be
+# cancelled from code: 2026-11-11, two pushes sat `queued` with zero jobs
+# for 40 minutes while the same tree ran fine on a side branch, and
+# `cancel-in-progress` could not displace them. Bumping the
+# ENGINE_CI_CONCURRENCY_TAG repository variable (Settings -> Variables)
+# moves the branch onto a fresh group without touching this file, and
+# unset it degrades to the same one-run-per-branch behaviour as before.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ vars.ENGINE_CI_CONCURRENCY_TAG || 'v1' }}
   cancel-in-progress: true
 
 on:
