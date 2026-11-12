@@ -108,6 +108,73 @@ void invfs_cd_log(const char *fmt, ...)
  * vol_flush writes just that slice instead of the whole bitmap. */
 
 
+/* WP-DEFER, the dev1 leg: every metadata page is written to BOTH devices
+ * synchronously (blkio_pwrite to v->io and v->io2 below). The dev1 device is
+ * the HDD, and that leg is what turns a 4 KiB metadata page into a ~715 ms
+ * stall: measured on the stand, one unlink that flushed a page wrote 4 KiB,
+ * read 0, and spent 715 ms, all of it attributed to vol_unlink's retire
+ * phase. Group commit already batches the ops; it is the HDD leg that pays.
+ *
+ * The volume already TOLERATES dev1 being behind: vol_mirror_compare detects
+ * divergence and mirror_resync repairs it at the next flush. So the leg can
+ * be queued and drained by vol_commit_mirror instead of paid inline.
+ *
+ * OFF BY DEFAULT, deliberately. While the queue is non-empty dev1 is behind,
+ * and if dev0 dies in that window the tail of the metadata is gone -- that is
+ * a DATA LOSS window, and it must be chosen with a stated policy, not by a
+ * flag default quietly changing durability. INVFS_MIRROR_DEFER=1 enables it
+ * for measurement and for a future stated window.
+ *
+ * Entries carry their volume: a process can have more than one open (the unit
+ * tests do), and a queued write must never land on another volume's device.
+ * A push that would mix volumes writes synchronously instead. */
+#define MIRROR_Q_MAX 64
+struct mirror_pend { invfs_volume *v; uint64_t off; uint32_t len; uint8_t *buf; };
+static struct mirror_pend g_mq[MIRROR_Q_MAX];
+static int g_mq_n;
+static int mirror_defer_on(void)
+{
+    static int r = -1;
+    if (r < 0) { const char *e = getenv("INVFS_MIRROR_DEFER"); r = (e && *e == '1'); }
+    return r;
+}
+static int mirror_q_flush(invfs_volume *v)
+{
+    int i, keep = 0;
+    for (i = 0; i < g_mq_n; i++) {
+        if (g_mq[i].v != v) { g_mq[keep++] = g_mq[i]; continue; }
+        if (blkio_pwrite(&v->io2, g_mq[i].off, g_mq[i].buf, g_mq[i].len) != 0) {
+            int j;
+            for (j = i; j < g_mq_n; j++) free(g_mq[j].buf);
+            g_mq_n = keep;
+            vol_io_error_latch(v, "metadata mirror write (dev1, deferred)");
+            return -1;
+        }
+        free(g_mq[i].buf);
+    }
+    g_mq_n = keep;
+    return 0;
+}
+static int mirror_q_push(invfs_volume *v, uint64_t off, const uint8_t *buf,
+                         uint32_t len)
+{
+    uint8_t *c;
+    if (g_mq_n && g_mq[0].v != v)          /* do not mix volumes */
+        return blkio_pwrite(&v->io2, off, buf, len);
+    if (g_mq_n == MIRROR_Q_MAX && mirror_q_flush(v) != 0)
+        return -1;
+    c = (uint8_t *)malloc(len);
+    if (!c)
+        return blkio_pwrite(&v->io2, off, buf, len);
+    memcpy(c, buf, len);
+    g_mq[g_mq_n].v = v;
+    g_mq[g_mq_n].off = off;
+    g_mq[g_mq_n].len = len;
+    g_mq[g_mq_n].buf = c;
+    g_mq_n++;
+    return 0;
+}
+
 /* CRC convention: over the 24-byte descriptor with the crc32c field
  * itself read as zero (i.e. the bytes 0x100..0x117 of block 0). */
 static uint32_t rdp0_crc(const invfs_rdp0 *rd)
@@ -286,7 +353,10 @@ static int vmux_pwrite1(invfs_volume *v, uint64_t off,
             }
         }
         if (v->io_open[1] && !v->st.dev_skip[1]) {
-            if (blkio_pwrite(&v->io2, off, buf, len) != 0) {
+            if (mirror_defer_on()) {
+                if (mirror_q_push(v, off, buf, (uint32_t)len) != 0)
+                    return -1;
+            } else if (blkio_pwrite(&v->io2, off, buf, len) != 0) {
                 vol_io_error_latch(v, "metadata mirror write (dev1)");
                 return -1;
             }
@@ -510,6 +580,11 @@ static int vol_commit_mirror(invfs_volume *v)
 {
     if (v->ndev != 2 || v->st.degraded)
         return 0;
+    /* Everything the deferred dev1 leg has been holding MUST land before the
+     * barrier: dev1 has to be complete up to this fence, or the DEVT below
+     * would claim a sync it does not have. */
+    if (g_mq_n && mirror_q_flush(v) != 0)
+        return -1;
     if (v->st.resync_pending)
         mirror_resync(v);   /* failures keep the loser skipped */
     v->st.devt.sync_seq++;
