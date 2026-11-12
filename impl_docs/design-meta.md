@@ -1,6 +1,6 @@
-# design-meta- — Two-tier metadata: immutable B+-tree base + append-only delta (LST)
+# design-meta — Two-tier metadata: immutable B+-tree base + delta log
 
-**Branch:** `wp/meta--design` (design only; no code)
+**Branch:** `wp/meta-design` (design only; no code)
 **Severity:** HIGH (format-breaking; replaces the on-disk metadata model)
 **Source:** metadata-layout study; WP58 measurements; `impl_docs/AUDIT.md`;
 `INCIDENTS.md`; AGENTS.md §2.3–§2.5, §2.7, §2.11
@@ -20,7 +20,7 @@ tombstones + flat mapper + rewrite-position checkpoint) with a **two-tier
 metadata store**:
 
 - an **immutable B+-tree base** (stable tier) — the consolidated namespace;
-- an **append-only delta log / LST** (recent tier) — changes since the last fold,
+- a **delta log** (recent tier) — changes since the last fold,
   read-visible with a fast in-memory index;
 - **overlay reads** (delta wins), **fold** = lazy compaction of delta into base;
 - a **single save point** for rollback.
@@ -62,7 +62,7 @@ useful split is **recent vs stable**, not data-zone.
                    │                              │
        ┌───────────┴───────────┐                 ▼
        ▼                       ▼         ┌─────────────────┐
-  DELTA (LST, fast tier)  BASE (Shadow) │ append to delta │
+  DELTA (shadow zone)     BASE (meta zone) │ append to delta │
   recent changes          immutable     └─────────────────┘
   in-mem index            B+-tree
        └───────────┬───────────┘
@@ -74,11 +74,32 @@ useful split is **recent vs stable**, not data-zone.
         new immutable base + delta reset
 ```
 
+Base pages come from `sb.metadata_zone_start` (mirrored write-through to
+both devices); only overflow past that zone goes to the shared pool in the
+shadow zone (`vol_metabuf.c`). See the DELTA placement note below.
+
 - **BASE** — a B+-tree, **immutable between folds**. Root in the superblock
   (double-slot + seq/CRC, the `l2p_replay` idiom, `volume.c:644-669`).
-- **DELTA** — a dedicated append-only metadata log (fast tier / dev0), a single
-  coalescing stream keyed by namespace key, with an in-memory index. Bounded;
-  replayed at mount.
+- **DELTA** — an append-only metadata log: one coalescing stream keyed by
+  namespace key, records appended at a bump pointer, segments chained by
+  `{seg_seq, prev_pba}`, gaps closed with PAD records, with an in-memory
+  index. Bounded; replayed at mount.
+
+  **Placement (as built, 2026-11):** delta segments are allocated from the
+  **shadow zone** (`delta_new_segment` -> `alloc_blocks(sb.shadow_zone_start,
+  ...)`), which on a two-device volume lies entirely on dev1 (the capacity
+  device). This is where metadata ops are slow on a spinning dev1: every
+  create/unlink/rename appends there, and the base pages are mirrored
+  write-through to dev1 as well, so the fast device waits for the slow one.
+  An earlier revision of this section claimed "fast tier / dev0"; that was
+  never true of the code.
+
+  **Constraint on any future move to dev0:** the RAW device may die and the
+  Shadow must still be readable on its own. So the delta cannot be the only
+  copy of recent metadata: either it is mirrored to dev1, or the fold that
+  publishes it into the base lands in Shadow often enough that the delta
+  tail is a bounded, stated loss window — and that window is a contract, not
+  a tuning knob.
 - **READ** — delta index first, then base; delta wins.
 - **WRITE** — append to delta; update the in-memory index; **base untouched**.
 - **FOLD** — merge delta into base, producing a new base; reset delta.
