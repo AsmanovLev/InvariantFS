@@ -132,6 +132,27 @@ void invfs_cd_log(const char *fmt, ...)
 struct mirror_pend { invfs_volume *v; uint64_t off; uint32_t len; uint8_t *buf; };
 static struct mirror_pend g_mq[MIRROR_Q_MAX];
 static int g_mq_n;
+static uint64_t mirror_now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ull + (uint64_t)ts.tv_nsec / 1000000ull;
+}
+/* The stated window: with INVFS_MIRROR_DEFER=1 the dev1 leg (write AND
+ * barrier) is allowed to lag dev0 by up to this many milliseconds. That lag
+ * IS the data-loss window if dev0 dies, which is why it is opt-in and named
+ * rather than a constant nobody reads. 0 = drain on every fence. */
+static uint64_t mirror_window_ms(void)
+{
+    static long w = -1;
+    if (w < 0) {
+        const char *e = getenv("INVFS_MIRROR_WINDOW_MS");
+        w = e && *e ? atol(e) : 1000;
+        if (w < 0) w = 0;
+    }
+    return (uint64_t)w;
+}
+static uint64_t g_mq_last_ms;
 static int mirror_defer_on(void)
 {
     static int r = -1;
@@ -493,8 +514,12 @@ int vmux_barrier(invfs_volume *v, const char *what)
         if (vol_write_devt(v) != 0)
             return -1;
     }
-    if (v->io_open[1] && blkio_flush(&v->io2) != 0)
-        return -1;
+    if (v->io_open[1] &&
+        !(!v->closing && mirror_defer_on() && mirror_window_ms() > 0 &&
+          g_mq_n && mirror_now_ms() - g_mq_last_ms < mirror_window_ms())) {
+        if (blkio_flush(&v->io2) != 0)
+            return -1;
+    }
     return v->st.dev_skip[0] ? 1 : 0;
 }
 
@@ -580,10 +605,25 @@ static int vol_commit_mirror(invfs_volume *v)
 {
     if (v->ndev != 2 || v->st.degraded)
         return 0;
-    /* Everything the deferred dev1 leg has been holding MUST land before the
-     * barrier: dev1 has to be complete up to this fence, or the DEVT below
-     * would claim a sync it does not have. */
-    if (g_mq_n && mirror_q_flush(v) != 0)
+    /* Everything the deferred dev1 leg has been holding lands here, but only
+     * once the stated window has expired: draining on every fence would pay
+     * the same HDD barrier the deferral exists to avoid (measured: 715 ms,
+     * 4 KiB written, nothing read). While the window is open dev1 is behind
+     * and the DEVT below says so -- dev0/DEVT stay the authority, and
+     * mirror_resync repairs dev1 from them if it falls further behind. */
+    if (g_mq_n) {
+        if (!v->closing && mirror_defer_on() && mirror_window_ms() > 0 &&
+            mirror_now_ms() - g_mq_last_ms < mirror_window_ms())
+            return 0;
+        if (mirror_q_flush(v) != 0)
+            return -1;
+        if (blkio_flush(&v->io2) != 0) {
+            vol_io_error_latch(v, "metadata mirror barrier (dev1, deferred)");
+            return -1;
+        }
+        g_mq_last_ms = mirror_now_ms();
+    }
+    if (0)
         return -1;
     if (v->st.resync_pending)
         mirror_resync(v);   /* failures keep the loser skipped */

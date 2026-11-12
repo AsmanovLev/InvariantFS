@@ -332,6 +332,7 @@ typedef struct invfs_volume {
      * the cheap "is anything dirty" flag for the paths that ask. */
     uint8_t *bm_dirty;
     uint64_t bm_dirty_n;
+    int closing;            /* vol_close: drain the dev1 leg, ignore the window */
     uint64_t bm_dirty_cap;   /* bytes allocated, for the resize regrow */
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
     /* WP135: unclaimed short  walks (src/core/vol_walk.h). A walk that
