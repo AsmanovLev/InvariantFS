@@ -18,7 +18,7 @@
 /* Refusal codes. These are also the vol_open err codes, so a caller can pass
  * the return value straight through to its own err_out unchanged. */
 #define INVFS_FMT_REFUSE_FLAG       (-12)  /* VOLF_META not set */
-#define INVFS_FMT_REFUSE_GENERATION (-13)  /* format_version mismatch */
+#define INVFS_FMT_REFUSE_GENERATION (-13)  /* retired: the generation gate is gone */
 #define INVFS_FMT_REFUSE_FORBIDDEN  (-14)  /* a retired flag is set (reserved) */
 
 /* Decide accept/refuse once, and fill *why (never empty on refusal) with one
@@ -27,8 +27,13 @@
  *
  * The checks, in order, mirror the format marker ledger in invarifs.h:
  *   1. VOLF_META is the authoritative "metadata store volume" marker.
- *   2. sb.format_version must equal INVFS_FORMAT_VERSION (generation gate).
- *   3. reserved: retired/forbidden vol_flags bits (none defined today).
+ *   2. reserved: retired/forbidden vol_flags bits (none defined today).
+ *
+ * sb.format_version is NOT checked. See the note in vol_format.c: while the
+ * format is unfrozen the byte cannot distinguish a readable volume from an
+ * unreadable one, so refusing on it only manufactured migrations. It is
+ * still written (mkfs stamps INVFS_FORMAT_VERSION) and reported by fsck, so
+ * an operator can tell what produced an image.
  *
  * NOTE: this does NOT check sb.magic or the superblock CRC — those are
  * "is this a valid InvariantFS image at all", and stay where they are.
