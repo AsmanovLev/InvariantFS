@@ -53,17 +53,17 @@ src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name
 src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
 src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
 src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
-src/cli/fuse_fs.c:1769:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2074:SKIP
-src/cli/fuse_fs.c:2412:SKIP
-src/cli/fuse_fs.c:3121:SKIP
-src/cli/fuse_fs.c:3342:SKIP
-src/cli/fuse_fs.c:3397:SKIP
-src/cli/fuse_fs.c:3658:SKIP
-src/cli/fuse_fs.c:3863:SKIP
-src/cli/fuse_fs.c:3950:SKIP
-src/cli/fuse_fs.c:3985:SKIP
-src/cli/fuse_fs.c:4022:SKIP
+src/cli/fuse_fs.c:1801:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2106:SKIP
+src/cli/fuse_fs.c:2445:SKIP
+src/cli/fuse_fs.c:3154:SKIP
+src/cli/fuse_fs.c:3375:SKIP
+src/cli/fuse_fs.c:3430:SKIP
+src/cli/fuse_fs.c:3691:SKIP
+src/cli/fuse_fs.c:3896:SKIP
+src/cli/fuse_fs.c:3983:SKIP
+src/cli/fuse_fs.c:4018:SKIP
+src/cli/fuse_fs.c:4055:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP

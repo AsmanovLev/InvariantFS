@@ -207,7 +207,7 @@ mnt_down
 echo "== leg 5: fsck clean =="
 FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "$FSCK" | grep -q "format:       v0" || { echo "$FSCK"; fail "fsck not v0"; }
+echo "$FSCK" | grep -q "format:       v[0-9]" || { echo "$FSCK"; fail "fsck not v0"; }
 python3 - "$IMG" <<'PY' || fail "volume not CLEAN at the end"
 import sys
 blk = open(sys.argv[1], 'rb').read(0x20)

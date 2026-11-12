@@ -309,6 +309,17 @@ static int g_table_stale = 0;
  * table is usable for what it holds; it is not authority on what the volume
  * contains, so a name it lacks is an I/O error, not an ENOENT. */
 static int g_table_degraded = 0;
+/* WP-FUSE-SHARD: when the last rebuild was ATTEMPTED.
+ *
+ * A point lookup no longer rebuilds the table (that was a full namespace
+ * walk per new name -- see snapshot_entry), so the stale/degraded marks
+ * have no other owner and a degraded mount would never heal. They are not
+ * left to the lookup rate either: a rebuild that keeps failing would be an
+ * O(N) walk per operation again. The miss path therefore retries a rebuild
+ * at most once per interval, which bounds the cost to one walk per window
+ * however fast the workload is. */
+#define TABLE_REBUILD_MIN_INTERVAL 60.0
+static double g_last_rebuild_sec = 0;
 
 static void table_mark_stale(void) { g_table_stale = 1; }
 static void table_upsert_locked(const char *name, uint64_t ino,
@@ -712,24 +723,37 @@ static void table_remove_name(const char *name)
  * most only skip work, which is fail-safe under the collapse; changing the
  * meaning for all of them at once would change what every one of them does,
  * and the finding is that this one DECIDES something. Hence vol_find_rc. */
-static void table_sync_one_locked(const char *name)
+/* Resolve ONE name against the engine and fold the answer into the table.
+ *
+ * Returns what the ENGINE said, which is what a caller needs to choose
+ * between "absent" and "could not answer":
+ *     1  the name exists (the row was upserted)
+ *     0  the engine says it does not exist (the row was removed)
+ *    -1  the lookup did not complete (the table is marked stale)
+ *
+ * Caller must hold g_io_lock. The -1 case is the ONLY one that may be
+ * reported to the kernel as EIO: a table miss is not evidence of absence,
+ * but an engine answer is. */
+static int table_sync_one_locked(const char *name)
 {
     uint64_t id = 0, sz = 0, ct = 0;
     int rc;
-    if (!g_vol) return;
+    if (!g_vol) return -1;
     rc = vol_find_rc(g_vol, name, &id);
     if (rc < 0) {
         table_mark_stale();
         fprintf(stderr, "invf-fuse: table: lookup did not complete for \"%s\"; "
                         "keeping the entry the table already has, and marking "
                         "the table for a rebuild\n", name);
-        return;
+        return -1;
     }
-    if (rc == 0) { table_remove_name(name); return; }
-    if (vol_stat_full(g_vol, name, &id, &sz, &ct) == 0)
+    if (rc == 0) { table_remove_name(name); return 0; }
+    if (vol_stat_full(g_vol, name, &id, &sz, &ct) == 0) {
         table_upsert_locked(name, id, sz, ct);
-    else
-        table_mark_stale();   /* found, but not stat-able: same "keep, and ask again later" */
+        return 1;
+    }
+    table_mark_stale();   /* found, but not stat-able: same "keep, and ask again later" */
+    return -1;
 }
 
 /* Refresh the ONE directory whose entry a mutation changed.
@@ -805,11 +829,21 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
              * answers are exactly one engine lookup. So rebuild only when it
              * can actually finish (stale and NOT degraded -- a rename or link
              * marked it), and otherwise sync the one name and move on. */
-            if (g_table_stale && !g_table_degraded)
-                table_refresh_if_stale_locked();
+            if (g_table_stale) {
+                double now = fuse_now_sec();
+                if (!g_table_degraded ||
+                    now - g_last_rebuild_sec >= TABLE_REBUILD_MIN_INTERVAL)
+                    table_refresh_if_stale_locked();
+            }
             if (!e) {
-                table_sync_one_locked(name);
+                int ans = table_sync_one_locked(name);
                 e = find_entry(name);
+                /* The engine answered and said "no such name": that is
+                 * AUTHORITATIVE, degraded or not -- this one lookup just
+                 * read the store, so the table being short no longer makes
+                 * ENOENT a guess. Only "could not answer" becomes EIO. */
+                if (!e && ans < 0)
+                    degraded = 1;
             }
         }
         if (e) {
@@ -817,8 +851,6 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
             if (size_out)  *size_out  = e->size;
             if (ctime_out) *ctime_out = e->ctime;
             found = 1;
-        } else if (g_table_degraded) {
-            degraded = 1;
         }
     }
     pthread_mutex_unlock(&g_io_lock);
@@ -2151,6 +2183,7 @@ static int invf_read(const char *path, char *buf, size_t size, off_t offset,
 static void table_rebuild_locked(void)
 {
     /* free old table, rescan */
+    g_last_rebuild_sec = fuse_now_sec();
     free(g_entries);
     g_entries = NULL; g_nentries = 0; g_cap = 0;
     free(g_stage_entries);

@@ -16,7 +16,20 @@ created 2000 more in 0.57 s            (~3.5k files/s)
 build_file_table calls: 1              (mount only, 0.122 s / 10,080 entries)
 ```
 
-Two conclusions:
+Scaling, same volume, 50,000 files in ten batches of 5,000:
+
+```
+batch 1:  3452 files/s      batch 6:  3393 files/s
+batch 2:  3402 files/s      batch 7:  3386 files/s
+batch 3:  3430 files/s      batch 8:  3328 files/s
+batch 4:  3456 files/s      batch 9:  3353 files/s
+batch 5:  3405 files/s      batch 10: 3353 files/s
+TOTAL 50000 files in 14.77 s         rebuilds: 1 (mount, empty tree)
+```
+
+Flat to within 3% across a 10x growth in volume size. Extrapolated, a
+160,000-name tree is ~47 s; the stand spent nine hours, so the gap is a
+per-operation O(N), not a scaling curve. Two conclusions:
 
 1. **Parallelism would buy nothing here.** The client (rsync, tar) is one
    thread: it issues one op at a time, so a global lock is free. Sharded

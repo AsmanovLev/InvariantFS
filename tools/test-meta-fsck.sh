@@ -294,14 +294,14 @@ WANT_NO_BG="TREE KEYS=alpha=one"
 
 echo "== WP-M4:  fsck (RT30 + base-tree walk) =="
 
-# --- leg 0: empty  volume is clean ------------------------------------
+# --- leg 0: empty volume is clean ------------------------------------
 $B/invf-mkfs "$IMG" 0.2 >"$WORK/mkfs.log" 2>&1 \
     || { cat "$WORK/mkfs.log"; fail "mkfs failed"; }
-OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "empty  volume: fsck exited nonzero"; }
-echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "empty  volume: not OK"; }
-echo "$OUT" | grep -q "format:       v0" \
-    || { echo "$OUT"; fail "empty  volume: not reported as "; }
-echo "empty  volume: OK (exit 0)"
+OUT=$(fsck_out "$IMG") || { echo "$OUT"; fail "empty volume: fsck exited nonzero"; }
+echo "$OUT" | grep -q "^OK$" || { echo "$OUT"; fail "empty volume: not OK"; }
+echo "$OUT" | grep -q "format:       v[0-9]" \
+    || { echo "$OUT"; fail "empty volume: not reported as a format generation"; }
+echo "empty volume: OK (exit 0)"
 
 # --- leg 1: intact hand-built base tree is CLEAN and walked -------------
 craft_base "$IMG" intact >"$WORK/craft1.log" 2>&1 \

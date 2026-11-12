@@ -566,7 +566,7 @@ typedef struct {
 
 int vol_nlink_audit(invfs_volume *v, invfs_nlink_audit *out);
 
-/* ---- recipe-resolvability audit (, fsck) ---------------------------
+/* ---- recipe-resolvability audit (metadata store, fsck) ---------------------------
  * The other half of "can this volume still be read". The nlink audit above
  * compares the NAMES against the rows; the page walk (vol_fsck.c) compares
  * the pages against their CRCs. Neither one ever resolves the 32-byte

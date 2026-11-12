@@ -427,31 +427,30 @@ int main(int argc, char **argv)
 
         build_degraded_window_open();
         se = snapshot_entry("b/x", NULL, NULL, NULL);
-        ok(se == -1,
-           "3d. a lookup for the lost name reports DEGRADED (-1), not absent "
-           "(0) (rc=%d)", se);
-        if (se == 0)
-            printf("        ^ reported ABSENT: the daemon just told the "
-                   "kernel a file that is on the disk does not exist\n");
+        ok(se == 1,
+           "3d. a lookup for a name the short table lost RESOLVES it (rc=%d) -- "
+           "the table is no longer the authority on a miss, the engine is "
+           "(WP-FUSE-SHARD: rebuilding here was a whole-tree walk per name)",
+           se);
+        ok(find_entry("b/x") != NULL,
+           "3d2. and the answer is folded into the table, so the next lookup "
+           "does not pay for it again");
 
         build_degraded_window();
         build_degraded_window_open();
         memset(&fi, 0, sizeof fi);
         rc = invf_open("/b/x", &fi);
-        ok(rc == -EIO,
-           "3e. open() on it returns EIO, not ENOENT (rc=%d, want %d)",
-           rc, -EIO);
-        if (rc == -ENOENT)
-            printf("        ^ ENOENT: the daemon just told the kernel a file "
-                   "that is on the disk does not exist\n");
+        ok(rc == 0,
+           "3e. open() on it SUCCEEDS (rc=%d) -- neither ENOENT nor EIO for a "
+           "file that is on the disk", rc);
 
         build_degraded_window();
         build_degraded_window_open();
         memset(&st, 0, sizeof st);
         memset(&fi, 0, sizeof fi);
         rc = invf_getattr("/b/x", &st, &fi);
-        ok(rc == -EIO,
-           "3f. getattr() likewise (rc=%d, want %d)", rc, -EIO);
+        ok(rc == 0,
+           "3f. getattr() likewise (rc=%d)", rc);
 
         build_degraded_window();
         build_degraded_window_open();
@@ -460,10 +459,10 @@ int main(int argc, char **argv)
             memset(buf, 0, sizeof buf);
             memset(&fi, 0, sizeof fi);
             rc = invf_read("/b/x", buf, 1, 0, &fi);
-            ok(rc == -EIO,
-               "3g. read() on it returns EIO too (rc=%d, want %d) -- this is "
-               "what `cat` does, and it is the same three call sites the "
-               "finding names", rc, -EIO);
+            ok(rc == 1,
+               "3g. read() returns the byte it holds (rc=%d) -- this is what "
+               "`cat` does, and it is the same three call sites the finding "
+               "names", rc);
         }
 
         /* A name the short table DOES hold still resolves: the table is
@@ -493,11 +492,15 @@ int main(int argc, char **argv)
         build_degraded_window();
         ok(g_table_degraded == 1, "3i. window open again (degraded=%d)",
            g_table_degraded);
+        /* The rebuild is now interval-bounded, so a lookup cannot force it
+         * every time it runs. Move the clock past the window to assert the
+         * other half of the contract: a degraded table DOES heal, it just
+         * does not pay an O(N) walk per operation to do it. */
+        g_last_rebuild_sec = 0;
         se = snapshot_entry("b/x", NULL, NULL, NULL);
         ok(se == 1,
-           "3j. and the NEXT operation heals it: b/x resolves again (rc=%d). "
-           "Before the fix the stale flag was cleared unconditionally, so "
-           "this retry never happened", se);
+           "3j. b/x resolves (rc=%d) -- which it already did above, without "
+           "a rebuild; here the interval has also elapsed", se);
         ok(g_table_degraded == 0 && g_table_stale == 0,
            "3k. with both marks cleared once the rebuild completes "
            "(degraded=%d stale=%d)", g_table_degraded, g_table_stale);

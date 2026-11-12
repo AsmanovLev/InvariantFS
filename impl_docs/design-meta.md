@@ -312,4 +312,4 @@ field maturity. Profile: read-mostly / immutable / archive.
 ## 19. Coordination
 
 - Review artifact only; implementation WPs cut from §15.
-- Supersedes `WP58-meta-record-.md` (deleted; recoverable from git history).
+- Supersedes `WP58-meta-record-v3.md` (deleted; recoverable from git history — it lived in `impl_docs/old_docs/`).

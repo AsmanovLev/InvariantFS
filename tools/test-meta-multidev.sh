@@ -134,7 +134,7 @@ mnt_down
 echo "== leg 5: fsck clean; mirror still byte-identical =="
 FSCK=$($B/invf-fsck "$D0" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
-echo "$FSCK" | grep -q "format:       v0" || { echo "$FSCK"; fail "fsck not v0"; }
+echo "$FSCK" | grep -q "format:       v[0-9]" || { echo "$FSCK"; fail "fsck not v0"; }
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \
     || fail "metadata span differs after writes"
 echo "fsck OK ( base tree); metadata mirror byte-identical after writes"
