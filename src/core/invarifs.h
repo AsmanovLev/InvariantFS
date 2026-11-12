@@ -224,7 +224,10 @@ typedef struct {
     uint32_t hard_min_blocks;       /* 0x84 below this -> READONLY */
     uint32_t vol_flags;             /* 0x88 bit0 = VOLF_READONLY */
     uint32_t pad2;                  /* 0x8C reserved, must be 0 */
-    uint8_t  format_version;       /* 0x90 == INVFS_FORMAT_VERSION (0: current unstable generation; nonzero: refuse) */
+    uint8_t  format_version;       /* 0x90 == INVFS_FORMAT_VERSION, read through
+                                    * invfs_format_accept(): 0 = legacy/unset
+                                    * (refused: predates the metadata store),
+                                    * 1 = current. Anything else is refused. */
     uint8_t  pad3[3];              /* 0x91 padding */
     /* WP30: dynamic metadata extents (outside checksum - 0 on old images) */
     uint32_t meta_reserved_pct;     /* 0x94 min free pool % for metadata */
