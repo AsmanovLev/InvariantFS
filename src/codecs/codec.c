@@ -1974,6 +1974,14 @@ const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c)
  * volume-relative for volume packs (never eligible: is_volume gates
  * the origin check before any filesystem access). Both stay valid
  * under the same rule as the registry view. */
+/* How many codecs are compiled in (the registry[] array above). Used by the
+ * mount-path summary so an operator can tell what a volume brought with it
+ * from what the binary itself carries. */
+int invfs_codec_builtin_count(void)
+{
+    return (int)(sizeof registry / sizeof registry[0]);
+}
+
 const char *invfs_codec_pack_reg_dir(const invfs_codec *c)
 {
     pack_entry *p = pack_record_for(c);

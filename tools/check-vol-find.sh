@@ -146,8 +146,8 @@ src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
 src/core/volume.c:965:SKIP   # reserve scan: direct .ivpack file lookup
 src/core/volume.c:986:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1437:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1438:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/volume.c:1450:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1451:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

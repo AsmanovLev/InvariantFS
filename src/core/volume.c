@@ -1003,6 +1003,10 @@ static int vol_scan_pack_dir(invfs_volume *v, const char *packdir)
 
 static void vol_load_volume_packs(invfs_volume *v)
 {
+    /* One slot per KIND, so the mount line can say what was actually found
+     * instead of one opaque total. "packs" is the mixed catch-all mkfs and
+     * older trees leave things in; "codecpacks" is the legacy directory
+     * form the .ivpack files replaced. */
     static const char *subdirs[] = {
         ".invariantfs/packs/containers",
         ".invariantfs/packs/codecs",
@@ -1010,13 +1014,22 @@ static void vol_load_volume_packs(invfs_volume *v)
         ".invariantfs/packs",
         ".invariantfs/codecpacks",
     };
+    int n[sizeof(subdirs) / sizeof(subdirs[0])];
     int loaded = 0;
+
     for (size_t s = 0; s < sizeof(subdirs) / sizeof(subdirs[0]); s++) {
-        loaded += vol_scan_pack_dir(v, subdirs[s]);
+        n[s] = vol_scan_pack_dir(v, subdirs[s]);
+        loaded += n[s];
     }
-    if (loaded)
-        fprintf(stderr, "vol: %d pack(s) loaded from this volume's"
-                " .invariantfs\n", loaded);
+
+    /* Printed on EVERY mount, zeros included. The question "what did this
+     * volume load" is one an operator asks precisely when the answer is
+     * "nothing" and the file they expected to be handled is not. The
+     * built-in count is there so the two numbers can be told apart: packs
+     * this volume brought, versus codecs this binary already has. */
+    fprintf(stderr, "vol: packs from volume: %d container, %d codec (+%d legacy), "
+                    "%d helper, %d other; built-in codecs: %d\n",
+            n[0], n[1], n[4], n[2], n[3], invfs_codec_builtin_count());
 }
 
 static invfs_volume *vol_open_inner(const char *path, int *err_out)

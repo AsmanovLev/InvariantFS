@@ -158,6 +158,9 @@ const invfs_pack_def *invfs_codec_pack_def(const invfs_codec *c);
  * Unknown codec (no pack record) reports dir NULL + is_volume 1, which
  * the loader's gate refuses. */
 const char *invfs_codec_pack_reg_dir(const invfs_codec *c);
+/* Number of codecs compiled into this build (the built-in registry). */
+int invfs_codec_builtin_count(void);
+
 int invfs_codec_pack_is_volume(const invfs_codec *c);
 
 /* Reserve 3/3: exec materialization (owner request). A host pack's dir
