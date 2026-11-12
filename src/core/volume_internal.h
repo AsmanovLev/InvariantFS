@@ -332,6 +332,7 @@ typedef struct invfs_volume {
      * the cheap "is anything dirty" flag for the paths that ask. */
     uint8_t *bm_dirty;
     uint64_t bm_dirty_n;
+    uint64_t bm_dirty_cap;   /* bytes allocated, for the resize regrow */
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
     /* WP135: unclaimed short  walks (src/core/vol_walk.h). A walk that
      * stopped and that nobody committed or explicitly abandoned is an open
@@ -1188,21 +1189,39 @@ static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u <
 static inline void vol_bm_dirty(invfs_volume *v, uint64_t i)
 {
     uint64_t byte = i / 8;
-    uint64_t blk = byte / INVFS_BLOCK_SIZE;
-    if (!v->bm_dirty) {
-        uint64_t n = (v->bitmap_blocks + 7u) / 8u;
-        if (n == 0)
-            n = 1;
-        v->bm_dirty = (uint8_t *)calloc((size_t)n, 1);
-        if (!v->bm_dirty) {          /* no map: fall back to the range */
+    uint64_t need = (v->bitmap_blocks + 7u) / 8u;
+    uint64_t blk;
+    /* Sized from the CURRENT bitmap_blocks, never from a lazy guess: an
+     * earlier version allocated on first touch, which can happen before
+     * bitmap_blocks is known (or after a resize), and then indexed a
+     * one-byte map with block numbers in the thousands. If the size is not
+     * known yet, fall back to the byte range and allocate later. */
+    if (need == 0) {
+        if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
+        if (byte < v->bm_lo) v->bm_lo = byte;
+        if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
+        return;
+    }
+    if (!v->bm_dirty || v->bm_dirty_cap < need) {
+        uint8_t *p = (uint8_t *)calloc((size_t)need, 1);
+        if (!p) {                     /* no map: fall back to the range */
             if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
             if (byte < v->bm_lo) v->bm_lo = byte;
             if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
             return;
         }
+        free(v->bm_dirty);
+        v->bm_dirty = p;
+        v->bm_dirty_cap = need;
+        /* Conservative on (re)allocation: the bits already set are lost with
+         * the old map, so declare EVERY block dirty. One full write once per
+         * open/resize is correct; guessing which were dirty is not. */
+        memset(p, 0xFF, (size_t)need);
+        v->bm_dirty_n = need * 8u;
     }
+    blk = byte / INVFS_BLOCK_SIZE;
     if (blk >= v->bitmap_blocks)
-        blk = v->bitmap_blocks ? v->bitmap_blocks - 1 : 0;
+        blk = v->bitmap_blocks - 1;
     if (!bit_get(v->bm_dirty, blk)) {
         bit_set(v->bm_dirty, blk);
         v->bm_dirty_n++;
