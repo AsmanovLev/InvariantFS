@@ -88,6 +88,8 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
+#include <pthread.h>
+
 #include "volume_internal.h"
 #include "vol_btree.h"
 #include "vol_delta.h"
@@ -607,6 +609,21 @@ int vol_fold(invfs_volume *v)
 
 /* ---------------------------------------------------------------- trigger */
 
+/* One fold at a time, PER PROCESS.
+ *
+ * A fold is a read-merge-publish-reclaim sequence with mutable state on the
+ * volume (fold_pre_root, the delta index, the base root slot) and no internal
+ * locking of its own: it was only ever reachable from the sweep, which ran on
+ * one thread. Calling it from the ordinary write path put it on every FUSE
+ * thread at once, and two concurrent folds corrupt each other -- the second
+ * overwrites fold_pre_root and fold_reclaim_hook then frees pages the first
+ * one had just published as live. Measured consequence of getting this wrong:
+ * a 140 000-file volume came back EMPTY after the daemon was killed.
+ *
+ * trylock, not lock: a fold is optional work. If one is already running, the
+ * caller simply leaves the delta to that fold or to the next trigger. */
+static pthread_mutex_t g_fold_gate = PTHREAD_MUTEX_INITIALIZER;
+
 int vol_fold_request(invfs_volume *v)
 {
     uint64_t bytes = 0, records = 0, now;
@@ -631,19 +648,26 @@ int vol_fold_request(invfs_volume *v)
     }
     if (!need)
         return 0;
+    if (pthread_mutex_trylock(&g_fold_gate) != 0)
+        return 0;                  /* another fold is already on this volume */
 
     /* WP-M18: capture pre-fold root for reclaim_hook (called after fold) */
-    if (vol_base_root(v, &v->fold_pre_root) != 0)
+    if (vol_base_root(v, &v->fold_pre_root) != 0) {
+        pthread_mutex_unlock(&g_fold_gate);
         return -1;
+    }
 
     rc = vol_fold(v);
-    if (rc != 0)
+    if (rc != 0) {
+        pthread_mutex_unlock(&g_fold_gate);
         return -1;
+    }
 
     /* fold succeeded: call the reclaim hook with old and new roots */
     if (vol_base_root(v, &new_root) == 0)
         fold_reclaim_hook(v, v->fold_pre_root, new_root);
 
+    pthread_mutex_unlock(&g_fold_gate);
     return 1;
 }
 

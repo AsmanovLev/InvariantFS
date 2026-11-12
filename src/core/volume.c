@@ -1781,6 +1781,21 @@ void vol_close(invfs_volume *v)
        dirtied the device (vol_mark_dirty refuses), so there is nothing to
        flush and the CLEAN mark is not this view's to write. */
     if (v->dirty) {
+        /* Compact the delta before the final barrier.
+         *
+         * The fold triggers (64 MiB of payload / 262144 records / oldest
+         * record older than an hour) live in vol_fold_request, and until now
+         * they were consulted ONLY inside a sweep pass. Sweeping is off by
+         * default (INVFS_SWEEP_INTERVAL unset == -1), so a volume nobody
+         * swept never folded: the delta grew without bound, every mount
+         * replayed all of it, and the space held by superseded records came
+         * back only if someone ran invf-sweep or invf-fsck by hand. Closing
+         * is the cheapest moment to fix that -- nobody is waiting, and the
+         * barrier below covers the pages the fold wrote. */
+        if (vol_delta_count(v) > 0 && vol_fold_request(v) != 0)
+            fprintf(stderr, "vol_close: delta fold failed; the delta stays "
+                    "uncompacted for the next mount to replay\n");
+
         /* WP80/A:  sets needs_recovery unconditionally at open (the M5
          * backstop), so it cannot distinguish a real this-session io error
          * there -- io_latched can. A latched volume must never write CLEAN:

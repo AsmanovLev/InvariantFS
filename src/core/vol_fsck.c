@@ -116,6 +116,23 @@ int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
      * after its recipe landed cannot be quarantined here yet. Both of those
      * were deleted with that stream; the gap is now a gap in the 
      * checker, not a branch that was never taken. */
+    /* The delta is part of the volume, and this checker reads only the base.
+     *
+     * A volume whose recent changes are still un-folded -- the normal state,
+     * because the fold triggers are consulted from a sweep and sweeping is
+     * off by default -- was reported as "CLEAN, 0 names over 0 live inodes"
+     * while `invf-ls` on the same image listed every file. That answer is not
+     * a harmless underestimate: it reads as "this volume is empty", and a
+     * `-f` run is one keystroke away.
+     *
+     * Fold first. It is what a mount would eventually do, it is cheap offline,
+     * and it makes the report describe the VOLUME instead of one of its tiers.
+     */
+    if (vol_delta_count(v) == 0)
+        (void)vol_delta_mount(v);          /* replay: count() reads the index */
+    if (vol_delta_count(v) > 0)
+        (void)vol_fold(v);
+
     return fsck_scan(v, rep, fix, discard_reachable);
 }
 
