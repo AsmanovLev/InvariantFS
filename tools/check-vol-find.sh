@@ -39,32 +39,44 @@ cd "$(dirname "$0")/.." || exit 1
 # ACTS = the result decides something. SKIP = merely skips work.
 # Keep this sorted; it is the ledger.
 LEDGER="
-src/cli/batch_owner_test.c:92:SKIP
 src/cli/acl_inherit_test.c:266:SKIP   # child_has_acl: measurement, fault spent
 src/cli/acl_inherit_test.c:291:SKIP   # setup: aborts the test if the /p anchor is not found
+src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
+src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss -- and WP141 made the exact-name lookup the FIRST thing vol_read_named does (src/core/vol_read.c), so a present file is never shadowed by a container member. An earlier version of this comment justified itself with the opposite claim (that vol_read_named reported a miss for a file present and intact); that was measured and REFUTED -- the defect was real but a different one, and it is fixed.
+src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
+src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
+src/cli/batch_owner_test.c:92:SKIP
 src/cli/cat.c:95:SKIP
 src/cli/cat.c:121:SKIP
 src/cli/cp.c:118:SKIP
+src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name resolves IS the measurement -- a CRC bug that loses a written file on reopen shows up exactly here, so the result has to decide the assertion.
+src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
+src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
+src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
+src/cli/fuse_fs.c:1769:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2074:SKIP
+src/cli/fuse_fs.c:2412:SKIP
+src/cli/fuse_fs.c:3121:SKIP
+src/cli/fuse_fs.c:3342:SKIP
+src/cli/fuse_fs.c:3397:SKIP
+src/cli/fuse_fs.c:3658:SKIP
+src/cli/fuse_fs.c:3863:SKIP
+src/cli/fuse_fs.c:3950:SKIP
+src/cli/fuse_fs.c:3985:SKIP
+src/cli/fuse_fs.c:4022:SKIP
 src/cli/heat_walk_test.c:365:SKIP
-src/cli/fuse_fs.c:1736:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2041:SKIP
-src/cli/fuse_fs.c:2379:SKIP
-src/cli/fuse_fs.c:3088:SKIP
-src/cli/fuse_fs.c:3309:SKIP
-src/cli/fuse_fs.c:3364:SKIP
-src/cli/fuse_fs.c:3625:SKIP
-src/cli/fuse_fs.c:3830:SKIP
-src/cli/fuse_fs.c:3917:SKIP
-src/cli/fuse_fs.c:3952:SKIP
-src/cli/fuse_fs.c:3989:SKIP
+src/cli/lane_release_test.c:243:SKIP
+src/cli/ls.c:121:SKIP
+src/cli/ls.c:135:SKIP
 src/cli/otrunc_test.c:568:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/otrunc_test.c:572:SKIP   # calibration: the armed lookup IS the assertion
 src/cli/pack.c:2869:SKIP   # list --volume: unreadable manifest skips the pack row
 src/cli/pack.c:2902:SKIP   # list --volume: absent source marker just shows no [ivpack]/[raw]/[local] tag
 src/cli/pack.c:3471:ACTS   # install --volume: present manifest refuses the duplicate (needs -y)
-src/cli/lane_release_test.c:243:SKIP
-src/cli/ls.c:121:SKIP
-src/cli/ls.c:135:SKIP
+src/cli/read_named_test.c:254:SKIP   # setup: whether a name resolves IS the measurement -- same shape as bang_name_test.c:146
+src/cli/read_named_test.c:258:SKIP   # setup: THE precondition of LEG A. The exact name must resolve, or the leg is not testing shadowing but absence
+src/cli/read_named_test.c:305:SKIP   # LEG B setup: the exact name must be GONE, or the control is not a control
+src/cli/read_named_test.c:378:SKIP   # LEG E setup: whether a name resolves IS the measurement -- the whole leg is that the bang name does not perturb the plain ones
 src/cli/read_parallel_bitexact_test.c:427:SKIP
 src/cli/rollback_symlink_test.c:207:SKIP
 src/cli/rollback_symlink_test.c:223:SKIP
@@ -72,18 +84,15 @@ src/cli/rollback_symlink_test.c:256:ACTS
 src/cli/rollback_symlink_test.c:283:ACTS
 src/cli/rollback_symlink_test.c:314:SKIP
 src/cli/rt_slot_test.c:623:ACTS
+src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
+src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/sibling_retire_test.c:117:ACTS
 src/cli/sibling_retire_test.c:158:ACTS
 src/cli/sibling_retire_test.c:185:ACTS
 src/cli/sibling_retire_test.c:196:ACTS
 src/cli/sibling_retire_test.c:211:ACTS
-src/cli/sib_walk_test.c:199:SKIP   # rescan: whether a name resolves IS the measurement
-src/cli/sib_walk_test.c:214:SKIP   # setup: create the bracketing directory only if absent
 src/cli/spn_broken_extent_test.c:148:SKIP   # setup: whether victim.bin resolves IS the fixture check -- the torn extent's blocks are what the capture is measured on
 src/cli/spn_walk_tear_test.c:176:SKIP   # oracle: whether the victim resolves IS the setup check -- the walk is measured against this id
-src/cli/tz_reg_collapse_test.c:158:SKIP   # oracle: whether the owner row resolves IS the fixture check -- the load is measured against this blob
-src/cli/bang_name_test.c:146:SKIP   # live(): whether a name resolves IS the measurement -- the defect was a name that resolved when it should not have, so the oracle must be the lookup itself
-src/cli/bang_name_test.c:168:SKIP   # reads_exact(): an unresolvable name is a FAILED byte-exact read, not a soft miss -- and WP141 made the exact-name lookup the FIRST thing vol_read_named does (src/core/vol_read.c), so a present file is never shadowed by a container member. An earlier version of this comment justified itself with the opposite claim (that vol_read_named reported a miss for a file present and intact); that was measured and REFUTED -- the defect was real but a different one, and it is fixed.
 src/cli/sweep_bang_test.c:82:ACTS   # reads_exact(): same shape as bang_name_test.c:168, but a miss here decides an assertion -- it FAILS the test, which is the only thing that makes this oracle safe
 src/cli/sweep_bang_test.c:115:ACTS  # the RAW precondition: a miss yields inode 0, whose zone is not RAW, so the precondition fails loudly rather than passing on an absent file
 src/cli/sweep_bang_test.c:117:ACTS  # as :115, on the '!'-bearing name -- and this is the half that must not be able to pass vacuously
@@ -91,22 +100,13 @@ src/cli/sweep_bang_test.c:122:SKIP  # setup: marks whatever id the name resolves
 src/cli/sweep_bang_test.c:123:SKIP  # as :122
 src/cli/sweep_bang_test.c:132:ACTS  # the control's own zone read: a miss is not TEXT, so all_text_a clears and the harness-live control FAILS -- the control cannot be satisfied by a name that is not there
 src/cli/sweep_bang_test.c:133:ACTS  # as :132, on the '!'-bearing name: the red control's input
-src/cli/bang_name_test.c:289:SKIP   # LEG A setup: the two inode ids are printed to show both names were distinct inodes before the unlink
-src/cli/bang_name_test.c:290:SKIP   # LEG A setup: as above, for the bang name
-src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name resolves IS the measurement -- a CRC bug that loses a written file on reopen shows up exactly here, so the result has to decide the assertion.
-src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
-src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
-src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
 src/cli/table_sync_evict_test.c:342:SKIP
-src/cli/read_named_test.c:254:SKIP   # setup: whether a name resolves IS the measurement -- same shape as bang_name_test.c:146
-src/cli/read_named_test.c:258:SKIP   # setup: THE precondition of LEG A. The exact name must resolve, or the leg is not testing shadowing but absence
-src/cli/read_named_test.c:305:SKIP   # LEG B setup: the exact name must be GONE, or the control is not a control
-src/cli/read_named_test.c:378:SKIP   # LEG E setup: whether a name resolves IS the measurement -- the whole leg is that the bang name does not perturb the plain ones
-src/cli/tz_registry_test.c:178:SKIP
-src/cli/window_test.c:176:SKIP
-src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
-src/cli/write_create_path_test.c:248:SKIP
 src/cli/tar_cap_test.c:182:SKIP
+src/cli/tz_reg_collapse_test.c:158:SKIP   # oracle: whether the owner row resolves IS the fixture check -- the load is measured against this blob
+src/cli/tz_registry_test.c:178:SKIP
+src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
+src/cli/window_test.c:176:SKIP
+src/cli/write_create_path_test.c:248:SKIP
 src/core/vol_cpack.c:400:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
 src/core/vol_cpack.c:3072:SKIP   # member read: a miss aborts the slice
 src/core/vol_cpack.c:3415:SKIP   # map load: miss declines the load
@@ -127,21 +127,21 @@ src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1214:SKIP
 src/core/vol_read.c:491:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
 src/core/vol_read.c:506:SKIP
+src/core/vol_read.c:980:SKIP
+src/core/vol_read.c:997:SKIP
+src/core/vol_read.c:1057:SKIP
+src/core/vol_read.c:1132:SKIP
 src/core/vol_read.c:1331:SKIP
 src/core/vol_read.c:1369:ACTS
 src/core/vol_read.c:1582:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
 src/core/vol_read.c:1589:SKIP
 src/core/vol_read.c:1782:ACTS
-src/core/vol_read.c:980:SKIP
-src/core/vol_read.c:997:SKIP
-src/core/vol_read.c:1057:SKIP
-src/core/vol_read.c:1132:SKIP
-src/core/vol_sweep.c:1935:SKIP
 src/core/vol_sweep.c:279:SKIP
 src/core/vol_sweep.c:584:ACTS
 src/core/vol_sweep.c:603:ACTS
 src/core/vol_sweep.c:623:ACTS
 src/core/vol_sweep.c:675:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_sweep.c:1935:SKIP
 src/core/vol_textzone.c:784:SKIP
 src/core/vol_tier.c:303:SKIP
 src/core/volume.c:965:SKIP   # reserve scan: direct .ivpack file lookup

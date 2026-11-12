@@ -1,7 +1,41 @@
 # WP-AG — allocation groups for the append planes (v0.7)
 
-Status: design, step 1 in progress.
+Status: **DEFERRED — measured, not the stand's bottleneck.** See "Verdict"
+below before implementing anything in this file. The analysis is kept because
+it will be needed the day write concurrency actually matters.
+
 Scope owner: engine (`src/core/vol_delta.c`, `vol_write.c`).
+
+## Verdict (measured 2026-11-12)
+
+Healthy-volume bulk create through FUSE, 10,000 files seeded across 40
+directories, then 2,000 more created:
+
+```
+created 2000 more in 0.57 s            (~3.5k files/s)
+build_file_table calls: 1              (mount only, 0.122 s / 10,080 entries)
+```
+
+Two conclusions:
+
+1. **Parallelism would buy nothing here.** The client (rsync, tar) is one
+   thread: it issues one op at a time, so a global lock is free. Sharded
+   append arenas have nothing to shard against.
+2. **Nothing rebuilt the table per operation on a healthy volume.** The
+   O(N)-per-op shape is not in the append path at all; it is in
+   `snapshot_entry()`'s degraded-table loop, fixed under WP-FUSE-SHARD (see
+   that commit): a point lookup used to trigger `build_file_table()` — a
+   full namespace walk — and on a degraded volume the stale mark could never
+   be cleared, so every create of a new name walked the whole tree again.
+   At 0.122 s per 10k-entry walk, a 160k tree is ~1.9 s per create.
+
+So AG is **not** on the critical path for v0.7, and the stand is not an
+example of write contention. Revisit AG when there is a concrete
+multi-threaded writer: the engine's write path has **no internal mutex at
+all** (`vol_write.c` has zero `pthread_mutex`), so today the only thing
+making concurrent writers safe is FUSE's single `g_io_lock`. Any future
+drop of that lock needs AG's mechanics first — which is exactly what the
+sections below specify.
 
 ## What "AG" means here, and what it does not
 
@@ -226,10 +260,14 @@ that is the point.
 * A/B measure: bulk create of N files through FUSE/engine with and without
   the reservation split; report files/s, not wall clock alone.
 
-## Staged delivery
+## Staged delivery (when it is resumed)
 
 1. In-flight counter + reservation split: reserve under lock, `pwrite`
    outside, publish under lock, fence claimed outside. No format change.
-   **Next.**
 2. Per-AG reservation (`bump[ag]`, CAS), rollover still global.
 3. Index bucket locks; then RAW arena on the same primitive.
+
+**Test gap to close first:** there is no automated regression for the
+degraded-table loop. A leg would need a seam that keeps
+`vol_walk_strict()` failing, since `INVFS_FAULT=<site>:N` is one-shot and
+a later successful rebuild legitimately clears the degraded mark.

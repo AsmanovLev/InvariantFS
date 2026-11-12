@@ -732,24 +732,33 @@ static void table_sync_one_locked(const char *name)
         table_mark_stale();   /* found, but not stat-able: same "keep, and ask again later" */
 }
 
+/* Refresh the ONE directory whose entry a mutation changed.
+ *
+ * mkdir("a/b/c") changes a/b's stat and nothing above it: a directory's
+ * mtime/ctime/size move when its OWN contents change, and creating c is not
+ * a change to a or to the volume root. The loop this replaces synced every
+ * ancestor plus its "dir/" anchor -- two engine lookups per path component,
+ * all of which were guaranteed to read the same value back. On the deep
+ * trees that hurt (a portage tree is depth 5-6) that is 4x the lookups the
+ * operation actually needs. */
 static void sync_parents_locked(const char *name)
 {
-    char tmp[600];
+    char parent[600], anc[604];
+    char *slash;
     size_t n = strlen(name);
-    if (n >= sizeof tmp) return;
-    memcpy(tmp, name, n + 1);
-    for (size_t i = 0; i < n; i++) {
-        if (tmp[i] == '/') {
-            tmp[i] = 0;
-            if (tmp[0]) {
-                char anc[600];
-                snprintf(anc, sizeof anc, "%s/", tmp);
-                table_sync_one_locked(tmp);
-                table_sync_one_locked(anc);
-            }
-            tmp[i] = '/';
-        }
-    }
+
+    if (n == 0 || n >= sizeof parent)
+        return;
+    memcpy(parent, name, n + 1);
+    slash = strrchr(parent, '/');
+    if (!slash)                 /* top level: the parent is the root */
+        return;
+    *slash = 0;
+    if (!parent[0])             /* "x" under the root: nothing to refresh */
+        return;
+    snprintf(anc, sizeof anc, "%s/", parent);
+    table_sync_one_locked(parent);
+    table_sync_one_locked(anc);
 }
 
 
@@ -777,8 +786,32 @@ static int snapshot_entry(const char *name, uint64_t *ino_out, uint64_t *size_ou
     }
     {
         fs_entry *e = find_entry(name);
-        if (!e) table_refresh_if_stale_locked();
-        if (!e) e = find_entry(name);
+        if (!e) {
+            /* WP-FUSE-SHARD: a POINT lookup resolves one name; it never walks
+             * the tree. A rebuild is build_file_table -- a full namespace
+             * walk plus qsort -- and on a volume whose walk did not complete
+             * (g_table_degraded) table_refresh_if_stale_locked can never
+             * clear the stale mark (it clears it only when the rebuild
+             * SUCCEEDED). Rebuilding here therefore meant a whole-tree walk
+             * for every name that is not in the table, and a bulk create hits
+             * that on every single new file, since by definition the name is
+             * not there yet. N creates then cost N walks: O(N^2), CPU-bound
+             * inside the daemon's one global lock -- the shape measured on the
+             * Gentoo stand (invf-fuse at ~97% of a core, rsync making no
+             * progress, 58 of 184 categories after nine hours).
+             *
+             * Nothing needs the rebuild to answer a lookup: readdir does not
+             * use this table at all (it reads vol_list_dir), and getattr-style
+             * answers are exactly one engine lookup. So rebuild only when it
+             * can actually finish (stale and NOT degraded -- a rename or link
+             * marked it), and otherwise sync the one name and move on. */
+            if (g_table_stale && !g_table_degraded)
+                table_refresh_if_stale_locked();
+            if (!e) {
+                table_sync_one_locked(name);
+                e = find_entry(name);
+            }
+        }
         if (e) {
             if (ino_out)   *ino_out   = e->inode_id;
             if (size_out)  *size_out  = e->size;
