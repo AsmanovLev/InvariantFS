@@ -735,7 +735,48 @@ int vol_rmdir(invfs_volume *v, const char *name)
     return 0;
 }
 
+/* MEASUREMENT (INVFS_TRACE_TIME=1): where the milliseconds of an unlink go.
+ * Phase boundaries are the four things unlink does that create does not:
+ * lookup, the pba-ref hold, the two delta deletes, the recipe probe/retire,
+ * the sibling cascade, and the ref release + reclaim drain. Uses __thread so
+ * a FUSE worker's marks are its own. Remove once the split is known. */
+static uint64_t tl_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static int tl_on(void)
+{
+    static int r = -1;
+    if (r < 0) { const char *e = getenv("INVFS_TRACE_TIME"); r = (e && *e == '1'); }
+    return r;
+}
+static __thread uint64_t tl_t[9];
+#define TL_MARK(i) do { if (tl_on()) tl_t[i] = tl_ns(); } while (0)
+
+static int vol_unlink_impl(invfs_volume *v, const char *name);
+
 int vol_unlink(invfs_volume *v, const char *name)
+{
+    int rc;
+    if (!tl_on())
+        return vol_unlink_impl(v, name);
+    memset(tl_t, 0, sizeof tl_t);
+    TL_MARK(0);
+    rc = vol_unlink_impl(v, name);
+    TL_MARK(5);
+#define TL_SEG(a, b) (((tl_t[a]) && (tl_t[b]) && (tl_t[b] >= tl_t[a])) \
+                          ? (double)(tl_t[b] - tl_t[a]) / 1e6 : -1.0)
+    fprintf(stderr, "[tl] %-18s rc=%2d total=%7.2f | lookup=%6.2f hold=%6.2f"
+                    " ddel=%6.2f idel=%6.2f retire=%6.2f sibl=%5.2f rest=%6.2f ms\n",
+            name, rc, TL_SEG(0, 5),
+            TL_SEG(0, 1), TL_SEG(1, 6), TL_SEG(1, 7), TL_SEG(7, 8),
+            TL_SEG(8, 3), TL_SEG(3, 4), TL_SEG(4, 5));
+    return rc;
+}
+
+static int vol_unlink_impl(invfs_volume *v, const char *name)
 {
     char parent[600], leaf[INVFS_MAX_NAME + 1];
     uint64_t id, pino;
@@ -802,8 +843,10 @@ int vol_unlink(invfs_volume *v, const char *name)
          * landing between them rebuilds against a live set the pending -1
          * does not belong to (and with two sharers retiring at once the
          * second -1 floors at 0 and frees the block a second time). */
+        TL_MARK(1);
         if (!v->lazy_reclaim) {
             vol_pba_ref_hold(v);
+            TL_MARK(6);
             /* the map, taken while the NAME is still there, so this recipe's own
              * contribution is in it and the -1 below has something to take */
             pba_ref_ensure(v);
@@ -812,11 +855,14 @@ int vol_unlink(invfs_volume *v, const char *name)
             if (!v->lazy_reclaim) vol_pba_ref_release(v);
             return -1;
         }
+        TL_MARK(7);
+        TL_MARK(8);
         if (vol_inode_delta_delete(v, id) != 0) {
             vol_delta_doom(v);
             if (!v->lazy_reclaim) vol_pba_ref_release(v);
             return -1;
         }
+        TL_MARK(2);
         /* WP-N1: targeted free of unlinked file data blocks.
          *
          * WP201: the ORDER is unchanged and must stay that way -- the row
@@ -890,6 +936,7 @@ int vol_unlink(invfs_volume *v, const char *name)
             }
             vol_retire_recipe(v, id, in.recipe_addr, 1);
         }
+        TL_MARK(3);
         /* Cascade delete container/transcode siblings if main file is
          * unlinked. Still inside the hold: this is a nested vol_unlink
          * per sibling, and the hold is depth-counted over a RECURSIVE mutex,
@@ -897,6 +944,7 @@ int vol_unlink(invfs_volume *v, const char *name)
          * Only regular files with non-zero size can own siblings. */
         if (in.type == INVFS_ITYP_REG && in.size > 0 && strchr(name, '!') == NULL)
             vol_delete_siblings(v, name);
+        TL_MARK(4);
         if (!v->lazy_reclaim)
             vol_pba_ref_release(v);
         return 0;

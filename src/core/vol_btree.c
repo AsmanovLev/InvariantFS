@@ -2717,6 +2717,25 @@ int vol_bitmap_flush(invfs_volume *v)
     uint64_t base = v->sb.metadata_zone_start * INVFS_BLOCK_SIZE;
     uint64_t lo, hi;
 
+    /* Dirty-BLOCK map first: write only the blocks that changed, in LBA
+     * order. The byte-range path below is kept for a volume whose map could
+     * not be allocated, and is the one that turned a single unlink into a
+     * 124 MiB write on the stand. */
+    if (v->bm_dirty && v->bm_dirty_n) {
+        for (lo = 0; lo < v->bitmap_blocks; lo++) {
+            if (!bit_get(v->bm_dirty, lo))
+                continue;
+            if (io_seek(&v->io, base + lo * INVFS_BLOCK_SIZE) != 0 ||
+                io_write(&v->io, v->bitmap + lo * INVFS_BLOCK_SIZE,
+                         INVFS_BLOCK_SIZE) != 0)
+                return -1;
+            bit_clr(v->bm_dirty, lo);
+        }
+        v->bm_dirty_n = 0;
+        v->bm_lo = 1;
+        v->bm_hi = 0;
+        return 0;
+    }
     if (v->bm_lo > v->bm_hi)
         return 0;   /* clean */
     lo = v->bm_lo;

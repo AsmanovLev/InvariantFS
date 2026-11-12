@@ -323,6 +323,15 @@ typedef struct invfs_volume {
      * WINDOWS device is opened FILE_FLAG_NO_BUFFERING|WRITE_THROUGH, so that
      * was a synchronous ~250 ms per file on flash regardless of file size. */
     uint64_t bm_lo, bm_hi;
+    /* Dirty-block map: one bit per 4 KiB bitmap block (bitmap_blocks total --
+     * ~1.9 KB on the 1.9 TB stand volume). This replaces using bm_lo/bm_hi as
+     * the dirty SET: those two are a byte RANGE, and on a volume of 500M
+     * blocks the union of two distant frees spans the whole bitmap, so every
+     * unlink rewrote all 62.6 MB per device. Measured: 124 MiB written and
+     * 906 ms wall for deleting ONE empty file. bm_lo/bm_hi are kept only as
+     * the cheap "is anything dirty" flag for the paths that ask. */
+    uint8_t *bm_dirty;
+    uint64_t bm_dirty_n;
     uint64_t free_blocks;     /* cached free count (bitmap scan at open) */
     /* WP135: unclaimed short  walks (src/core/vol_walk.h). A walk that
      * stopped and that nobody committed or explicitly abandoned is an open
@@ -1179,6 +1188,25 @@ static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u <
 static inline void vol_bm_dirty(invfs_volume *v, uint64_t i)
 {
     uint64_t byte = i / 8;
+    uint64_t blk = byte / INVFS_BLOCK_SIZE;
+    if (!v->bm_dirty) {
+        uint64_t n = (v->bitmap_blocks + 7u) / 8u;
+        if (n == 0)
+            n = 1;
+        v->bm_dirty = (uint8_t *)calloc((size_t)n, 1);
+        if (!v->bm_dirty) {          /* no map: fall back to the range */
+            if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
+            if (byte < v->bm_lo) v->bm_lo = byte;
+            if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
+            return;
+        }
+    }
+    if (blk >= v->bitmap_blocks)
+        blk = v->bitmap_blocks ? v->bitmap_blocks - 1 : 0;
+    if (!bit_get(v->bm_dirty, blk)) {
+        bit_set(v->bm_dirty, blk);
+        v->bm_dirty_n++;
+    }
     if (v->bm_lo > v->bm_hi) { v->bm_lo = byte; v->bm_hi = byte + 1; return; }
     if (byte < v->bm_lo) v->bm_lo = byte;
     if (byte + 1 > v->bm_hi) v->bm_hi = byte + 1;
