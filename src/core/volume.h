@@ -1049,6 +1049,9 @@ int  invfs_photo_codec_nbli(void);
  * use env INVFS_ARC_BYTES/INVFS_DEC_MEM_LIMIT). Admission is enforced at
  * SWEEP time only; the read path never refuses stored data. */
 void     vol_set_arc_budget(invfs_volume *v, uint64_t bytes);     /* 0 = keep */
+/* Explicitly off (-o arc_limit=0). The setter's 0 means "keep", so the
+ * mount option cannot express "off" through it. */
+void     vol_disable_arc(invfs_volume *v);
 void     vol_set_dec_mem_limit(invfs_volume *v, uint64_t bytes);  /* 0 = default */
 uint64_t vol_get_dec_mem_limit(invfs_volume *v);
 

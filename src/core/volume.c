@@ -2055,6 +2055,21 @@ void vol_set_arc_budget(invfs_volume *v, uint64_t bytes)
     v->arc_budget = bytes;
 }
 
+/* Switch the content cache off. Separate from the setter because that one
+ * reads 0 as "no explicit budget, keep what vol_open decided" -- which is
+ * right for its caller, since the mount option is parsed before the volume
+ * is opened and an absent -o must not turn the cache off. But a user who
+ * TYPEWRITES arc_limit=0 means off, and used to get a silent no-op while
+ * INVFS_ARC_BYTES=0 disabled the cache: the same value meant two things
+ * depending on how it arrived. */
+void vol_disable_arc(invfs_volume *v)
+{
+    if (!v) return;
+    arc_destroy(v->arc);
+    v->arc = NULL;                        /* callers cope with NULL */
+    v->arc_budget = 0;
+}
+
 
 void vol_set_dec_mem_limit(invfs_volume *v, uint64_t bytes)
 {

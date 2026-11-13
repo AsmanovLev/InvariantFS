@@ -4538,7 +4538,14 @@ int main(int argc, char *argv[])
             return 1;
         }
     }
-    if (have_arc) vol_set_arc_budget(g_vol, arc_limit);
+    if (have_arc) {
+        if (arc_limit == 0) {
+            vol_disable_arc(g_vol);       /* -o arc_limit=0 means OFF */
+            fprintf(stderr, "invf: content cache disabled (-o arc_limit=0)\n");
+        }
+        else
+            vol_set_arc_budget(g_vol, arc_limit);
+    }
     if (have_dec) vol_set_dec_mem_limit(g_vol, dec_mem_limit);
 #ifdef __linux__
     {
