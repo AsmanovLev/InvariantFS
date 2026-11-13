@@ -1744,12 +1744,31 @@ typedef struct {
     const uint8_t *key;   /* borrowed from the index slot */
     uint16_t       klen;
     uint32_t       slot;  /* index into delta_index::slot */
+    uint64_t       pfx;   /* first 8 key bytes, big-endian; comparable as an
+                           * integer and equal to byte order for 8-byte keys.
+                           * Only consulted when both keys are >= 8 bytes, so
+                           * the shorter-first prefix rule is untouched. */
 } di_skey;
+
+static uint64_t di_pfx(const uint8_t *k)
+{
+    uint64_t v = 0;
+    int i;
+    for (i = 0; i < 8; i++)
+        v = (v << 8) | k[i];
+    return v;
+}
 
 static int di_skey_cmp(const void *pa, const void *pb)
 {
     const di_skey *a = (const di_skey *)pa;
     const di_skey *b = (const di_skey *)pb;
+    /* Fast path: 1.78M keys sorted with a function call per comparison was
+     * 705 ms on the stand. For keys of at least 8 bytes the first eight
+     * bytes decide the order as an integer, and only a tie needs the full
+     * rule. */
+    if (a->klen >= 8 && b->klen >= 8 && a->pfx != b->pfx)
+        return a->pfx < b->pfx ? -1 : 1;
     return vol_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
@@ -1820,6 +1839,7 @@ static int di_tail_push(di_sorted *s, const uint8_t *key, uint16_t klen,
     s->t[s->tn].key = key;
     s->t[s->tn].klen = klen;
     s->t[s->tn].slot = slot;
+    s->t[s->tn].pfx = klen >= 8 ? di_pfx(key) : 0;
     s->tn++;
     return 0;
 }
@@ -1855,6 +1875,7 @@ static int di_sorted_full(struct delta_index *di, di_sorted *s)
         s->v[n].key = sl->key;
         s->v[n].klen = sl->klen;
         s->v[n].slot = (uint32_t)i;
+        s->v[n].pfx = sl->klen >= 8 ? di_pfx(sl->key) : 0;
         n++;
     }
     if (n > 1)
