@@ -448,7 +448,6 @@ typedef struct {
     btree_bulk *b;
     fold_list  *l;
     size_t      di;
-    unsigned long added, dropped;
     int         failed;
 } fold_merge;
 
@@ -458,11 +457,8 @@ static int fold_merge_delta(fold_merge *m)
 {
     fold_ent *e = &m->l->ent[m->di];
     m->di++;
-    if (e->flags & FOLD_FLAG_DELETE) {
-        m->dropped++;
+    if (e->flags & FOLD_FLAG_DELETE)
         return 0;
-    }
-    m->added++;
     return btree_bulk_add(m->b, e->key, e->klen, e->val, e->vlen);
 }
 
@@ -489,7 +485,6 @@ static int fold_merge_cb(void *ctx, bt_key k, bt_val v)
         }
         return 0;
     }
-    m->added++;
     if (btree_bulk_add(m->b, k.p, k.n, v.p, v.n) != 0) {
         m->failed = 1;
         return 1;
@@ -530,8 +525,6 @@ static int fold_bulk_complete(invfs_volume *v, fold_list *l,
             return -1;
         }
     }
-    fprintf(stderr, "fold: bulk base rows + delta upserts=%lu delta deletes=%lu\n",
-            m.added, m.dropped);
     if (btree_bulk_finish(b, &root) != 0) {
         btree_bulk_free(b);
         return -1;
