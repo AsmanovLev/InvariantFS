@@ -481,6 +481,11 @@ static int di_grow(struct delta_index *di)
     di->slot = ns;
     di->cap = ncap;
     di->epoch++;          /* WP117: every slot moved */
+    /* Every slot index moved, so the insert log's entries no longer name
+     * their keys -- and a view's tail entries point at the wrong slots too.
+     * `inst` does NOT change on a rehash (it identifies the index instance),
+     * so without this the incremental path would silently miss keys. */
+    di->log_stale = 1;
     return 0;
 }
 
@@ -1805,11 +1810,14 @@ typedef struct {
     size_t   tn, tcap;
 } di_sorted;
 
+/* ONE view for the volume: every reader holds g_delta_lock, so sharing needs
+ * no new locking, and a per-thread copy of an array with one entry per live
+ * key is pure waste (7 MB per FUSE worker at 300k keys). */
 static di_sorted g_di_sv;
 
-/* Merge the tail into the sorted prefix once it is worth an O(N) shift.
- * Below this the tail is simply scanned by the query, which is O(tn) and
- * keeps a one-key insert from copying the whole 43 MB array. */
+/* The tail is merged into the sorted prefix once it is worth the O(N) shift.
+ * Below this, a query scans it linearly (O(tn)), which keeps a one-key insert
+ * from copying a 43 MB array. */
 #define DI_TAIL_MERGE_MIN 4096u
 
 static int di_sorted_grow(di_sorted *s, size_t cap)
@@ -2018,7 +2026,7 @@ int vol_delta_range(invfs_volume *v,
                 (double)(_r1.tv_nsec - _w1.tv_nsec) / 1e6;
         if (getenv("INVFS_TRACE_LOCK") && (_wait + _work) > 5.0)
             fprintf(stderr, "[dlk] wait=%.1f work=%.1f n=%zu epoch=%llu inst=%llu slots=%zu ms\n",
-                    _wait, _work, g_di_sv.n,
+                    _wait, _work, sv ? sv->n : 0,
                     (unsigned long long)di->epoch, (unsigned long long)di->inst,
                     di->cap);
     }
@@ -2066,7 +2074,6 @@ int vol_delta_range(invfs_volume *v,
                 if (hilen && vol_key_cmp(ts->key, ts->klen, hi, hilen) >= 0)
                     continue;
                 DI_EMIT(ts->key, ts->klen, ts);
-                presorted = 0;
             }
         }
     } else {
@@ -2080,6 +2087,53 @@ int vol_delta_range(invfs_volume *v,
                 continue;
             DI_EMIT(s->key, s->klen, s);
         }
+    }
+    /* Self-check (INVFS_TRACE_VERIFY=1): recount the same range with the
+     * pre-WP117 linear scan and report any disagreement. Used to pin the
+     * sib_walk_test regression rather than reason about it. */
+    if (getenv("INVFS_TRACE_VERIFY")) {
+        size_t i2, n2 = 0;
+        for (i2 = 0; i2 < di->cap; i2++) {
+            const delta_slot *s2 = &di->slot[i2];
+            if (!s2->key)
+                continue;
+            if (lolen && vol_key_cmp(s2->key, s2->klen, lo, lolen) < 0)
+                continue;
+            if (hilen && vol_key_cmp(s2->key, s2->klen, hi, hilen) >= 0)
+                continue;
+            n2++;
+        }
+        if (n2 != n)
+            fprintf(stderr, "[ver] MISMATCH count view=%zu scan=%zu sv=%d tn=%zu n=%zu\n",
+                    n, n2, sv ? 1 : 0, sv ? sv->tn : 0, sv ? sv->n : 0);
+        else if (n > 0) {
+            /* Same count: check the SET by membership. A missing key replaced
+             * by a duplicate would pass the count check above. */
+            size_t j;
+            for (j = 0; j < n; j++) {
+                size_t i2, hits = 0;
+                for (i2 = 0; i2 < di->cap; i2++) {
+                    const delta_slot *s2 = &di->slot[i2];
+                    if (!s2->key) continue;
+                    if (s2->klen == arr[j].klen &&
+                        memcmp(s2->key, arr[j].key, s2->klen) == 0)
+                        hits++;
+                }
+                if (hits != 1)
+                    fprintf(stderr, "[ver] MISMATCH key hits=%zu klen=%u\n",
+                            hits, (unsigned)arr[j].klen);
+            }
+        }
+    }
+    if (getenv("INVFS_TRACE_VERIFY")) {
+        size_t j;
+        for (j = 1; j < n; j++)
+            if (vol_key_cmp(arr[j - 1].key, arr[j - 1].klen,
+                            arr[j].key, arr[j].klen) > 0) {
+                fprintf(stderr, "[ver] UNSORTED at %zu (n=%zu presorted=%d tn=%zu)\n",
+                        j, n, presorted, sv ? sv->tn : 0);
+                break;
+            }
     }
     vol_delta_unlock();
 #undef DI_EMIT
