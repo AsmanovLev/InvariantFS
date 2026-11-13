@@ -1127,6 +1127,221 @@ static int bt_scan_rec(invfs_volume *v, invfs_blkptr ptr,
     return 0;
 }
 
+/* ---- WP-BATCH-FOLD: bulk builder ------------------------------------ */
+
+/* Rebuilding the base by folding N records through bt_ins costs N COW path
+ * copies. Measured on the stand: 1 787 659 delta records, ~7M page
+ * allocations, more than an hour, never finished. A bulk build writes every
+ * page exactly once -- leaves are appended in key order and flushed as they
+ * fill, and each internal level is assembled from the pointers of the level
+ * below. See vol_btree.h for the ordering contract and for why the pages are
+ * left unbarriered and unpublished. */
+
+typedef struct {
+    uint8_t      *k;
+    uint16_t      klen;
+    invfs_blkptr  ptr;
+} bk_kid;
+
+typedef struct {
+    bk_kid *e;
+    size_t  n, cap;
+} bk_vec;
+
+struct btree_bulk {
+    invfs_volume *v;
+    uint64_t      gen;
+    bt_ent        ent[BT_MAX_ENTRIES];
+    int           n;
+    uint8_t      *arena;         /* k/v copies of the page being filled */
+    size_t        arena_used;
+    bk_vec        cur, out;      /* child pointers of the level below */
+    int           up;            /* 0 = still emitting leaves */
+    int           failed;
+};
+
+static void bk_vec_free(bk_vec *q)
+{
+    size_t i;
+    for (i = 0; i < q->n; i++)
+        free(q->e[i].k);
+    free(q->e);
+    memset(q, 0, sizeof *q);
+}
+
+static int bk_vec_push(bk_vec *q, const uint8_t *k, uint16_t klen,
+                       invfs_blkptr ptr)
+{
+    if (q->n == q->cap) {
+        size_t ncap = q->cap ? q->cap * 2 : 64;
+        bk_kid *ne = (bk_kid *)realloc(q->e, ncap * sizeof *ne);
+        if (!ne)
+            return -1;
+        q->e = ne;
+        q->cap = ncap;
+    }
+    q->e[q->n].k = (uint8_t *)malloc(klen ? klen : 1);
+    if (!q->e[q->n].k)
+        return -1;
+    if (klen)
+        memcpy(q->e[q->n].k, k, klen);
+    q->e[q->n].klen = klen;
+    q->e[q->n].ptr = ptr;
+    q->n++;
+    return 0;
+}
+
+btree_bulk *btree_bulk_new(invfs_volume *v, uint64_t gen)
+{
+    btree_bulk *b;
+    if (!v)
+        return NULL;
+    b = (btree_bulk *)calloc(1, sizeof *b);
+    if (!b)
+        return NULL;
+    b->arena = (uint8_t *)malloc(INVFS_BLOCK_SIZE);
+    if (!b->arena) {
+        free(b);
+        return NULL;
+    }
+    b->v = v;
+    b->gen = gen;
+    return b;
+}
+
+void btree_bulk_free(btree_bulk *b)
+{
+    if (!b)
+        return;
+    bk_vec_free(&b->cur);
+    bk_vec_free(&b->out);
+    free(b->arena);
+    free(b);
+}
+
+/* Serialize the page being filled at `level` and remember it as a child of
+ * the level above. A page's first key is the separator its parent stores. */
+static int bulk_flush(btree_bulk *b, int level)
+{
+    invfs_blkptr ptr;
+    bk_vec *sink;
+    if (b->n == 0)
+        return 0;
+    if (bt_write(b->v, level, b->gen, b->ent, b->n, &ptr) != 0)
+        return -1;
+    sink = b->up ? &b->out : &b->cur;
+    if (bk_vec_push(sink, b->ent[0].k, b->ent[0].klen, ptr) != 0)
+        return -1;
+    b->n = 0;
+    b->arena_used = 0;
+    return 0;
+}
+
+int btree_bulk_add(btree_bulk *b, const uint8_t *k, uint16_t klen,
+                   const uint8_t *v, uint16_t vlen)
+{
+    bt_ent t;
+    bt_ent *e;
+    if (!b || b->failed || b->up)
+        return -1;
+    memset(&t, 0, sizeof t);
+    t.k = k;
+    t.klen = klen;
+    t.v = v;
+    t.vlen = vlen;
+    /* A record that does not fit an empty page can never be stored; the
+     * incremental path refuses it at insert time, so refuse it here too. */
+    if ((size_t)bt_rec_size(INVFS_PAGE_LEVEL_LEAF, &t) +
+        sizeof(invfs_page_hdr) > INVFS_BLOCK_SIZE)
+        goto fail;
+    /* Room check BEFORE copying: a carried-over record would have to be
+     * memmoved across the flush, and not needing that is the point. */
+    if (b->n > 0 &&
+        (size_t)bt_used(INVFS_PAGE_LEVEL_LEAF, b->ent, b->n) +
+        (size_t)bt_rec_size(INVFS_PAGE_LEVEL_LEAF, &t) > INVFS_BLOCK_SIZE) {
+        if (bulk_flush(b, INVFS_PAGE_LEVEL_LEAF) != 0)
+            goto fail;
+    }
+    e = &b->ent[b->n++];
+    memset(e, 0, sizeof *e);
+    e->k = b->arena + b->arena_used;
+    if (klen)
+        memcpy(b->arena + b->arena_used, k, klen);
+    b->arena_used += klen;
+    e->klen = klen;
+    e->v = b->arena + b->arena_used;
+    if (vlen)
+        memcpy(b->arena + b->arena_used, v, vlen);
+    b->arena_used += vlen;
+    e->vlen = vlen;
+    return 0;
+fail:
+    b->failed = 1;
+    return -1;
+}
+
+int btree_bulk_finish(btree_bulk *b, invfs_blkptr *root_out)
+{
+    int level = INVFS_PAGE_LEVEL_LEAF;
+
+    if (!b || !root_out || b->failed)
+        return -1;
+    if (bulk_flush(b, level) != 0)
+        goto fail;
+    if (b->cur.n == 0) {
+        /* Empty tree: the WP-M5 convention is a fresh empty leaf, never a
+         * null root slot. */
+        uint8_t page[INVFS_BLOCK_SIZE];
+        uint64_t pba = mbuf_alloc(b->v, b->gen);
+        if (!pba)
+            goto fail;
+        /* WP126: the emptied-tree root is a base page like any other. */
+        btree_orphan_note_alloc(b->v, pba);
+        mbuf_page_init(page, INVFS_PAGE_LEVEL_LEAF, b->gen);
+        if (mbuf_write(b->v, pba, page) != 0) {
+            mbuf_free(b->v, pba);
+            goto fail;
+        }
+        mbuf_ptr_set(root_out, pba, page, INVFS_BP_LEAF | INVFS_BP_ROOT);
+        return 0;
+    }
+    b->up = 1;
+    while (b->cur.n > 1) {
+        size_t i;
+        bk_vec tmp;
+        level++;
+        b->out.n = 0;
+        b->n = 0;
+        b->arena_used = 0;
+        for (i = 0; i < b->cur.n; i++) {
+            bt_ent t;
+            memset(&t, 0, sizeof t);
+            t.k = b->cur.e[i].k;
+            t.klen = b->cur.e[i].klen;
+            t.child = b->cur.e[i].ptr;
+            if (b->n > 0 &&
+                (size_t)bt_used(level, b->ent, b->n) +
+                (size_t)bt_rec_size(level, &t) > INVFS_BLOCK_SIZE) {
+                if (bulk_flush(b, level) != 0)
+                    goto fail;
+            }
+            b->ent[b->n++] = t;
+        }
+        if (bulk_flush(b, level) != 0)
+            goto fail;
+        bk_vec_free(&b->cur);
+        tmp = b->cur;
+        b->cur = b->out;
+        b->out = tmp;
+    }
+    b->cur.e[0].ptr.flags |= INVFS_BP_ROOT;
+    *root_out = b->cur.e[0].ptr;
+    return 0;
+fail:
+    b->failed = 1;
+    return -1;
+}
+
 int btree_scan(invfs_volume *v, invfs_blkptr root,
                bt_key lo, bt_key hi, bt_scan_cb cb, void *ctx)
 {

@@ -412,6 +412,180 @@ static int fold_delta_reset(invfs_volume *v)
 
 /* ---------------------------------------------------------------- fold */
 
+/* ------------------------------------------------- WP-BATCH-FOLD: bulk */
+
+/* The incremental path below applies the delta one record at a time through
+ * btree_upsert/btree_delete, and that does not scale: 1 787 659 records on
+ * the stand spent more than an hour allocating ~7M COW pages to rebuild a
+ * tree of a few tens of megabytes, and never finished inside the mount
+ * budget.
+ *
+ * The bulk path walks the base B+-tree in key order (btree_scan, a stream
+ * that holds no copy of the tree) and merges it with the already-sorted
+ * delta snapshot, then lets btree_bulk_* write every page of the result
+ * exactly once. The merge rule is the same last-wins-by-seq rule the loop
+ * applies record by record:
+ *
+ *     key in base only   -> the base row
+ *     key in delta only  -> the delta row, unless it is a delete (then
+ *                           nothing: the key must not appear at all)
+ *     key in both        -> the delta row; the delta is the newer tier
+ *
+ * gated by INVFS_FOLD_BULK=1 until an A/B run shows the two paths produce
+ * the same tree. The incremental path stays byte-for-byte what it was so
+ * both can be run against the same volume and compared. */
+static int fold_bulk_on(void)
+{
+#ifdef _WIN32
+    return 0;
+#else
+    const char *s = getenv("INVFS_FOLD_BULK");
+    return s && *s && strcmp(s, "0") != 0;
+#endif
+}
+
+typedef struct {
+    btree_bulk *b;
+    fold_list  *l;
+    size_t      di;
+    unsigned long added, dropped;
+    int         failed;
+} fold_merge;
+
+/* Emit the delta entry the cursor points at. A delete emits nothing: the key
+ * must be absent from the output whether or not the base carried it. */
+static int fold_merge_delta(fold_merge *m)
+{
+    fold_ent *e = &m->l->ent[m->di];
+    m->di++;
+    if (e->flags & FOLD_FLAG_DELETE) {
+        m->dropped++;
+        return 0;
+    }
+    m->added++;
+    return btree_bulk_add(m->b, e->key, e->klen, e->val, e->vlen);
+}
+
+/* One base row in key order: flush the delta rows that sort before it, then
+ * the row itself -- or the delta row that shadows it. */
+static int fold_merge_cb(void *ctx, bt_key k, bt_val v)
+{
+    fold_merge *m = (fold_merge *)ctx;
+
+    while (m->di < m->l->n &&
+           vol_key_cmp(m->l->ent[m->di].key, m->l->ent[m->di].klen,
+                       k.p, k.n) < 0) {
+        if (fold_merge_delta(m) != 0) {
+            m->failed = 1;
+            return 1;
+        }
+    }
+    if (m->di < m->l->n &&
+        vol_key_cmp(m->l->ent[m->di].key, m->l->ent[m->di].klen,
+                    k.p, k.n) == 0) {
+        if (fold_merge_delta(m) != 0) {
+            m->failed = 1;
+            return 1;
+        }
+        return 0;
+    }
+    m->added++;
+    if (btree_bulk_add(m->b, k.p, k.n, v.p, v.n) != 0) {
+        m->failed = 1;
+        return 1;
+    }
+    return 0;
+}
+
+/* Build the folded base and take it through the same publish sequence the
+ * incremental path uses -- bitmap, barrier, verify, publish, and only then
+ * the delta reset. See vol_fold's comments for why each step is there; the
+ * ordering is not a style choice: publishing the root before resetting the
+ * delta is what makes a crash in between replayable (re-applying an absolute
+ * record is idempotent), and resetting the delta first would lose it. */
+static int fold_bulk_complete(invfs_volume *v, fold_list *l,
+                              invfs_blkptr old_root)
+{
+    fold_merge m;
+    btree_bulk *b;
+    invfs_blkptr root;
+    uint64_t gen = old_root.pba ? old_root.gen + 1 : 1;
+    uint64_t old_delta_pba;
+    int failed_reset = 0;
+
+    b = btree_bulk_new(v, gen);
+    if (!b)
+        return -1;
+    memset(&m, 0, sizeof m);
+    m.b = b;
+    m.l = l;
+    if (btree_scan(v, old_root, (bt_key){NULL, 0}, (bt_key){NULL, 0},
+                   fold_merge_cb, &m) != 0 || m.failed) {
+        btree_bulk_free(b);
+        return -1;               /* pre-publish: the volume is untouched */
+    }
+    while (m.di < l->n) {
+        if (fold_merge_delta(&m) != 0) {
+            btree_bulk_free(b);
+            return -1;
+        }
+    }
+    fprintf(stderr, "fold: bulk base rows + delta upserts=%lu delta deletes=%lu\n",
+            m.added, m.dropped);
+    if (btree_bulk_finish(b, &root) != 0) {
+        btree_bulk_free(b);
+        return -1;
+    }
+    btree_bulk_free(b);
+
+    if (vol_bitmap_flush(v) != 0)
+        return -1;
+    if (vmux_barrier(v, "fold base pages") < 0)
+        return -1;
+    fold_cache_invalidate(v);
+    {
+        bt_stat st;
+        bt_quarantine q;
+        char verr[256];
+        memset(&st, 0, sizeof st);
+        memset(&q, 0, sizeof q);
+        if (btree_check_tolerant(v, root, &st, &q, verr,
+                                 sizeof verr) != 0 ||
+            q.bad_pages > 0 || q.qfull) {
+            fprintf(stderr,
+                    "fold: REFUSING publish: the merged tree has %llu "
+                    "unreadable page(s)%s%s -- keeping the old root, "
+                    "volume unchanged\n",
+                    (unsigned long long)q.bad_pages,
+                    q.qfull ? " (quarantine incomplete)" : "",
+                    verr[0] ? ": " : "");
+            if (verr[0])
+                fprintf(stderr, "fold: walk error: %s\n", verr);
+            return -1;
+        }
+    }
+    if (mbuf_root_publish(v, root.pba, root.gen) != 0)
+        return -1;
+#ifndef _WIN32
+    if (fold_abort_at("published")) {
+        vmux_barrier(v, "fold abort published");
+        kill(getpid(), SIGKILL);
+    }
+#endif
+    /* Reset the delta only after the new base is durable and named. A failure
+     * here leaves base and delta both carrying the keys, which replay
+     * resolves idempotently (see fold_delta_reset's callers). */
+    old_delta_pba = v->rt.delta_pba;
+    vol_delta_lock();
+    if (fold_delta_reset(v) != 0)
+        failed_reset = 1;
+    (void)vol_reclaim_delta_segments(v, old_delta_pba, 0);
+    vol_delta_unlock();
+    (void)vol_reclaim_bump_epoch();
+    fold_reclaim_hook(v, old_root, root);
+    return failed_reset ? -1 : 0;
+}
+
 int vol_fold(invfs_volume *v)
 {
     fold_list list;
@@ -451,6 +625,13 @@ int vol_fold(invfs_volume *v)
         return -1;
     }
     root = old_root;
+
+    if (fold_bulk_on()) {
+        fprintf(stderr, "fold: bulk path, %zu record(s)\n", list.n);
+        rc = fold_bulk_complete(v, &list, old_root);
+        fold_list_free(&list);
+        return rc;
+    }
 
     /* (1) apply every live record to a COW copy of the base. A delete whose
      * key is absent is a no-op; upsert of the same value is idempotent when a

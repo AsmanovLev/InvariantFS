@@ -1232,7 +1232,15 @@ int main(int argc, char **argv)
             if (vol_base_root(g_v, &root) != 0)
                 return 2;
             list_rec(root, &ll);
-            if (ll.n < 4) {
+            /* The floor used to be 4, which encoded how densely the
+             * incremental COW path happens to pack leaves, not anything the
+             * repair needs: this phase tears the SECOND leaf so that the
+             * first keeps a >200-byte separator, which needs a left
+             * neighbour and a right one -- three leaves. A bulk build packs
+             * to fill instead of splitting at half and produces exactly 3
+             * for this corpus, which is legal, so the old floor aborted a
+             * perfectly good volume (WP-BATCH-FOLD found it). */
+            if (ll.n < 3) {
                 fprintf(stderr, "btree_repair_test: long-name tree has %d "
                                 "leaves\n", ll.n);
                 return 2;

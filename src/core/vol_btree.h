@@ -81,6 +81,36 @@ int btree_delete(invfs_volume *v, invfs_blkptr root, bt_key key,
  * propagated as btree_scan's result; 0 continues. Returns 0 when the whole
  * range was delivered. */
 typedef int (*bt_scan_cb)(void *ctx, bt_key k, bt_val v);
+/* ---- WP-BATCH-FOLD: bulk builder ------------------------------------
+ *
+ * Folding N delta records through btree_upsert/btree_delete costs N COW
+ * path copies: 1.79M records measured on the stand spent more than an hour
+ * allocating ~7M pages to rebuild a tree that occupies tens of megabytes.
+ * A bulk build writes every page exactly once -- leaves are appended in key
+ * order and flushed as they fill, each internal level is assembled from the
+ * pointers of the level below, and only the separator of each page is kept
+ * per level (O(N/ent) bytes, not O(N)).
+ *
+ * ORDER IS THE CALLER'S CONTRACT: keys must arrive strictly ascending and
+ * unique (btree_scan order). There is no cheap runtime check -- one memcmp
+ * per record would eat the win -- and a violated order produces a tree that
+ * searches wrong, so a caller that cannot guarantee it must not use this.
+ *
+ * The built pages are written and sealed but NOT barriered or published:
+ * the caller barriers and publishes the root (mbuf_root_publish) exactly as
+ * it does for the incremental path.
+ */
+typedef struct btree_bulk btree_bulk;
+
+btree_bulk *btree_bulk_new(invfs_volume *v, uint64_t gen);
+int  btree_bulk_add(btree_bulk *b, const uint8_t *k, uint16_t klen,
+                    const uint8_t *v, uint16_t vlen);
+/* Flush the last page, build the internal levels, hand back the root
+ * (ROOT-flagged). Returns 0, or -1 with the volume untouched apart from
+ * pages that were never published. */
+int  btree_bulk_finish(btree_bulk *b, invfs_blkptr *root_out);
+void btree_bulk_free(btree_bulk *b);
+
 int btree_scan(invfs_volume *v, invfs_blkptr root,
                bt_key lo, bt_key hi, bt_scan_cb cb, void *ctx);
 
