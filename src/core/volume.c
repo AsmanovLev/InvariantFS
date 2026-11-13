@@ -501,10 +501,39 @@ int vol_write_devt(invfs_volume *v)
  * next open and triggers the resync); -1 = dev1 failed (the caller
  * latches: the canonical store may have lost acknowledged writes --
  * WP22c). */
+/* MEASUREMENT (INVFS_TRACE_BARRIER=1): which device, and from where, costs
+ * the milliseconds. Two hypotheses about the ~700 ms unlink stall have been
+ * disproved by measurement already (delta placement, the dev1 write leg);
+ * this names the device and the caller instead of guessing a third time. */
+static uint64_t bar_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+static int bar_trace(void)
+{
+    static int r = -1;
+    if (r < 0) { const char *e = getenv("INVFS_TRACE_BARRIER"); r = (e && *e == '1'); }
+    return r;
+}
+
 int vmux_barrier(invfs_volume *v, const char *what)
 {
-    if (v->ndev < 2 && !v->st.degraded)
-        return blkio_flush(&v->io) == 0 ? 0 : -1;
+    uint64_t b0 = 0, b1 = 0, b2 = 0;
+    int tr = bar_trace();
+    if (tr) b0 = bar_ns();
+    if (v->ndev < 2 && !v->st.degraded) {
+        int rc = blkio_flush(&v->io);
+        if (tr) {
+            uint64_t d = bar_ns() - b0;
+            if (d > 50000000ull)
+                fprintf(stderr, "[bar] %-24s dev0=%6.1f ms (single-device)\n",
+                        what ? what : "-", (double)d / 1e6);
+        }
+        return rc == 0 ? 0 : -1;
+    }
+    if (tr) b1 = bar_ns();
     if (v->io_open[0] && !v->st.dev_skip[0] && blkio_flush(&v->io) != 0) {
         v->st.dev_skip[0] = 1;
         fprintf(stderr, "vol: dev0 barrier failed (%s); continuing on "
@@ -514,11 +543,19 @@ int vmux_barrier(invfs_volume *v, const char *what)
         if (vol_write_devt(v) != 0)
             return -1;
     }
+    if (tr) b2 = bar_ns();
     if (v->io_open[1] &&
         !(!v->closing && mirror_defer_on() && mirror_window_ms() > 0 &&
           g_mq_n && mirror_now_ms() - g_mq_last_ms < mirror_window_ms())) {
         if (blkio_flush(&v->io2) != 0)
             return -1;
+    }
+    if (tr) {
+        uint64_t d0 = b1 - b0, d1 = b2 - b1, d2 = bar_ns() - b2;
+        if (d0 + d1 + d2 > 50000000ull)
+            fprintf(stderr, "[bar] %-24s dev0=%6.1f dev1=%6.1f tail=%6.1f ms\n",
+                    what ? what : "-", (double)d0 / 1e6, (double)d1 / 1e6,
+                    (double)d2 / 1e6);
     }
     return v->st.dev_skip[0] ? 1 : 0;
 }

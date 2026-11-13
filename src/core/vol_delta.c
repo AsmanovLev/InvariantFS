@@ -371,6 +371,13 @@ typedef struct {
     uint64_t seg;
     uint64_t off;
     uint64_t seq;
+    uint64_t ins_gen;   /* di->epoch at the moment this KEY was inserted.
+                         * The key set only grows by whole keys, and epoch
+                         * moves exactly then, so this names "which keys are
+                         * newer than a given sorted view" without any
+                         * second bookkeeping. Coalesced updates (same key)
+                         * keep the original value: the key set did not
+                         * change. */
 } delta_slot;
 
 struct delta_index {
@@ -383,6 +390,14 @@ struct delta_index {
      * index can never be mistaken for a view of a new one; `epoch` moves
      * whenever the key set changes. */
     uint64_t    inst;
+    /* Insert log, in insertion order: the slot indices of keys created since
+     * the last refresh of the sorted view. Without it a refresh has to walk
+     * all `cap` hash slots (measured: 4 194 304 slots, 40-70 ms per query)
+     * to discover that one or two keys are new. Erases invalidate it
+     * (log_stale), because they change the key set without an insert. */
+    uint32_t   *ins_log;
+    size_t      ins_n, ins_cap;
+    int         log_stale;
     uint64_t    epoch;
 };
 
@@ -499,6 +514,18 @@ static int di_put(struct delta_index *di, const uint8_t *key, uint16_t klen,
             s->klen = klen;
             di->used++;
             di->epoch++;      /* WP117: the key set grew */
+            s->ins_gen = di->epoch;
+            if (di->ins_n == di->ins_cap) {
+                size_t ncap = di->ins_cap ? di->ins_cap * 2 : 64;
+                uint32_t *nl = (uint32_t *)realloc(di->ins_log,
+                                                   ncap * sizeof *nl);
+                if (nl) { di->ins_log = nl; di->ins_cap = ncap; }
+            }
+            if (di->ins_n < di->ins_cap)
+                di->ins_log[di->ins_n++] = (uint32_t)i;
+            else
+                di->log_stale = 1;   /* cannot log it: force a full rebuild */
+
             if (inserted)
                 *inserted = 1;
             break;
@@ -578,6 +605,7 @@ static void di_delete_at(struct delta_index *di, size_t idx)
     di->slot[idx].key = NULL;
     di->used--;
     di->epoch++;
+    di->log_stale = 1;   /* slots shift below: the insert log is unusable */
     mask = di->cap - 1;
     i = idx;
     for (;;) {
@@ -1718,12 +1746,6 @@ typedef struct {
     uint32_t       slot;  /* index into delta_index::slot */
 } di_skey;
 
-typedef struct {
-    uint64_t inst, epoch; /* the (inst, epoch) this view was built from */
-    di_skey *v;
-    size_t   n, cap;
-} di_sorted;
-
 static int di_skey_cmp(const void *pa, const void *pb)
 {
     const di_skey *a = (const di_skey *)pa;
@@ -1731,67 +1753,105 @@ static int di_skey_cmp(const void *pa, const void *pb)
     return vol_key_cmp(a->key, a->klen, b->key, b->klen);
 }
 
-static pthread_key_t  g_di_sorted_key;
-static pthread_once_t g_di_sorted_once = PTHREAD_ONCE_INIT;
+/* ONE sorted view for the volume, not one per thread.
+ *
+ * vol_delta_range already holds g_delta_lock while it reads the view, so a
+ * shared view needs no new locking -- and a per-thread copy of an array with
+ * one entry per live key is pure waste: at 300k keys that is ~7 MB per FUSE
+ * worker, times the worker count.
+ *
+ * Maintenance is INCREMENTAL. The old build threw the array away and qsorted
+ * every key whenever the index's epoch moved -- and epoch moves on every new
+ * key, i.e. on every unlink that deletes a row and a dirent. Measured: 694 ms
+ * per unlink on the stand with no block I/O at all (read_bytes 0), which is
+ * what sent three durability hypotheses to the bin before this one landed.
+ *
+ * delta_slot.ins_gen makes "new since this view" exact: the key set only
+ * grows by whole keys, and di->epoch increments exactly then, so every slot
+ * with ins_gen > built_epoch is a key this view has never held. Those are
+ * collected (usually a handful), sorted among themselves, and merged into the
+ * sorted array in place from the back -- O(N+M) sequential, no full qsort.
+ *
+ * Three cases still rebuild in full, because incremental is wrong there and
+ * being fast wrongly is worse than being slow rightly:
+ *   - a different index instance (reopen / rehash -> inst moved);
+ *   - the view is empty (nothing to merge into);
+ *   - the key set SHRANK (di_erase removes a key), which leaves a stale key
+ *     in the array. */
+typedef struct {
+    uint64_t inst, epoch; /* the (inst, epoch) this view was built from */
+    di_skey *v;           /* SORTED prefix: what queries bsearch into */
+    size_t   n, cap;
+    di_skey *t;           /* UNSORTED tail: keys logged since that build */
+    size_t   tn, tcap;
+} di_sorted;
 
-static void di_sorted_release(void *p)
+static di_sorted g_di_sv;
+
+/* Merge the tail into the sorted prefix once it is worth an O(N) shift.
+ * Below this the tail is simply scanned by the query, which is O(tn) and
+ * keeps a one-key insert from copying the whole 43 MB array. */
+#define DI_TAIL_MERGE_MIN 4096u
+
+static int di_sorted_grow(di_sorted *s, size_t cap)
 {
-    di_sorted *s = (di_sorted *)p;
-    if (!s)
-        return;
-    /* WP633: clear the key so pthread does not re-fire the destructor
-     * on the dangling pointer (PTHREAD_DESTRUCTOR_ITERATIONS). Without
-     * this the exiting thread double-frees s->v/s, corrupting the heap
-     * globally -- the next thread's s->v can then be smaller than its
-     * s->cap claims, i.e. a "guarded" store still overflows. */
-    pthread_setspecific(g_di_sorted_key, NULL);
-    free(s->v);
-    free(s);
+    di_skey *nv;
+    if (s->cap >= cap)
+        return 0;
+    nv = (di_skey *)realloc(s->v, cap * sizeof *nv);
+    if (!nv)
+        return -1;
+    s->v = nv;
+    s->cap = cap;
+    return 0;
 }
 
-static void di_sorted_key_init(void)
+static int di_tail_push(di_sorted *s, const uint8_t *key, uint16_t klen,
+                        uint32_t slot)
 {
-    pthread_key_create(&g_di_sorted_key, di_sorted_release);
-}
-
-static di_sorted *di_sorted_this(void)
-{
-    di_sorted *s;
-
-    pthread_once(&g_di_sorted_once, di_sorted_key_init);
-    s = (di_sorted *)pthread_getspecific(g_di_sorted_key);
-    if (!s) {
-        s = (di_sorted *)calloc(1, sizeof *s);
-        if (s)
-            pthread_setspecific(g_di_sorted_key, s);
+    if (s->tn == s->tcap) {
+        size_t ncap = s->tcap ? s->tcap * 2 : 64;
+        di_skey *nt = (di_skey *)realloc(s->t, ncap * sizeof *nt);
+        if (!nt)
+            return -1;
+        s->t = nt;
+        s->tcap = ncap;
     }
-    return s;
+    s->t[s->tn].key = key;
+    s->t[s->tn].klen = klen;
+    s->t[s->tn].slot = slot;
+    s->tn++;
+    return 0;
 }
 
-static int di_sorted_build(const struct delta_index *di, di_sorted *s)
+static void di_log_clear(struct delta_index *di)
+{
+    di->ins_n = 0;
+    di->log_stale = 0;
+}
+
+static double di_ms_since(const struct timespec *t0)
+{
+    struct timespec t1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    return (double)(t1.tv_sec - t0->tv_sec) * 1e3 +
+           (double)(t1.tv_nsec - t0->tv_nsec) / 1e6;
+}
+
+static int di_sorted_full(struct delta_index *di, di_sorted *s)
 {
     size_t i, n = 0;
-    size_t cap = di->used ? di->used : 1;
+    struct timespec t0;
 
-    if (s->cap < cap) {
-        di_skey *nv = (di_skey *)realloc(s->v, cap * sizeof *nv);
-        if (!nv)
-            return -1;
-        s->v = nv;
-        s->cap = cap;
-    }
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    if (di_sorted_grow(s, di->used ? di->used : 1) != 0)
+        return -1;
     for (i = 0; i < di->cap; i++) {
         const delta_slot *sl = &di->slot[i];
         if (!sl->key)
             continue;
-        if (n >= s->cap) {
-            size_t ncap = s->cap ? s->cap * 2 : 32;
-            di_skey *nv = (di_skey *)realloc(s->v, ncap * sizeof *nv);
-            if (!nv)
-                return -1;
-            s->v = nv;
-            s->cap = ncap;
-        }
+        if (n >= s->cap && di_sorted_grow(s, s->cap ? s->cap * 2 : 32) != 0)
+            return -1;
         s->v[n].key = sl->key;
         s->v[n].klen = sl->klen;
         s->v[n].slot = (uint32_t)i;
@@ -1800,8 +1860,86 @@ static int di_sorted_build(const struct delta_index *di, di_sorted *s)
     if (n > 1)
         qsort(s->v, n, sizeof *s->v, di_skey_cmp);
     s->n = n;
+    s->tn = 0;                       /* the scan above covers the tail too */
     s->inst = di->inst;
     s->epoch = di->epoch;
+    if (getenv("INVFS_TRACE_INDEX"))
+        fprintf(stderr, "[di] full  n=%zu qsort=%.1f ms\n", n, di_ms_since(&t0));
+    return 0;
+}
+
+static int di_tail_merge(di_sorted *s)
+{
+    size_t a, b, k;
+    if (s->tn == 0)
+        return 0;
+    qsort(s->t, s->tn, sizeof *s->t, di_skey_cmp);
+    a = s->n;
+    b = s->tn;
+    k = s->n + s->tn;
+    if (di_sorted_grow(s, k) != 0)   /* realloc may move v: grow before merge */
+        return -1;
+    while (b > 0) {
+        if (a > 0 && vol_key_cmp(s->v[a - 1].key, s->v[a - 1].klen,
+                                 s->t[b - 1].key, s->t[b - 1].klen) > 0)
+            s->v[--k] = s->v[--a];
+        else
+            s->v[--k] = s->t[--b];
+    }
+    s->n += s->tn;
+    s->tn = 0;
+    return 0;
+}
+
+/* Bring the view up to date with the index.
+ *
+ * The old shape threw the array away and qsorted every key whenever the
+ * index's epoch moved -- and epoch moves on every new key, i.e. on every
+ * create. Measured on the stand: 1 787 628 live keys in 4 194 304 hash
+ * slots, and 40-70 ms per range query, of which the great majority was
+ * (a) walking all 4.2M slots to discover two new keys and (b) copying the
+ * whole 43 MB array to insert them.
+ *
+ * Now: the index keeps an append-ordered log of the slots it inserted, the
+ * view keeps an unsorted tail of the keys logged since its build, and the
+ * O(N) merge runs only once the tail reaches DI_TAIL_MERGE_MIN. Queries
+ * bsearch the sorted prefix and scan the (small) tail, then the existing
+ * result sort puts the two together.
+ *
+ * Full rebuild is still correct-and-required in four cases, and being fast
+ * wrongly is worse than being slow rightly:
+ *   - a different index instance (inst moved);
+ *   - the view was just built (nothing to merge into);
+ *   - the key set SHRANK, which leaves keys in the view that no longer exist;
+ *   - an erase shifted slots, so the insert log no longer names them. */
+static int di_sorted_refresh(struct delta_index *di, di_sorted *s)
+{
+    size_t i;
+
+    if (s->inst != di->inst || s->n == 0 || di->used < s->n ||
+        di->log_stale) {
+        if (di_sorted_full(di, s) != 0)
+            return -1;
+        di_log_clear(di);
+        return 0;
+    }
+    if (s->epoch == di->epoch)
+        return 0;
+    for (i = 0; i < di->ins_n; i++) {
+        uint32_t sl = di->ins_log[i];
+        if ((size_t)sl >= di->cap || !di->slot[sl].key)
+            continue;
+        if (di->slot[sl].ins_gen <= s->epoch)
+            continue;
+        if (di_tail_push(s, di->slot[sl].key, di->slot[sl].klen, sl) != 0)
+            return -1;
+    }
+    di_log_clear(di);
+    s->epoch = di->epoch;
+    if (s->tn >= DI_TAIL_MERGE_MIN)
+        return di_tail_merge(s);
+    if (getenv("INVFS_TRACE_INDEX"))
+        fprintf(stderr, "[di] tail  n=%zu tn=%zu\n", s->n, s->tn);
     return 0;
 }
 
@@ -1844,11 +1982,25 @@ int vol_delta_range(invfs_volume *v,
         n++;                                                               \
     } while (0)
 
-    vol_delta_lock();
-    sv = di_sorted_this();
-    if (sv && (sv->inst != di->inst || sv->epoch != di->epoch) &&
-        di_sorted_build(di, sv) != 0)
-        sv = NULL;                     /* OOM: linear scan below */
+    {
+        struct timespec _w0, _w1, _r1;
+        double _wait, _work;
+        clock_gettime(CLOCK_MONOTONIC, &_w0);
+        vol_delta_lock();
+        clock_gettime(CLOCK_MONOTONIC, &_w1);
+        sv = &g_di_sv;
+        (void)di_sorted_refresh(di, sv);
+        clock_gettime(CLOCK_MONOTONIC, &_r1);
+        _wait = (double)(_w1.tv_sec - _w0.tv_sec) * 1e3 +
+                (double)(_w1.tv_nsec - _w0.tv_nsec) / 1e6;
+        _work = (double)(_r1.tv_sec - _w1.tv_sec) * 1e3 +
+                (double)(_r1.tv_nsec - _w1.tv_nsec) / 1e6;
+        if (getenv("INVFS_TRACE_LOCK") && (_wait + _work) > 5.0)
+            fprintf(stderr, "[dlk] wait=%.1f work=%.1f n=%zu epoch=%llu inst=%llu slots=%zu ms\n",
+                    _wait, _work, g_di_sv.n,
+                    (unsigned long long)di->epoch, (unsigned long long)di->inst,
+                    di->cap);
+    }
     if (sv) {
         size_t first = 0;
         /* bsearch for the first key >= lo */
@@ -1875,6 +2027,27 @@ int vol_delta_range(invfs_volume *v,
             DI_EMIT(sv->v[i].key, sv->v[i].klen, s);
         }
         presorted = 1;
+        /* The tail holds the keys logged since this view was built: too few
+         * to justify copying the sorted array, so they are simply scanned
+         * here. The result sort below merges the two sets; `presorted` must
+         * therefore be cleared whenever the tail contributes anything. */
+        if (sv->tn) {
+            size_t t;
+            for (t = 0; t < sv->tn; t++) {
+                const delta_slot *ts;
+                if ((size_t)sv->t[t].slot >= di->cap)
+                    continue;
+                ts = &di->slot[sv->t[t].slot];
+                if (!ts->key)
+                    continue;
+                if (lolen && vol_key_cmp(ts->key, ts->klen, lo, lolen) < 0)
+                    continue;
+                if (hilen && vol_key_cmp(ts->key, ts->klen, hi, hilen) >= 0)
+                    continue;
+                DI_EMIT(ts->key, ts->klen, ts);
+                presorted = 0;
+            }
+        }
     } else {
         for (i = 0; i < di->cap; i++) {
             const delta_slot *s = &di->slot[i];

@@ -3742,18 +3742,42 @@ static int delta_shadow_xattr_keys(invfs_volume *v, uint64_t inode_id)
         free(b.buf);
         return -1;
     }
-    rc = btree_scan(v, root, (bt_key){lo, XATTR_FIXED},
-                    (bt_key){hi, XATTR_FIXED}, xattr_collect_cb, &b);
-    vol_reclaim_reader_release();
-    if (rc != 0) {
-        free(b.buf);
-        return -1;
-    }
-    rc = vol_delta_range(v, lo, XATTR_FIXED, hi, XATTR_FIXED,
-                         xattr_collect_delta_cb, &b);
-    if (rc != 0) {
-        free(b.buf);
-        return -1;
+    {
+        struct timespec _t0, _t1, _t2;
+        double _ms_scan, _ms_ring;
+        size_t _nkeys = 0;
+        clock_gettime(CLOCK_MONOTONIC, &_t0);
+        rc = btree_scan(v, root, (bt_key){lo, XATTR_FIXED},
+                        (bt_key){hi, XATTR_FIXED}, xattr_collect_cb, &b);
+        clock_gettime(CLOCK_MONOTONIC, &_t1);
+        vol_reclaim_reader_release();
+        if (rc != 0) {
+            free(b.buf);
+            return -1;
+        }
+        rc = vol_delta_range(v, lo, XATTR_FIXED, hi, XATTR_FIXED,
+                             xattr_collect_delta_cb, &b);
+        clock_gettime(CLOCK_MONOTONIC, &_t2);
+        if (rc != 0) {
+            free(b.buf);
+            return -1;
+        }
+        _ms_scan = (double)(_t1.tv_sec - _t0.tv_sec) * 1e3 +
+                   (double)(_t1.tv_nsec - _t0.tv_nsec) / 1e6;
+        _ms_ring = (double)(_t2.tv_sec - _t1.tv_sec) * 1e3 +
+                   (double)(_t2.tv_nsec - _t1.tv_nsec) / 1e6;
+        if (getenv("INVFS_TRACE_XATTR") && (_ms_scan + _ms_ring) > 20.0) {
+            size_t _o = 0;
+            while (_o + 2 <= b.len) {
+                uint16_t _kl = (uint16_t)(((uint16_t)b.buf[_o] << 8) | b.buf[_o + 1]);
+                _o += 2;
+                if ((size_t)_o + _kl > b.len) break;
+                _o += _kl;
+                _nkeys++;
+            }
+            fprintf(stderr, "[xa] ino=%llu base_scan=%.1f ring=%.1f keys=%zu bytes=%zu ms\n",
+                    (unsigned long long)inode_id, _ms_scan, _ms_ring, _nkeys, b.len);
+        }
     }
     while (off + 2 <= b.len) {
         uint16_t kl = (uint16_t)(((uint16_t)b.buf[off] << 8) | b.buf[off + 1]);
