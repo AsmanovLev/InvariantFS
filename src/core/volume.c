@@ -589,18 +589,67 @@ int vmux_barrier(invfs_volume *v, const char *what)
  * copied from the newer device to the stale one (both hold it at
  * identical local offsets); the DEVT bump in vol_flush then marks them
  * equal. Newest state wins; the run is logged. */
+/* How far a resync really has to go.
+ *
+ * The mirrored span is the whole RESERVED metadata area -- 32 GB on the stand
+ * -- but reserved is not used: the zone is sized for the worst case, and a
+ * volume that holds 5.9 GB of data occupies a small prefix of it. Copying (and
+ * even just reading) the tail is what made a repair cost minutes.
+ *
+ * The block bitmap is the safe answer: a live metadata page is an ALLOCATED
+ * block, so the highest set bit is a provable upper bound on what any walk of
+ * the metadata can reach. Everything above it is free space that only looks
+ * like metadata because the zone is reserved for it. Nothing above the bound
+ * can be lost by not copying it, because nothing above it is in use.
+ *
+ * If the bitmap is not loaded (the volume opened before the manifest could be
+ * allocated), fall back to the full span: a slow repair is correct, a repair
+ * that guesses is not. */
+static uint64_t meta_used_end(invfs_volume *v)
+{
+    uint64_t zs = v->sb.metadata_zone_start;
+    uint64_t zb = v->sb.metadata_zone_blocks;
+    uint64_t hi = 0, nbytes, i;
+    int k;
+
+    if (!v->bitmap || !zb)
+        return v->st.meta_end_bytes;
+    nbytes = (zb + 7) / 8;
+    for (i = nbytes; i-- > 0; ) {
+        if (!v->bitmap[i])
+            continue;
+        for (k = 7; k >= 0; k--) {
+            uint64_t bit = i * 8 + (uint64_t)k;
+            if (bit >= zb)
+                continue;                 /* padding past the zone */
+            hi = zs + bit;
+            goto found;
+        }
+    }
+found:
+    if (!hi)
+        return (zs + 1) * (uint64_t)INVFS_BLOCK_SIZE;   /* front page only */
+    {
+        uint64_t end = (hi + 1) * (uint64_t)INVFS_BLOCK_SIZE;
+        return end > v->st.meta_end_bytes ? v->st.meta_end_bytes : end;
+    }
+}
+
 static int mirror_resync(invfs_volume *v)
 {
     int loser = v->st.resync_winner ^ 1;
     blkio *src = v->st.resync_winner ? &v->io2 : &v->io;
     blkio *dst = loser ? &v->io2 : &v->io;
     uint8_t *buf = (uint8_t *)malloc(BLKIO_BOUNCE);
-    uint64_t off = 0, end = v->st.meta_end_bytes;
+    uint8_t *cmp = (uint8_t *)malloc(BLKIO_BOUNCE);
+    uint64_t off = 0, end = meta_used_end(v);
+    uint64_t equal_bytes = 0, wrote_bytes = 0;
 
-    if (!buf) return -1;
-    fprintf(stderr, "vol: mirror resync: dev%d <- dev%d (%llu bytes of "
-            "metadata; newest state wins)\n", loser, v->st.resync_winner,
-            (unsigned long long)end);
+    if (!buf || !cmp) { free(buf); free(cmp); return -1; }
+    fprintf(stderr, "vol: mirror resync: dev%d <- dev%d (%llu bytes in use of "
+            "the %llu reserved; newest state wins)\n", loser,
+            v->st.resync_winner, (unsigned long long)end,
+            (unsigned long long)v->st.meta_end_bytes);
     while (off < end) {
         size_t n = (size_t)((end - off) > BLKIO_BOUNCE ? BLKIO_BOUNCE
                                                        : end - off);
@@ -608,10 +657,25 @@ static int mirror_resync(invfs_volume *v)
             fprintf(stderr, "vol: mirror resync: read failed at %llu\n",
                     (unsigned long long)off);
             free(buf);
+            free(cmp);
             return -1;
+        }
+        /* Compare before writing. The span is the whole RESERVED metadata
+         * area (32 GB on the stand) while a divergence is normally a handful
+         * of pages, so the old blind copy spent minutes rewriting identical
+         * bytes onto the HDD. Reading both sides still costs the scan, but the
+         * writes -- the slow part on a spinning disk, and the part that keeps
+         * the window open for the next race -- now happen only where the two
+         * devices really differ. A failed READ of the loser is not an error
+         * here: it means "unknown", which the write below resolves. */
+        if (blkio_pread(dst, off, cmp, n) == 0 && memcmp(buf, cmp, n) == 0) {
+            equal_bytes += n;
+            off += n;
+            continue;
         }
         if (blkio_pwrite(dst, off, buf, n) != 0) {
             free(buf);
+            free(cmp);
             fprintf(stderr, "vol: mirror resync: dev%d write failed\n",
                     loser);
             if (loser == 1) {
@@ -620,9 +684,14 @@ static int mirror_resync(invfs_volume *v)
             }
             return -1;   /* a dev0 loser stays session-skipped */
         }
+        wrote_bytes += n;
         off += n;
     }
     free(buf);
+    free(cmp);
+    fprintf(stderr, "vol: mirror resync: %llu of %llu bytes already equal, "
+            "%llu written\n", (unsigned long long)equal_bytes,
+            (unsigned long long)end, (unsigned long long)wrote_bytes);
     if (blkio_flush(dst) != 0) {
         if (loser == 1)
             vol_io_error_latch(v, "mirror resync barrier (dev1)");
