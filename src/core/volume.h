@@ -1343,9 +1343,20 @@ int  vol_sweep_file_generic(invfs_volume *v, uint64_t inode_id);
 
 /* ---- WP25: two-device volumes (DEVT descriptor, invarifs.h) ----
  * vol_ndev: 1 or 2 backing devices. vol_degraded: the volume is open
- * READ-ONLY with dev0 absent -- metadata comes from the dev1 mirror and
- * every live block is readable (canonical data lives on dev1 by the WP25
- * placement rules); writes fail loudly. */
+ * READ-ONLY with dev0 absent -- metadata comes from the dev1 mirror.
+ *
+ * Whether every live block is then readable depends on the DATA leg, which
+ * is a separate axis and is NOT guaranteed by the mirror:
+ *   - raw_mirror=0 (the actual default, see vol_tier.c) -> file contents live
+ *     only in dev0's RAW zone, so a dev0-absent mount can resolve names and
+ *     sizes but cannot read the bytes;
+ *   - raw_mirror=1 -> every RAW segment also lands in dev1's shadow and reads
+ *     fail over to it;
+ *   - after a sweep -> the swept segments are canonical on dev1 and readable.
+ * The earlier wording here ("canonical data lives on dev1 by the WP25
+ * placement rules") read like a guarantee and was believed as one: measured
+ * on the stand, the default volume has no data on dev1 at all. See
+ * impl_docs/CONCEPTS.md sections 2 and 6. */
 int  vol_ndev(const invfs_volume *v);
 int  vol_degraded(const invfs_volume *v);
 /* 1 = the metadata mirror devices disagree (a resync runs at the next

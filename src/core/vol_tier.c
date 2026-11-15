@@ -5,7 +5,8 @@
  * seal-owner pattern: ordinary L2P maps keyed by the owner inode id, one
  * AST entry per copy so fsck keeps the blocks live):
  *
- *   "\x01rawm"  — the RAW mirror (raw_mirror=1, the default): every
+ *   "\x01rawm"  — the RAW mirror (ENABLED by INVFS_RAW_MIRROR=1; the default
+ *     is OFF, see the getenv in volume.c and the matching comment there): every
  *     raw-zone segment written lands twice, once on dev0 (the RAW zone
  *     proper) and once in the canonical shadow on dev1. Key = the raw-zone
  *     pba; the map's L2P lba = the raw-zone-RELATIVE block index (fits the
