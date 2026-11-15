@@ -509,10 +509,61 @@ int vol_write_devt(invfs_volume *v)
     memcpy(t.magic, "DEVT", 4);
     t.crc32c = 0;
     t.crc32c = devt_crc(&t);
-    if (vmux_seek(v, INVFS_DEVT_OFF) != 0 ||
-        vmux_write(v, &t, sizeof t) != 0)
+    /* Write the descriptor DIRECTLY to each writable device instead of going
+     * through the mux.
+     *
+     * The mux is the right path for metadata in general, but not here: the
+     * resync writes the same page through blkio_pwrite, and on the stand that
+     * interleaving left dev1 holding the PRE-bump value while the call still
+     * reported success -- caught by the self-check below as
+     * "devt: MISMATCH right after the bump: dev0=697511 dev1=697510". One
+     * unlucky flush per boot is enough to make every following open declare
+     * the mirror stale.
+     *
+     * Writing both devices explicitly costs nothing (188 bytes each), makes the
+     * ordering against the resync unambiguous, and cannot be silently absorbed
+     * by the mux's own state. */
+    if (v->io_open[0] && !v->st.dev_skip[0] &&
+        blkio_pwrite(&v->io, INVFS_DEVT_OFF, &t, sizeof t) != 0) {
+        v->st.dev_skip[0] = 1;
+        fprintf(stderr, "vol: dev0 DEVT write failed; continuing on dev1 "
+                "(dev0 will resync at next open)\n");
+    }
+    if (v->io_open[1] && !v->st.dev_skip[1] &&
+        blkio_pwrite(&v->io2, INVFS_DEVT_OFF, &t, sizeof t) != 0) {
+        vol_io_error_latch(v, "DEVT write (dev1)");
         return -1;
+    }
     v->st.devt = t;
+    /* Self-check: the certificate is only worth anything if BOTH devices
+     * actually hold it. The gap this catches was measured on the stand as
+     * sync_seq 697302 on the SSD vs 697301 on the HDD, stable across every
+     * following flush, and invisible to everything except the open-time
+     * comparison -- which could only answer by copying gigabytes.
+     *
+     * Two 188-byte reads per flush (a few per second) are cheap enough to
+     * leave in: an invariant that is never checked is an invariant nobody
+     * knows is broken. Rate-limited so a persistent fault cannot flood the
+     * log. */
+    if (v->io_open[1] && !v->st.dev_skip[1]) {
+        static unsigned long mismatches;
+        invfs_devt r0, r1;
+        if (blkio_pread(&v->io, INVFS_DEVT_OFF, &r0, sizeof r0) == 0 &&
+            blkio_pread(&v->io2, INVFS_DEVT_OFF, &r1, sizeof r1) == 0 &&
+            r0.sync_seq != r1.sync_seq) {
+            if (mismatches < 20) {
+                fprintf(stderr, "devt: MISMATCH right after the bump: "
+                        "dev0=%llu dev1=%llu (wrote %llu); the mirror "
+                        "certificate did not land on both devices\n",
+                        (unsigned long long)r0.sync_seq,
+                        (unsigned long long)r1.sync_seq,
+                        (unsigned long long)t.sync_seq);
+            } else if (mismatches == 20) {
+                fprintf(stderr, "devt: further mismatches are not logged\n");
+            }
+            mismatches++;
+        }
+    }
     return 0;
 }
 
