@@ -139,3 +139,49 @@
 
 Эксплуатация: GRUB-таймаут 5 с; `INVFS_TOOL_SCRATCH` только на Landlock-ФС;
 `INVFS_LAZY_RECLAIM=0` на стенде; переустановка на новый том.
+
+## Найденное 2026-11-16 (поздний вечер)
+
+### Тесты и контейнерпаки нельзя гонять из `/mnt/d` (drvfs) — Landlock
+
+Любой пак, чей исполняемый файл лежит на drvfs, не запускается: хелпер
+запускается под Landlock, а правила на drvfs не ставятся, поэтому открытие
+скрипта пака получает `EACCES`:
+
+```
+python3: can't open file '.../splt_test.codecpack/splt.py': [Errno 13] Permission denied
+[cpack] enumerate failed: ... (tool absent, or the container is not in a form it reads)
+```
+
+Диагностируется только с `INVFS_HELPER_VERBOSE=1` — иначе stderr хелпера уходит
+в `/dev/null` и выглядит как «пак не умеет этот контейнер». Тот же корень, что
+и у скретча на drvfs (запись), только здесь — чтение.
+
+**Правило:** прогоны с контейнерпаками — из worktree на нативной ФС
+(`/var/tmp/wt_*`), не из `S:\`/`D:\`.
+
+### `tools/test-containerpack.sh`: пре-существующий сбой
+
+`FAIL: corrupt map (guard): rollback left the volume dirty` — воспроизводится на
+коммите `3c76be1` (до работы по упакованной раскладке) и на `bf54544`
+одинаково. Не связан с листьями/блобом; разбирать отдельно.
+
+### Рекурсия контейнеров в ФС: измеренный результат
+
+`debian12.qcow2` (1.1 ГБ) целиком, `--no-compress`, `INVFS_SWEEP_MAX_FILE=4G`:
+
+```
+свип #1  debian12.qcow2: qcow2 (codecpack)            -> 4 файла
+свип #2  ...!mbr0001-diskimg: rawdisk (codecpack)     -> 9 файлов
+          3 085 959 168 B  ...!mbr0001-p0001   (гостевой ext4)
+            130 023 424 B  ...!mbr0015-p0015   (EFI, fat32)
+свип #3  ...!mbr0001-p0001: ext4fs (codecpack)        -> 1 ч 22 мин
+         ...!mbr0015-p0015: fatfs  (codecpack)
+         в томе: файлы гостя (gshadow, group, grub.cfg, index.db, ...)
+         dedupe: 1819 сегментов, 57.0 МиБ
+         used 2233 МиБ, invf-ls: 4096 file(s) INCOMPLETE
+```
+
+Цена: **21 356 инодов на один образ** (по 4-12 КиБ метаданных каждый) и
+~175 мс на члена (пак заново парсит контейнер на каждый `extract`; `batch`
+у `ext4fs` не объявлен).
