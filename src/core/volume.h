@@ -182,12 +182,22 @@ uint64_t vol_find_ex(invfs_volume *v, const char *name,
 
 /* virtual directories (prefix-based; anchor "dir/" is an empty file) */
 /* size/ctime come straight out of the name index, so a listing needs no
-   per-entry stat call. size is 0 for directories. */
+   per-entry stat call. size is 0 for directories.
+
+   `ino` and `type` are what the name index and the inode row that produced
+   is_dir/size/ctime already know: the callback is handed the child number and
+   reads the row anyway, so carrying them here costs nothing and saves a
+   consumer from resolving the whole path again. `walk_dir` is the consumer
+   that matters -- it used to vol_path_lookup() every entry from the root,
+   which on the stand's 322 888 files at depth 6-8 was measured as
+   build_file_table walk=103.8s, i.e. the entire mount latency. */
 typedef struct {
     char name[256];
     int is_dir;
     uint64_t size;
     uint64_t ctime;
+    uint64_t ino;          /* the entry's inode number */
+    uint8_t type;          /* INVFS_ITYP_* as stored in the row */
 } invfs_dirent;
 int vol_is_dir(invfs_volume *v, const char *name);
 uint64_t vol_mkdir(invfs_volume *v, const char *name);

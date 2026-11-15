@@ -374,6 +374,8 @@ static int list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
     c->ents[c->n].is_dir = (in.type == INVFS_ITYP_DIR);
     c->ents[c->n].size = c->ents[c->n].is_dir ? 0 : in.size;
     c->ents[c->n].ctime = (uint64_t)in.mtime;
+    c->ents[c->n].ino = child;
+    c->ents[c->n].type = in.type;
     c->n++;
     return 0;
 }
@@ -1159,7 +1161,7 @@ static int walk_dir(invfs_volume *v, const char *dir,
                        vol_walk_cb cb, void *ctx, int depth, int strict)
 {
     invfs_dirent *ents;
-    int cap = 256, n, i, lrc, irc;
+    int cap = 256, n, i;
 
     if (depth > 64)
         return -1;
@@ -1222,15 +1224,28 @@ static int walk_dir(invfs_volume *v, const char *dir,
          * The fault seam below stands in for the failed RESOLUTION and then
          * defers to this same branch, so the red control measures the
          * lenient/lenient choice rather than a private copy of it. */
-        lrc = invfs_vol_fault("walk_dir_entry")
-                  ? -1 : vol_path_lookup(v, path, &ino);
-        if (lrc != 1) {
+        /* The listing already resolved this name to an inode number and read
+         * its row -- that is where is_dir/size/ctime above came from. The
+         * vol_path_lookup() that used to stand here resolved the SAME name
+         * again, from the root, for every entry of every directory, which on
+         * the stand's 322 888 files at depth 6-8 is millions of redundant
+         * lookups: measured as build_file_table walk=103.8s, the whole mount
+         * latency. Take the number the index gave us.
+         *
+         * The two fault seams stay, and they still mean what they meant: a
+         * name that cannot be RESOLVED and a row that cannot be READ are
+         * errors, and a strict walk must not step over either. They now fire
+         * at the point the listening already reached, not at a second lookup. */
+        ino = ents[i].ino;
+        if (invfs_vol_fault("walk_dir_entry")) {
             if (strict) { free(ents); return -1; }
             continue;
         }
-        irc = invfs_vol_fault("walk_dir_row")
-                  ? -1 : vol_inode_get(v, ino, &in);
-        if (irc != 1) {
+        memset(&in, 0, sizeof in);
+        in.type = ents[i].type;
+        in.size = ents[i].size;
+        in.mtime = (int64_t)ents[i].ctime;
+        if (invfs_vol_fault("walk_dir_row")) {
             if (strict) { free(ents); return -1; }
             continue;
         }
