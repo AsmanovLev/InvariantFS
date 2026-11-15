@@ -1622,6 +1622,13 @@ int main(int argc, char **argv)
             realize = 1;
         } else if (strcmp(a, "--no-realize") == 0) {
             no_realize = 1;
+        } else if (strcmp(a, "--no-compress") == 0) {
+            /* Benchmark / "dedup only" mode: the sweep does not rewrite
+             * anything, so segments keep whatever compression they already
+             * have (RAW segments stay RAW), and only the dedupe pass runs.
+             * That is what makes a dedup measurement attributable: space can
+             * only change because identical segments were merged. */
+            setenv("INVFS_SWEEP_NO_COMPRESS", "1", 1);
         } else if (strcmp(a, "--fast") == 0) {
             fast = 1;
         } else if (strcmp(a, "--migrate") == 0) {

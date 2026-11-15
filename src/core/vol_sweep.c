@@ -1231,6 +1231,28 @@ static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
     if (!v || !inode_id)
         return 0;
 
+    /* "Dedup only" mode (INVFS_SWEEP_NO_COMPRESS / invf-sweep --no-compress).
+     *
+     * Every lane below exists to RE-ENCODE a file: containers are decomposed,
+     * codecs transcode, text defers into shared PPMd batches, the generic floor
+     * recompresses with zstd. All of them change the stored bytes, so all of
+     * them make a space measurement unattributable -- one cannot tell an
+     * identical-segment merge from a compression win.
+     *
+     * In this mode nothing is rewritten: the file keeps the bytes it has (a RAW
+     * file stays RAW), and the only stage that runs afterwards is the dedupe
+     * pass, which merges identical stored segments in place. Space can then
+     * only move because of deduplication, which is the whole point. */
+    {
+        static int nc = -1;
+        if (nc < 0) {
+            const char *e = getenv("INVFS_SWEEP_NO_COMPRESS");
+            nc = (e && *e == '1');
+        }
+        if (nc)
+            return 0;
+    }
+
     /* WP-M23: active write session guard by inode_id and name */
     if (!invfs_sweep_ui_active()) {
         fprintf(stderr, "[sweep-] checking inode %llu (%s)...\n",
