@@ -166,6 +166,7 @@ typedef struct {
     uint8_t  *val;      /* NULL for a delete record */
     uint16_t  vlen;
     uint16_t  flags;
+    uint32_t  seq;      /* порядок сбора: тай-брейк сортировки */
 } fold_ent;
 
 typedef struct {
@@ -239,6 +240,7 @@ static int fold_collect_cb(void *ctx_, const uint8_t *key, uint16_t klen,
     }
     e = &l->ent[l->n];
     memset(e, 0, sizeof *e);
+    e->seq = (uint32_t)l->n;             /* порядок прихода записи */
     e->key = (uint8_t *)malloc(klen ? klen : 1);
     if (!e->key) {
         l->oom = 1;
@@ -272,22 +274,32 @@ static int fold_collect_cb(void *ctx_, const uint8_t *key, uint16_t klen,
  * reason this sort may be trusted to make the pre-apply deterministic.
  * This sort is what puts the delta entries into base-key order. */
 
-/* Stable insertion sort of the snapshot into key order (the list is small and
- * this keeps the owned pointers from being shuffled). */
+/* qsort() comparator: key order, ties broken by collection order so the
+ * result is deterministic even if the index ever yields duplicate keys. */
+static int fold_ent_cmp(const void *pa, const void *pb)
+{
+    const fold_ent *a = (const fold_ent *)pa;
+    const fold_ent *b = (const fold_ent *)pb;
+    int c = vol_key_cmp(a->key, a->klen, b->key, b->klen);
+
+    if (c)
+        return c;
+    if (a->seq < b->seq)
+        return -1;
+    return a->seq > b->seq;
+}
+
+/* Sort the snapshot into key order.
+ *
+ * This used to be a stable insertion sort, justified by "the list is
+ * small" -- true for the 4k/20k-file benchmarks and catastrophically wrong
+ * for a real volume: a 1.79M-record delta made it ~8e11 comparisons, i.e. a
+ * 100%-CPU spin that never reached the bulk path and never wrote a byte.
+ * qsort is O(n log n) and the seq tie-break keeps the order deterministic. */
 static void fold_sort(fold_list *l)
 {
-    size_t a, b;
-    for (a = 1; a < l->n; a++) {
-        fold_ent tmp = l->ent[a];
-        b = a;
-        while (b > 0 && vol_key_cmp(tmp.key, tmp.klen,
-                                    l->ent[b - 1].key,
-                                    l->ent[b - 1].klen) < 0) {
-            l->ent[b] = l->ent[b - 1];
-            b--;
-        }
-        l->ent[b] = tmp;
-    }
+    if (l->n > 1)
+        qsort(l->ent, l->n, sizeof l->ent[0], fold_ent_cmp);
 }
 
 /* Persisting the dirty bitmap range is vol_bitmap_flush() (vol_btree.c),
@@ -601,19 +613,25 @@ int vol_fold(invfs_volume *v)
      * them raw (same rule as every fence: heal first, barrier second). */
     vol_delta_heal(v);
 
-    if (!fold_space_ok(v))
+    if (!fold_space_ok(v)) {
+        fprintf(stderr, "fold: FAILED at fold_space_ok -- not enough free "
+                        "space for a new base (the old one stays live)\n");
         return -1;
+    }
 
     memset(&list, 0, sizeof list);
     list.v = v;
     rc = vol_delta_iter(v, fold_collect_cb, &list);
     if (rc != 0 || list.oom) {
+        fprintf(stderr, "fold: FAILED collecting the delta (iter rc=%d, oom=%d, "
+                        "%zu record(s) collected)\n", rc, list.oom, list.n);
         fold_list_free(&list);
         return -1;                       /* pre-publish: volume untouched */
     }
     fold_sort(&list);
 
     if (vol_base_root(v, &old_root) != 0) {
+        fprintf(stderr, "fold: FAILED reading the base root\n");
         fold_list_free(&list);
         return -1;
     }
@@ -662,6 +680,8 @@ int vol_fold(invfs_volume *v)
         /* Pre-publish failure: RT30 still names old_root and the delta is
          * intact, so the volume is exactly pre-fold. The pages written so
          * far leak (WP-M15 reclaims nothing yet). */
+        fprintf(stderr, "fold: FAILED applying records at #%zu of %zu "
+                        "(btree upsert/delete)\n", i, list.n);
         fold_list_free(&list);
         return -1;
     }
@@ -735,6 +755,7 @@ int vol_fold(invfs_volume *v)
         }
     }
     if (mbuf_root_publish(v, root.pba, root.gen) != 0) {
+        fprintf(stderr, "fold: FAILED publishing the new root\n");
         fold_list_free(&list);
         return -1;
     }
@@ -805,10 +826,14 @@ int vol_fold_request(invfs_volume *v)
     invfs_blkptr new_root;
     int rc;
 
-    if (!v || !(v->sb.vol_flags & VOLF_META))
+    if (!v || !(v->sb.vol_flags & VOLF_META)) {
+        fprintf(stderr, "fold: request refused -- not a metadata volume\n");
         return -1;
-    if (v->sb.vol_flags & VOLF_READONLY)
+    }
+    if (v->sb.vol_flags & VOLF_READONLY) {
+        fprintf(stderr, "fold: request refused -- volume is read-only\n");
         return -1;
+    }
     if (vol_delta_count(v) == 0)
         return 0;
     vol_delta_stats(v, &records, NULL, &bytes);
@@ -820,19 +845,29 @@ int vol_fold_request(invfs_volume *v)
             now - v->delta_oldest_when >= FOLD_TRIGGER_AGE_S)
             need = 1;
     }
-    if (!need)
+    if (!need) {
+        fprintf(stderr, "fold: not triggered (%llu records, %llu MiB; "
+                        "triggers %llu / %llu MiB)\n",
+                (unsigned long long)records, (unsigned long long)(bytes >> 20),
+                (unsigned long long)FOLD_TRIGGER_RECORDS,
+                (unsigned long long)(FOLD_TRIGGER_BYTES >> 20));
         return 0;
+    }
     if (pthread_mutex_trylock(&g_fold_gate) != 0)
         return 0;                  /* another fold is already on this volume */
 
     /* WP-M18: capture pre-fold root for reclaim_hook (called after fold) */
     if (vol_base_root(v, &v->fold_pre_root) != 0) {
+        fprintf(stderr, "fold: FAILED capturing the pre-fold root\n");
         pthread_mutex_unlock(&g_fold_gate);
         return -1;
     }
 
     rc = vol_fold(v);
     if (rc != 0) {
+        fprintf(stderr, "fold: vol_fold() returned %d -- the delta stays at "
+                        "%llu record(s)\n", rc,
+                (unsigned long long)vol_delta_count(v));
         pthread_mutex_unlock(&g_fold_gate);
         return -1;
     }

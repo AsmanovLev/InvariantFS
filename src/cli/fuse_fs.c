@@ -4594,6 +4594,83 @@ int main(int argc, char *argv[])
     snprintf(g_img_path, sizeof g_img_path, "%s", img);
     snprintf(g_mnt_path, sizeof g_mnt_path, "%s", mnt);
     setvbuf(stderr, NULL, _IONBF, 0);
+    /* Fold-on-mount: the delta is a WAL, and the fold triggers (64 MiB of
+     * indexed payload / 262144 records / an hour) have exactly two callers --
+     * a sweep pass, which is off by default, and vol_close, which only runs
+     * on a CLEAN shutdown. A volume that is always force-rebooted therefore
+     * never folds, and every mount replays the whole log: measured on the
+     * stand, 79 s of an 82 s mount was delta replay with 1.79M records in the
+     * index against a 262144 trigger.
+     *
+     * Mount is the one event that always happens and is safe to fold on:
+     * nobody else is writing yet, and vol_fold_request carries its own
+     * threshold check and trylock gate. Read-only opens (invf-ls, verify,
+     * fsck without -f) cannot fold at all -- fold writes -- which is exactly
+     * why keeping the delta folded at every read-write mount is what makes
+     * THOSE fast too.
+     *
+     * The cost is one slow mount (replay + fold) instead of a slow mount
+     * every time; the fold is bounded by the same triggers a sweep would
+     * have used. */
+    if (!vol_degraded(g_vol)) {
+        uint64_t before = vol_delta_count(g_vol);
+        uint64_t recs = 0, bytes = 0;
+        double tf0 = perf_trace_enabled() ? fuse_now_sec() : 0.0;
+        vol_delta_stats(g_vol, &recs, NULL, &bytes);
+        /* A fold that cannot finish inside the init's mount budget must NOT
+         * run here: a 1.79M-record delta took longer than the 360 s the
+         * initramfs waits, so the mount "did not come up" and the machine
+         * dropped to a rescue shell -- a boot failure caused by a background
+         * compaction. The cap is a time proxy measured on this hardware
+         * (~6.4k records/s through fold on the stand's HDD): 400k records is
+         * about a minute. Above it, say so loudly and let the boot proceed;
+         * an offline `invf-sweep` or a clean shutdown's fold-at-close is the
+         * way to pay that backlog down. */
+        /* The cap is a boot-safety net, not a policy: INVF_FOLD_CAP (records)
+         * and INVF_FOLD_CAP_MB let an operator pay a documented backlog down
+         * on purpose. 0 means "no cap". */
+        uint64_t cap_recs = 400000ull, cap_mb = 256ull;
+        const char *env_cap = getenv("INVF_FOLD_CAP");
+        if (env_cap)
+            cap_recs = strtoull(env_cap, NULL, 10);
+        env_cap = getenv("INVF_FOLD_CAP_MB");
+        if (env_cap)
+            cap_mb = strtoull(env_cap, NULL, 10);
+        if (before > 0 && ((cap_recs && recs > cap_recs) ||
+                           (cap_mb && bytes > (cap_mb << 20)))) {
+            fprintf(stderr, "invf: mount fold SKIPPED: the delta holds %llu "
+                            "records / %llu MiB, too much to fold inside the "
+                            "boot budget. The mount proceeds; run `invf-sweep` "
+                            "offline (or shut down cleanly) to fold it.\n",
+                    (unsigned long long)recs,
+                    (unsigned long long)(bytes >> 20));
+        } else if (before > 0) {
+            /* vol_fold_request() has THREE outcomes and they are not the same
+             * thing: 1 = folded, 0 = nothing to do (below the trigger, or
+             * another fold holds the gate), -1 = failed. The old check was
+             * `== 0`, so a SUCCEEDED fold fell into the "declined or failed"
+             * branch and a no-op printed "delta records N -> N" -- we spent a
+             * night believing the fold never ran while it was working. Read
+             * both the return code and the count back. */
+            int frc = vol_fold_request(g_vol);
+            uint64_t after = vol_delta_count(g_vol);
+            if (frc == 1 || after < before)
+                fprintf(stderr, "invf: mount fold: delta records %llu -> %llu\n",
+                        (unsigned long long)before, (unsigned long long)after);
+            else if (frc == 0)
+                fprintf(stderr, "invf: mount fold: nothing to do -- the delta "
+                                "holds %llu records, below the fold trigger (or "
+                                "a fold is already running); replaying it as-is\n",
+                        (unsigned long long)before);
+            else
+                fprintf(stderr, "invf: mount fold FAILED; the delta stays at "
+                                "%llu record(s) and the next mount will replay "
+                                "it\n", (unsigned long long)before);
+        }
+        if (perf_trace_enabled())
+            fprintf(stderr, "[perf-trace %.3fs] mount fold done in %.3fs\n",
+                    fuse_now_sec() - t_main_start, fuse_now_sec() - tf0);
+    }
     if (perf_trace_enabled())
         fprintf(stderr, "[perf-trace %.3fs] building file table...\n", fuse_now_sec() - t_main_start);
     build_file_table();
