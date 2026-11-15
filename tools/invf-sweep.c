@@ -1384,6 +1384,7 @@ typedef struct {
     invfs_volume *vol;
     char (**names)[256];
     uint64_t **inodes, **sizes, **poss;
+    int **depths;                    /* WP-PACKED: tree depth per entry */
     sw_bucket ***tab;
     size_t *tmask, *tcount;
     int *count, *cap;
@@ -1398,6 +1399,7 @@ static int sweep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
     uint64_t *inodes = *c->inodes;
     uint64_t *sizes = *c->sizes;
     uint64_t *poss = *c->poss;
+    int *depths = *c->depths;
     int i;
     (void)mtime;
 
@@ -1423,23 +1425,133 @@ static int sweep_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
             (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
         uint64_t *np =
             (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
+        int *nd = (int *)realloc(depths, (size_t)ncap * sizeof *nd);
         if (nn) names = nn;
         if (ni) inodes = ni;
         if (ns) sizes = ns;
         if (np) poss = np;
+        if (nd) depths = nd;
         *c->names = names; *c->inodes = inodes;
-        *c->sizes = sizes; *c->poss = poss;
+        *c->sizes = sizes; *c->poss = poss; *c->depths = depths;
         *c->cap = ncap;
-        if (!nn || !ni || !ns || !np) { c->oom = 1; return 1; }
+        if (!nn || !ni || !ns || !np || !nd) { c->oom = 1; return 1; }
     }
     strncpy(names[*c->count], path, 256);
     names[*c->count][255] = 0;
     inodes[*c->count] = inode_id;
     sizes[*c->count] = size;
     poss[*c->count] = 0;
+    depths[*c->count] = 0;            /* the walk's own entries are the root */
     sw_insert(c->tab, c->tmask, c->tcount, names, *c->count);
     (*c->count)++;
     return 0;
+}
+
+/* ---- WP-PACKED: descend the container tree in the SAME run --------------
+ *
+ * The collect walk runs before the mutating stages, so the member files a
+ * decomposition creates cannot be in the work list: the tree was one level
+ * per process run, and the operator had to remember to sweep again (measured
+ * on a Debian cloud image: three runs for qcow2 -> GPT -> ext4 -> files).
+ *
+ * With the leaf layout the question "which members are the next level?" has
+ * an exact answer that costs one lookup per table row: a member that is NOT
+ * in "<name>!mbrleaf" is still its own inode, because the leaf pass packs
+ * everything else into the payload sibling. Those are precisely the parts a
+ * container pack claimed, i.e. the parts worth descending into.
+ *
+ * Appending them to the arrays the loop is already walking turns the level
+ * loop into one pass with a work queue: children are committed before their
+ * parent's recipe flip only in the sense that each node commits on its own
+ * turn, and a crash in the middle leaves committed children with an
+ * un-decomposed parent -- garbage the reclaim pass owns, never a dangling
+ * reference. The depth bound stops a pathological nesting from eating the
+ * machine. */
+
+/* Append one path to the work arrays, reusing the collector's dedupe table so
+ * a name is never swept twice in one run. Returns 1 when it was added. */
+static int sweep_queue_add(collect_ctx *c, const char *path, uint64_t ino,
+                           uint64_t size, int depth)
+{
+    char (*names)[256] = *c->names;
+    uint64_t *inodes = *c->inodes;
+    uint64_t *sizes = *c->sizes;
+    uint64_t *poss = *c->poss;
+    int *depths = *c->depths;
+
+    if (sw_find(*c->tab, *c->tmask, names, path) >= 0) return 0;
+    if (*c->count == *c->cap) {
+        int ncap = *c->cap ? *c->cap * 2 : 512;
+        char (*nn)[256] = (char (*)[256])realloc(names, (size_t)ncap * 256);
+        uint64_t *ni = (uint64_t *)realloc(inodes, (size_t)ncap * sizeof *ni);
+        uint64_t *ns = (uint64_t *)realloc(sizes, (size_t)ncap * sizeof *ns);
+        uint64_t *np = (uint64_t *)realloc(poss, (size_t)ncap * sizeof *np);
+        int *nd = (int *)realloc(depths, (size_t)ncap * sizeof *nd);
+        if (nn) names = nn;
+        if (ni) inodes = ni;
+        if (ns) sizes = ns;
+        if (np) poss = np;
+        if (nd) depths = nd;
+        *c->names = names; *c->inodes = inodes;
+        *c->sizes = sizes; *c->poss = poss; *c->depths = depths;
+        *c->cap = ncap;
+        if (!nn || !ni || !ns || !np || !nd) { c->oom = 1; return 0; }
+    }
+    strncpy(names[*c->count], path, 255);
+    names[*c->count][255] = '\0';
+    inodes[*c->count] = ino;
+    sizes[*c->count] = size;
+    poss[*c->count] = 0;
+    depths[*c->count] = depth;
+    sw_insert(c->tab, c->tmask, c->tcount, names, *c->count);
+    (*c->count)++;
+    return 1;
+}
+
+/* Queue every container member of `name`: the "<name>!mbrt" rows that exist
+ * as their own inodes. Returns the number queued. */
+static int sweep_queue_members(invfs_volume *vol, const char *name,
+                               collect_ctx *c, int depth)
+{
+    char tn[288];
+    uint8_t *table = NULL;
+    size_t table_len = 0, pos = 0;
+    uint64_t tino;
+    int added = 0;
+
+    snprintf(tn, sizeof tn, "%s!mbrt", name);
+    tino = vol_find(vol, tn);
+    if (!tino) return 0;
+    if (vol_read_file(vol, tino, &table, &table_len) != 0) return 0;
+    while (pos < table_len) {
+        const uint8_t *nl = (const uint8_t *)memchr(table + pos, '\n',
+                                                    table_len - pos);
+        size_t len = nl ? (size_t)(nl - (table + pos)) + 1 : table_len - pos;
+        unsigned long idx = 0;
+        unsigned long long usize = 0;
+        char line[128], mn[288], path[256];
+        size_t cl = len < sizeof line - 1 ? len : sizeof line - 1;
+        uint64_t mino;
+        int n;
+
+        memcpy(line, table + pos, cl);
+        line[cl] = '\0';
+        pos += len;
+        if (sscanf(line, "%lu\t%*[^\t]\t%llu", &idx, &usize) != 2) continue;
+        snprintf(mn, sizeof mn, "%s!mbr%lu", name, idx);
+        mino = vol_find(vol, mn);
+        if (!mino) continue;            /* a leaf: it lives in the blob */
+        /* the member's own name may carry the sanitised suffix; take the
+         * name the volume actually has, not the one we guessed */
+        n = vol_name_of(vol, mino, path, sizeof path, NULL);
+        if (n > 0) {
+            if (sweep_queue_add(c, path, mino, (uint64_t)usize, depth)) added++;
+            continue;
+        }
+        if (sweep_queue_add(c, mn, mino, (uint64_t)usize, depth)) added++;
+    }
+    free(table);
+    return added;
 }
 
 /* WP64: graceful Ctrl+C — finish the current file, then exit cleanly. */
@@ -1511,6 +1623,23 @@ int main(int argc, char **argv)
     invfs_dedupe_stats ui_dedupe_stats;
     char (*names)[256] = NULL;
     uint64_t *inodes = NULL;
+    int *depths = NULL;
+    /* WP-PACKED leaf layout: descend the container tree inside THIS run.
+     * The queue is the very array the loop walks, so a member queued while
+     * the loop is at index i is simply visited later in the same pass --
+     * no second process run, and no second walk of the volume. */
+    collect_ctx vc;
+    int leaf_dfs = 0;
+    int max_depth = 8;
+    {
+        const char *lf = getenv("INVFS_CPACK_LEAF");
+        const char *md = getenv("INVFS_SWEEP_MAX_DEPTH");
+        leaf_dfs = (lf && *lf == '1');
+        if (md && *md) {
+            int m = atoi(md);
+            if (m > 0 && m < 64) max_depth = m;
+        }
+    }
     uint64_t *sizes = NULL;
     uint64_t *poss = NULL;   /* each name's current record position
                                 (v2 position-kill matching, WP22c) */
@@ -2202,11 +2331,10 @@ int main(int argc, char **argv)
     {
         vol_walk_t w;
         int wrc;
-        collect_ctx vc;
         memset(&vc, 0, sizeof vc);
         vc.vol = vol;
         vc.names = &names; vc.inodes = &inodes;
-        vc.sizes = &sizes; vc.poss = &poss;
+        vc.sizes = &sizes; vc.poss = &poss; vc.depths = &depths;
         vc.tab = &tab; vc.tmask = &tmask; vc.tcount = &tcount;
         vc.count = &count; vc.cap = &cap;
         vol_walk_init(&w, vol, "invf-sweep collect");
@@ -2423,6 +2551,18 @@ int main(int argc, char **argv)
                 /* a 50k-file sweep says nothing about WHICH file failed */
                 fprintf(stderr, "sweep: %s: FAILED (rc=%d)\n",
                         names[i], rc);
+            /* WP-PACKED: in the leaf layout the members that are still
+             * inodes are exactly the ones a container pack claimed, so they
+             * are the next level of the tree. Queue them now and let the
+             * loop below visit them as ordinary candidates. */
+            if (leaf_dfs && depths && depths[i] < max_depth) {
+                int q = sweep_queue_members(vol, names[i], &vc,
+                                            depths[i] + 1);
+                if (q > 0 && getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[sweep] %s: %d member(s) queued "
+                                    "(depth %d)\n", names[i], q,
+                            depths[i] + 1);
+            }
             /* WP146 -- "has a '!'" is not the question; "is this one of OURS?"
              * is. This used to be `strchr(names[i], '!')`, which asks a
              * question about BYTES IN A NAME, and it made the sweep say
