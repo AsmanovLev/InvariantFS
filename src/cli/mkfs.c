@@ -319,15 +319,43 @@ int main(int argc, char **argv)
     /* INVFS_META_FRAC tunes the inode-area share for churn-heavy
      * workloads: every rewrite appends [new record + tombstone], and a
      * package-manager session can append hundreds of thousands of
-     * records. Default 64; rootfs images want 16-24. */
+     * records. Default 64; rootfs images want 16-24.
+     *
+     * The share is taken from DEV0, not from total_blocks. Inode rows live
+     * only on dev0 -- the second device holds a metadata MIRROR of them and,
+     * when it is a 1.8 TB HDD, contributes nothing to how many inodes fit.
+     * Sizing from the sum did exactly that: a 110 GB SSD mirrored onto a
+     * 1.8 TB HDD asked for 500 695 040/64 = 7.8M inode blocks = 29.9 GiB,
+     * which is 27% of the SSD, in a volume that held 322 888 files (108 MB
+     * of inode rows, 0.35% of the reservation). Measured with
+     * meta_anatomy.py on the stand: metadata zone 29.9 GiB reserved,
+     * 19.56 GiB preallocated, data 5.9 GB.
+     *
+     * INVFS_META_FILES sizes the area from an EXPECTED FILE COUNT instead of
+     * from the volume at all: the honest input for a rootfs, where the
+     * volume is big and the file count is known. An inode row is ~336 bytes
+     * for a small file; x2 covers the tombstone a rewrite appends. */
     {
-        long frac = 64;
-        const char *mf = getenv("INVFS_META_FRAC");
-        if (mf) {
-            long v = strtol(mf, NULL, 10);
-            if (v >= 8 && v <= 256) frac = v;
+        const char *files_env = getenv("INVFS_META_FILES");
+        if (files_env && *files_env) {
+            unsigned long long f = strtoull(files_env, NULL, 10);
+            unsigned long long need;
+            if (f > (0xFFFFFFFFFFFFFFFFull / 1024))
+                f = 0xFFFFFFFFFFFFFFFFull / 1024;   /* absurd input */
+            need = (f * 1024 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+            inode_blocks = need;
+        } else {
+            long frac = 64;
+            const char *mf = getenv("INVFS_META_FRAC");
+            if (mf) {
+                long v = strtol(mf, NULL, 10);
+                /* Upper bound raised from 256: 256 is the smallest share the
+                 * old clamp allowed, and on a mirrored volume it still asked
+                 * for 7.5 GiB of inode area. */
+                if (v >= 8 && v <= 65536) frac = v;
+            }
+            inode_blocks = dev0_blocks / (uint64_t)frac;
         }
-        inode_blocks = total_blocks / (uint64_t)frac;
     }
     if (inode_blocks < 512) inode_blocks = 512;
     metadata_blocks = bitmap_blocks + INVFS_JOURNAL_BLOCKS + inode_blocks;
