@@ -283,6 +283,10 @@ static invfs_sibling_tag g_sib_tags[MAX_SIBLING_TAGS] = {
     { "recipe", 6, 0 },
     { "mbrmap", 6, 0 },
     { "mbrt",   4, 0 },
+    /* WP-PACKED: the single payload sibling that holds every member of a
+     * packed container (vol_cpack.c, CPACK_BLOB_SUFFIX). Shape only --
+     * ownership is decided by vol_name_is_container_sibling() below. */
+    { "mbrblob", 7, 0 },
     { "part",   4, 1 },
     /* Builtin transcode/container tags (can also be registered via invfs_register_sibling_tag) */
     { "jxl",    3, 0 },
@@ -290,7 +294,7 @@ static invfs_sibling_tag g_sib_tags[MAX_SIBLING_TAGS] = {
     { "cover",  5, 1 },
     { "exr",    3, 1 },
 };
-static size_t g_num_sib_tags = 8;
+static size_t g_num_sib_tags = 9;
 
 int invfs_register_sibling_tag(const char *tag, int has_digits)
 {
@@ -333,17 +337,24 @@ static int sib_segment_is_internal_shape(const char *suf, size_t n)
         }
     }
 
-    /* mbr<4 digits>[-<san>] */
-    if (n >= 7 && !memcmp(suf, "mbr", 3)) {
-        for (i = 3; i < 7; i++)
-            if (suf[i] < '0' || suf[i] > '9') return 0;
-        if (n == 7) return 1;
-        if (suf[7] != '-') return 0;
+    /* mbr<digits>[-<san>]: the index is a decimal uint32 (CPACK_MAX_IDX is
+     * 1048575), so it is 1 to 7 digits. The check used to accept EXACTLY
+     * four, which meant every member of a container with more than 10000
+     * of them stopped being "ours": `rm container` left those members
+     * behind as user files, and the sweep walked them as user files too
+     * (measured on a 21,356-member ext4 guest image). */
+    if (n >= 4 && !memcmp(suf, "mbr", 3)) {
+        size_t d = 3;
+        while (d < n && d < 10 && suf[d] >= '0' && suf[d] <= '9') d++;
+        if (d == 3 || d > 10) return 0;      /* no digits at all */
+        if (d > 3 && d - 3 > 7) return 0;    /* more than uint32 needs */
+        if (d == n) return 1;
+        if (suf[d] != '-') return 0;
         /* the '-' form is only used when the sanitised name is non-empty
          * (cpack_mbr_name: `if (san && san[0])`), so a BARE trailing '-' is
          * not a shape this tree mints and must not be accepted as one. */
-        if (n == 8) return 0;
-        for (i = 8; i < n; i++) {
+        if (d + 1 == n) return 0;
+        for (i = d + 1; i < n; i++) {
             char c = suf[i];
             int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
                      (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
