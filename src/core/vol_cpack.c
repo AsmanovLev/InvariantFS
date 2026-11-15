@@ -2716,6 +2716,47 @@ static const cpack_member *cpack_member_find(const cpack_member *mem,
  * answers it for every reader (the seekable serve path, the map guard and
  * the rebuild materializer). */
 #define CPACK_BLOB_SUFFIX "!mbrblob"
+#define CPACK_LEAF_SUFFIX "!mbrleaf"
+
+/* Leaf admission: a member shorter than this is ALWAYS a leaf. Container
+ * formats that matter here start with a header far bigger than 4 KiB (a
+ * GPT, an ext4 superblock, a FAT BPB, an archive), so the sniff below can
+ * never be right about a 2 KiB part, and skipping it costs nothing. */
+#define CPACK_LEAF_MIN_USIZE (4u * 1024u)
+/* 64 KiB: the widest magic any registry pack sniffs is iso9660's CD001
+ * at offset 32769, and the tail of that window also covers FAT/exFAT/NTFS/
+ * ext4/XFS/GPT -- every one of them checked against bytes we already hold
+ * in memory, so the window costs no I/O at all. */
+#define CPACK_LEAF_HEAD      (64u * 1024u)
+
+/* Two packed modes, both opt-in while the container TREE is unfinished:
+ *
+ *   INVFS_CPACK_BLOB=1  every member is a byte range in "!mbrblob"
+ *                       (compact, but TERMINAL: the sweep skips container
+ *                       siblings, so a member that is itself a container
+ *                       is never decomposed -- measured: recursion stops
+ *                       after the first level);
+ *   INVFS_CPACK_LEAF=1  LEAVES go to the blob, members that a loaded
+ *                       container pack sniffs as its own stay real inodes,
+ *                       so the next sweep still sees them and the recursion
+ *                       keeps working -- measured: qcow2 -> GPT -> ext4
+ *                       survives, and the 21,356 ext4 members cost ONE
+ *                       blob instead of 21,356 inodes.
+ *
+ * Whatever each mode decides is written down in "<name>!mbrleaf" (lines
+ * "idx<TAB>off"), so a reader never re-derives the layout: a member listed
+ * there is a blob range, a member that is not is its own inode. That also
+ * makes old volumes read exactly as before (no leaf list = every member is
+ * an inode). */
+static int cpack_leaf_mode(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("INVFS_CPACK_LEAF");
+        on = (e && *e == '1');
+    }
+    return on;
+}
 
 /* Packed layout is OFF by default while it is terminal: a packed member is a
  * byte range inside "<name>!mbrblob", which the sweep skips as a container
@@ -2734,13 +2775,14 @@ static const cpack_member *cpack_member_find(const cpack_member *mem,
  * The two properties meet again in the container TREE (a decomposable member
  * stored as its own node record instead of a range), which is what makes
  * millions of members AND recursion possible at once. Until that lands, this
- * stays an opt-in: INVFS_CPACK_BLOB=1 turns it on. */
+ * stays an opt-in: INVFS_CPACK_BLOB=1 (all packed) or INVFS_CPACK_LEAF=1
+ * (leaves packed, containers addressable -- the shape the tree wants). */
 static int cpack_blob_mode(void)
 {
     static int on = -1;
     if (on < 0) {
         const char *e = getenv("INVFS_CPACK_BLOB");
-        on = (e && *e == '1');
+        on = (e && *e == '1') || cpack_leaf_mode();
     }
     return on;
 }
@@ -2750,25 +2792,79 @@ static void cpack_blob_name(char *dst, size_t cap, const char *name)
     snprintf(dst, cap, "%s%s", name, CPACK_BLOB_SUFFIX);
 }
 
-/* Prefix sums over an idx-sorted member array: moff[k] is the offset of
- * sorted[k] inside the blob, and *total_out its length. Caller frees. */
-static uint64_t *cpack_offsets_build(const cpack_member *sorted, size_t n,
-                                     uint64_t *total_out)
+static void cpack_leaf_name(char *dst, size_t cap, const char *name)
 {
-    uint64_t *off = (uint64_t *)malloc((n ? n : 1) * sizeof *off);
-    uint64_t pos = 0;
-    size_t i;
-    if (!off) return NULL;
-    for (i = 0; i < n; i++) {
-        off[i] = pos;
-        pos += sorted[i].usize;
+    snprintf(dst, cap, "%s%s", name, CPACK_LEAF_SUFFIX);
+}
+
+/* Does any loaded CONTAINER pack claim this member by its magic? If yes the
+ * member must stay a real inode: the sweep can only decompose a file that
+ * exists in the volume, so packing it into the blob would end the recursion
+ * at this level. Cheap by construction -- one head window, registry order =
+ * sniff priority, no pack exec. */
+static int cpack_member_is_container(const uint8_t *head, size_t hlen,
+                                     const char *name)
+{
+    size_t pcn = 0, i;
+    const invfs_codec *pall = invfs_codec_all(&pcn);
+
+    if (!head || !hlen) return 0;
+    for (i = 0; i < pcn; i++) {
+        const invfs_codec *pc = &pall[i];
+        if (!(pc->caps & INVFS_CODEC_CAP_CONTAINER)) continue;
+        if (!pc->sniff) continue;
+        if (pc->sniff(head, hlen, name) > 0) return 1;
     }
-    if (total_out) *total_out = pos;
-    return off;
+    return 0;
+}
+
+/* Read "<name>!mbrleaf" and scatter the leaf offsets into moff[], parallel
+ * to the idx-sorted member array: a leaf member gets its offset inside the
+ * payload sibling, every other member gets UINT64_MAX -- it is its own
+ * inode, which is how a container member survives to be decomposed by a
+ * later sweep. Returns the leaf count, 0 when the volume has no leaf list
+ * (the historical per-inode layout), -1 on a corrupt list. */
+static int cpack_leaf_parse(invfs_volume *v, const char *name,
+                            const cpack_member *mem_sorted, size_t nmem,
+                            uint64_t *moff)
+{
+    char ln[288];
+    uint64_t lino;
+    uint8_t *b = NULL;
+    size_t blen = 0, pos = 0, i;
+    int nleaf = 0;
+
+    for (i = 0; i < nmem; i++) moff[i] = UINT64_MAX;
+    cpack_leaf_name(ln, sizeof ln, name);
+    lino = vol_find(v, ln);
+    if (!lino) return 0;
+    if (vol_read_file(v, lino, &b, &blen) != 0) { free(b); return -1; }
+    while (pos < blen) {
+        const uint8_t *nl = (const uint8_t *)memchr(b + pos, '\n', blen - pos);
+        size_t len = nl ? (size_t)(nl - (b + pos)) + 1 : blen - pos;
+        char line[64];
+        size_t cl = len < sizeof line - 1 ? len : sizeof line - 1;
+        unsigned long idx = 0;
+        unsigned long long off = 0;
+        memcpy(line, b + pos, cl);
+        line[cl] = '\0';
+        if (sscanf(line, "%lu\t%llu", &idx, &off) == 2 &&
+            idx < CPACK_MAX_MEMBERS) {
+            const cpack_member *m = cpack_member_find(mem_sorted, nmem,
+                                                      (uint32_t)idx);
+            if (!m) { free(b); return -1; }
+            moff[(size_t)(m - mem_sorted)] = (uint64_t)off;
+            nleaf++;
+        }
+        pos += len;
+    }
+    free(b);
+    return nleaf;
 }
 
 /* The blob offset of member `idx`, given the idx-sorted array and its
- * prefix sums. UINT64_MAX when the member is not in the table. */
+ * offset table. UINT64_MAX when the member is not in the table or is not a
+ * leaf (its payload lives in its own inode). */
 static uint64_t cpack_off_of(const cpack_member *sorted, const uint64_t *moff,
                              size_t n, uint32_t idx)
 {
@@ -3165,18 +3261,21 @@ static int cpack_member_read(invfs_volume *v, const char *name,
 
     if (!mm) return -1;
     if (blob_ino && moff) {
-        /* packed layout: one sibling holds every payload, the offset comes
-         * from the table (see CPACK_BLOB_SUFFIX above) */
+        /* packed layout: the leaf list says whether this member is a range
+         * inside the payload sibling or a file of its own (the leaf list is
+         * the layout, see CPACK_LEAF_SUFFIX) */
         base = cpack_off_of(mem, moff, nmem, idx);
-        if (base == UINT64_MAX) return -1;
-        pino = blob_ino;
-        base += src_off;
-    } else {
-        cpack_mbr_name(mn, sizeof mn, name, idx, mm->sname);
-        pino = vol_find(v, mn);
-        if (!pino) return -1;
-        base = src_off;
+        if (base != UINT64_MAX) {
+            pino = blob_ino;
+            base += src_off;
+            goto have_source;
+        }
     }
+    cpack_mbr_name(mn, sizeof mn, name, idx, mm->sname);
+    pino = vol_find(v, mn);
+    if (!pino) return -1;
+    base = src_off;
+have_source:
     while (done < len) {
         size_t want = len - done;
         int got;
@@ -3294,8 +3393,10 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
         cpack_blob_name(bn, sizeof bn, name);
         blob_ino = vol_find(v, bn);
         if (blob_ino) {
-            moff = cpack_offsets_build(mem_sorted, nmem, NULL);
-            if (!moff) goto out;
+            moff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *moff);
+            if (!moff ||
+                cpack_leaf_parse(v, name, mem_sorted, nmem, moff) < 0)
+                goto out;
         }
     }
     if (cpack_recipe_seg(v, recipe_ino, &recipe, &recipe_len) != 0)
@@ -3601,9 +3702,14 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
         cpack_blob_name(bn, sizeof bn, name);
         blob_ino = vol_find(v, bn);
         if (blob_ino) {
-            moff = cpack_offsets_build(mem, nmem, NULL);
+            moff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *moff);
             if (!moff) { free(e); pthread_mutex_unlock(&v->cpacks_mu);
                          goto fail_recipe; }
+            if (cpack_leaf_parse(v, name, mem, nmem, moff) < 0) {
+                free(moff); moff = NULL;
+                free(e); pthread_mutex_unlock(&v->cpacks_mu);
+                goto fail_recipe;
+            }
         }
     }
     e->moff = moff;
@@ -4487,71 +4593,116 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             memcpy(old_addr, old_in.recipe_addr, sizeof old_addr);
     }
     if (cpack_blob_mode()) {
-        /* Packed layout: every payload goes into ONE sibling at the offset
-         * the table implies, so nothing here holds a member as the file it
-         * is being stored as -- the part is read from the pack's scratch
-         * dir, written at its offset and dropped. The member count stops
-         * mattering for the namespace: one inode, one name, one recipe. */
-        char bn[288];
+        /* Packed / leaf layout. Walk the members in IDX order so the blob is
+         * laid out idx-ascending and an offset is just the running total:
+         *   0) classify each part -- leaves go into the payload sibling,
+         *      parts that a loaded container pack sniffs as its own stay
+         *      real inodes so the NEXT sweep can still decompose them;
+         *   1) write the leaf list "idx<TAB>off", which is what makes the
+         *      layout self-describing for every reader.
+         * No member is ever held in memory beyond its own payload: the
+         * payload goes straight into a ranged write session. */
+        char bn[288], lfn[288];
         cpack_member *msort = cpack_members_sorted(mem, nmem);
-        uint64_t *moff = NULL, total = 0;
+        uint8_t *head = (uint8_t *)malloc(CPACK_LEAF_HEAD);
+        char *list = NULL;
+        size_t list_len = 0, list_cap = 0, nleaf = 0;
+        uint64_t total = 0;
         invfs_wsession *wss = NULL;
         int bad = 0;
 
-        if (!msort) {
+        if (!msort || !head) {
             fprintf(stderr, "sweep: %s: member layout alloc failed\n",
                     pc->name);
+            free(msort); free(head);
             vol_transcode_abort(v, name);
             goto out;
         }
-        moff = cpack_offsets_build(msort, nmem, &total);
-        if (!moff) { free(msort); vol_transcode_abort(v, name); goto out; }
         cpack_blob_name(bn, sizeof bn, name);
-        if (!vol_create_file(v, bn, NULL, 0)) {
-            fprintf(stderr, "sweep: %s: payload inode failed (%s)\n",
-                    pc->name, bn);
-            free(msort); free(moff);
-            vol_transcode_abort(v, name);
-            goto out;
-        }
-        if (!vol_write_begin(v, bn, 1, &wss) ||
-            vol_write_truncate(wss, total) != 0) {
-            fprintf(stderr, "sweep: %s: payload session failed (%s)\n",
-                    pc->name, bn);
-            if (wss) vol_write_abort(wss);
-            free(msort); free(moff);
-            vol_transcode_abort(v, name);
-            goto out;
-        }
-        for (i = 0; i < nmem; i++) {
-            char pm[256];
+        cpack_leaf_name(lfn, sizeof lfn, name);
+        for (i = 0; i < nmem && !bad; i++) {
+            const cpack_member *m = &msort[i];
+            char pm[256], mn[320];
             uint8_t *mb = NULL;
             size_t mlen = 0;
-            uint64_t off;
-            snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
+            int leaf = 1;
+
+            snprintf(pm, sizeof pm, "%s/%u", pmdir, m->idx);
             if (slurp_file(pm, &mb, &mlen) != 0 ||
-                mlen != (size_t)mem[i].usize) {
+                mlen != (size_t)m->usize) {
                 free(mb);
-                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", mem[i].idx);
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", m->idx);
                 bad = 1;
                 break;
             }
-            off = cpack_off_of(msort, moff, nmem, mem[i].idx);
-            if (off == UINT64_MAX || vol_write_range(wss, off, mb, mlen) != 0)
+            if (cpack_leaf_mode() && m->usize >= CPACK_LEAF_MIN_USIZE) {
+                size_t hlen = mlen < CPACK_LEAF_HEAD ? mlen
+                                                    : (size_t)CPACK_LEAF_HEAD;
+                if (hlen) memcpy(head, mb, hlen);
+                leaf = !cpack_member_is_container(head, hlen, m->sname);
+            }
+            if (!leaf) {
+                /* a container in its own right: keep the inode */
+                cpack_mbr_name(mn, sizeof mn, name, m->idx, m->sname);
+                if (!vol_create_file(v, mn, mb, mlen)) {
+                    fprintf(stderr, "sweep: %s: member inode failed for %s\n",
+                            pc->name, mn);
+                    free(mb);
+                    bad = 1;
+                    break;
+                }
+                if (have_keep) {
+                    invfs_meta_pub mm = keep;
+                    mm.type = INVFS_ITYP_REG;
+                    mm.nlink = 1;
+                    mm.target[0] = 0;
+                    vol_apply_meta(v, mn, &mm);
+                }
+                free(mb);
+                continue;
+            }
+            if (!wss) {
+                if (!vol_create_file(v, bn, NULL, 0) ||
+                    !vol_write_begin(v, bn, 1, &wss)) {
+                    fprintf(stderr, "sweep: %s: payload session failed (%s)\n",
+                            pc->name, bn);
+                    free(mb);
+                    bad = 1;
+                    break;
+                }
+            }
+            if ((mlen && vol_write_range(wss, total, mb, mlen) != 0)) {
+                free(mb);
                 bad = 1;
+                break;
+            }
+            if (list_len + 48 > list_cap) {
+                size_t nc = list_cap ? list_cap * 2 : 4096;
+                char *nl = (char *)realloc(list, nc);
+                if (!nl) { free(mb); bad = 1; break; }
+                list = nl;
+                list_cap = nc;
+            }
+            list_len += (size_t)snprintf(list + list_len, list_cap - list_len,
+                                         "%u\t%llu\n", m->idx,
+                                         (unsigned long long)total);
+            total += mlen;
+            nleaf++;
             free(mb);
-            if (bad) break;
         }
-        if (!bad && vol_write_commit(wss) != 0) bad = 1;
-        else if (bad) vol_write_abort(wss);
-        if (bad) {
-            fprintf(stderr, "sweep: %s: payload write failed (%s)\n",
-                    pc->name, bn);
-            free(msort); free(moff);
-            vol_transcode_abort(v, name);
-            goto out;
+        if (!bad && wss) {
+            if (vol_write_truncate(wss, total) != 0 ||
+                vol_write_commit(wss) != 0) bad = 1;
+            wss = NULL;
         }
-        if (have_keep) {
+        if (wss) vol_write_abort(wss);
+        if (!bad && nleaf &&
+            !vol_create_file(v, lfn, (const uint8_t *)list, list_len)) {
+            fprintf(stderr, "sweep: %s: leaf list inode failed (%s)\n",
+                    pc->name, lfn);
+            bad = 1;
+        }
+        if (!bad && nleaf && have_keep) {
             invfs_meta_pub mm = keep;
             mm.type = INVFS_ITYP_REG;
             mm.nlink = 1;
@@ -4559,7 +4710,14 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_apply_meta(v, bn, &mm);
         }
         free(msort);
-        free(moff);
+        free(head);
+        free(list);
+        if (bad) {
+            fprintf(stderr, "sweep: %s: packed layout failed (%s)\n",
+                    pc->name, bn);
+            vol_transcode_abort(v, name);
+            goto out;
+        }
     } else
     for (i = 0; i < nmem; i++) {
         char pm[256], mn[320];
@@ -4953,8 +5111,9 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
         if (blob_ino) {
             msort = cpack_members_sorted(mem, nmem);
             if (!msort) goto out;
-            moff = cpack_offsets_build(msort, nmem, NULL);
-            if (!moff) goto out;
+            moff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *moff);
+            if (!moff || cpack_leaf_parse(v, name, msort, nmem, moff) < 0)
+                goto out;
         }
     }
     for (i = 0; i < nmem; i++) {
@@ -4962,14 +5121,16 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
         uint64_t pino;
         uint8_t *mb = NULL;
         size_t mlen = 0;
-        if (blob_ino && moff) {
-            /* phase 1 of the packed read path: spill the members back out
-             * of the payload sibling and let the pack's own rebuild exec
-             * assemble them, so this needs no pack change at all. */
+        if (blob_ino && moff &&
+            cpack_off_of(msort, moff, nmem, mem[i].idx) != UINT64_MAX) {
+            /* phase 1 of the packed read path: spill the LEAF back out of the
+             * payload sibling and let the pack's own rebuild exec assemble
+             * it, so this needs no pack change at all. A member that is not
+             * in the leaf list is one of the container inodes and is read
+             * below, exactly as before. */
             uint64_t off = cpack_off_of(msort, moff, nmem, mem[i].idx);
             uint8_t *buf = NULL;
             size_t need = (size_t)mem[i].usize, got = 0;
-            if (off == UINT64_MAX) goto out;
             buf = (uint8_t *)malloc(need ? need : 1);
             if (!buf) goto out;
             while (got < need) {

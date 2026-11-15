@@ -287,6 +287,9 @@ static invfs_sibling_tag g_sib_tags[MAX_SIBLING_TAGS] = {
      * packed container (vol_cpack.c, CPACK_BLOB_SUFFIX). Shape only --
      * ownership is decided by vol_name_is_container_sibling() below. */
     { "mbrblob", 7, 0 },
+    /* ... and the leaf list that says which members it holds, and at what
+     * offset (CPACK_LEAF_SUFFIX in vol_cpack.c). */
+    { "mbrleaf", 7, 0 },
     { "part",   4, 1 },
     /* Builtin transcode/container tags (can also be registered via invfs_register_sibling_tag) */
     { "jxl",    3, 0 },
@@ -294,7 +297,7 @@ static invfs_sibling_tag g_sib_tags[MAX_SIBLING_TAGS] = {
     { "cover",  5, 1 },
     { "exr",    3, 1 },
 };
-static size_t g_num_sib_tags = 9;
+static size_t g_num_sib_tags = 10;
 
 int invfs_register_sibling_tag(const char *tag, int has_digits)
 {
