@@ -454,7 +454,12 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
     if (wsession_grow(s, rel_j + 1) != 0) return -1;
     cbuf = malloc((size_t)cbound + 8 + INVFS_BLOCK_SIZE);
     if (!cbuf) return -1;
-    if (v->profile != INVFS_PROFILE_TURBO) {
+    /* An explicit operator choice beats pressure, always -- two ways to say
+     * "store this verbatim": the turbo profile (which also changes the generic
+     * floor and the pack lanes) and INVFS_RAW_NO_COMPRESS, which scopes the
+     * choice to the RAW write path alone. Both skip the codec entirely rather
+     * than calling it and discarding the result. */
+    if (v->profile != INVFS_PROFILE_TURBO && !v->st.raw_nocompress) {
         int zlevel = raw_effort_zlevel(v);
         if (getenv("INVFS_DEBUG_FILE")) {
             FILE *df = fopen(getenv("INVFS_DEBUG_FILE"), "a");

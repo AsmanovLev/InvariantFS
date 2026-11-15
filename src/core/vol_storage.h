@@ -59,6 +59,12 @@ typedef struct invfs_vol_storage {
     uint64_t meta_end_bytes; /* mirrored metadata span [0, this) */
     uint64_t mux_pos;        /* virtual cursor behind io_seek/io_read */
     int      raw_mirror;     /* DEVTF_RAW_MIRROR */
+    int      raw_nocompress; /* INVFS_RAW_NO_COMPRESS: no codec on the RAW
+                              * write path at all (the turbo profile's store
+                              * behaviour, WITHOUT the profile's other
+                              * side effects: the generic floor keeps its own
+                              * codec and the pack lanes keep theirs).
+                              * Zero-cost when unset: one branch. */
     int      rawio_logged;   /* one-shot "dev0 raw write failed" log */
     int      metaread_logged;/* one-shot metadata failover log */
 } invfs_vol_storage;

@@ -896,6 +896,35 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
         if (packless_claim) return 0;   /* wait for the pack */
     }
 
+    /* "Dedup only" mode (INVFS_SWEEP_NO_COMPRESS / invf-sweep --no-compress).
+     *
+     * The structural lanes ABOVE (builtin containers: FLAC/TAR/PNG/..., then the
+     * pack containers: qcow2, ext4fs, rawdisk, ...) have run: they decompose a
+     * file into member inodes and a bit-exact recipe, and that decomposition is
+     * what gives dedupe something to match across files. Keep it.
+     *
+     * Everything BELOW is compression: PPMd text batching, codec transcodes and
+     * the generic zstd/LZ4 floor. All of them change the stored bytes, so all of
+     * them make a space measurement unattributable -- one cannot tell an
+     * identical-segment merge from a compression win.
+     *
+     * So: decompose, then stop. Files (and the members the lanes just created)
+     * keep the bytes they have, and the only stage that runs afterwards is the
+     * dedupe pass, which merges identical stored segments.
+     *
+     * Return 0, not SWEEP_DECLINED: the caller counts 0 as "nothing to do" and
+     * DECLINED as a hard error (failed++), and DECLINED also means "go run your
+     * own generic floor" -- the exact opposite of what this mode wants. */
+    {
+        static int nc = -1;
+        if (nc < 0) {
+            const char *e = getenv("INVFS_SWEEP_NO_COMPRESS");
+            nc = (e && *e == '1');
+        }
+        if (nc)
+            return 0;
+    }
+
     /* WP10 §4: every magic dispatch above declined -- classify text. Text
      * DEFERS into the sweep-run accumulator (sealed into shared PPMd batches
      * by vol_tz_flush at the end of the run); "!" sibling parts stay with
@@ -1230,28 +1259,6 @@ static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
 
     if (!v || !inode_id)
         return 0;
-
-    /* "Dedup only" mode (INVFS_SWEEP_NO_COMPRESS / invf-sweep --no-compress).
-     *
-     * Every lane below exists to RE-ENCODE a file: containers are decomposed,
-     * codecs transcode, text defers into shared PPMd batches, the generic floor
-     * recompresses with zstd. All of them change the stored bytes, so all of
-     * them make a space measurement unattributable -- one cannot tell an
-     * identical-segment merge from a compression win.
-     *
-     * In this mode nothing is rewritten: the file keeps the bytes it has (a RAW
-     * file stays RAW), and the only stage that runs afterwards is the dedupe
-     * pass, which merges identical stored segments in place. Space can then
-     * only move because of deduplication, which is the whole point. */
-    {
-        static int nc = -1;
-        if (nc < 0) {
-            const char *e = getenv("INVFS_SWEEP_NO_COMPRESS");
-            nc = (e && *e == '1');
-        }
-        if (nc)
-            return 0;
-    }
 
     /* WP-M23: active write session guard by inode_id and name */
     if (!invfs_sweep_ui_active()) {

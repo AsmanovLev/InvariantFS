@@ -1858,6 +1858,21 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
                 p = w;
         }
         v->profile = (uint8_t)p;
+        /* Store RAW segments verbatim: no codec call at all. This is the
+         * turbo profile's write behaviour WITHOUT its other side effects
+         * (turbo also reroutes the generic floor's codec and the pack lanes),
+         * and unlike the profile it is scoped to the RAW write path.
+         *
+         * Parsed HERE and not with raw_mirror: that one lives inside the
+         * two-device open path, so a flag parsed next to it silently did
+         * nothing on a single-device volume (found by writing zeros to a
+         * one-device volume and still getting algo=lz4 back).
+         * Default off: a volume that compresses nothing is a choice. */
+        {
+            const char *nc_env = getenv("INVFS_RAW_NO_COMPRESS");
+            v->st.raw_nocompress =
+                (nc_env && (nc_env[0] == '1' || strcmp(nc_env, "true") == 0));
+        }
 #ifdef _WIN32
         {
             /* _putenv does not copy its argument: the string must outlive

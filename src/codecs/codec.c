@@ -2077,6 +2077,12 @@ int invfs_profile_zstd_level(int p)
     switch (p) {
     case INVFS_PROFILE_FAST:   return 6;
     case INVFS_PROFILE_FASTER: return 3;
+    /* TURBO is the profile whose generic algo is ALGO_NONE
+     * (invfs_profile_generic_algo below). Returning 19 here was a wart: the
+     * sweep's zstd path read this level and compressed at 19 anyway, so a
+     * "no compression" profile compressed. Level 1 is the floor zstd accepts
+     * and the path that matters (ALGO_NONE) never reaches it. */
+    case INVFS_PROFILE_TURBO:  return 1;
     default:                   return 19;
     }
 }
