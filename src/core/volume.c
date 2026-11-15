@@ -214,8 +214,24 @@ static uint32_t rdp0_crc(const invfs_rdp0 *rd)
 int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd)
 {
     uint8_t blk[INVFS_BLOCK_SIZE];
-    if (io_seek(&v->io, 0) != 0 ||
-        io_read(&v->io, blk, sizeof blk) != 0)
+    /* Block 0 is not "the superblock": it carries RDP0 (0x100), the DEVT
+     * (0x2A0) and the published RT30 root (0x9D0), and metadata is mirrored
+     * write-through. This function used to io_read() the block from v->io and
+     * io_write() it back to v->io -- dev0 only, from a buffer read earlier.
+     *
+     * Two consequences, both measured on the stand: dev1 never received RDP0
+     * updates at all (an incomplete mirror), and the write could put a STALE
+     * DEVT back over a bump another thread had already made. That is the
+     * permanent sync_seq gap of 1 we chased (694509 on the SSD vs 694508 on
+     * the HDD, stable across every flush) -- and every boot paid a 32 GB
+     * metadata resync to "repair" it, which meanwhile widened the window for
+     * the same race to happen again.
+     *
+     * Now: read through the mux (one source of truth), re-serialize the DEVT
+     * from memory WITH its CRC so a stale buffer cannot resurrect an old
+     * sequence, and write the whole block through the mux so both devices
+     * receive it. */
+    if (vmux_pread(v, 0, blk, sizeof blk) != 0)
         return -1;
     if (rd) {
         invfs_rdp0 t = *rd;
@@ -231,8 +247,14 @@ int vol_write_rdp0(invfs_volume *v, const invfs_rdp0 *rd)
         memset(&v->rd, 0, sizeof v->rd);
         v->rd_present = 0;
     }
-    if (io_seek(&v->io, 0) != 0 ||
-        io_write(&v->io, blk, sizeof blk) != 0)
+    if (v->ndev >= 2) {
+        invfs_devt dt = v->st.devt;
+        memcpy(dt.magic, "DEVT", 4);
+        dt.crc32c = 0;
+        dt.crc32c = devt_crc(&dt);
+        memcpy(blk + INVFS_DEVT_OFF, &dt, sizeof dt);
+    }
+    if (vmux_pwrite(v, 0, blk, sizeof blk) != 0)
         return -1;
     return 0;
 }
@@ -667,6 +689,23 @@ static int vol_commit_mirror(invfs_volume *v)
     v->st.devt.sync_seq++;
     if (vol_write_devt(v) != 0) {
         vol_io_error_latch(v, "DEVT write");
+        return -1;
+    }
+    /* The DEVT is the CERTIFICATE that both devices hold this generation, and
+     * it is written AFTER the flush's own barrier -- so without a barrier of
+     * its own it can stay in a device's write cache. The HDD leg has no FUA
+     * (dmesg: "doesn't support DPO or FUA", write cache enabled), so a power
+     * cut can leave one side certified and the other not.
+     *
+     * Measured on the stand: sync_seq 693544 (SSD) vs 693543 (HDD), stable
+     * across every following flush, and every boot saw a phantom divergence
+     * and copied the whole 32 GB metadata span to repair it. The resync's own
+     * bump has the same hole, which is why the gap never healed.
+     *
+     * One extra barrier per flush is the price of the certificate meaning what
+     * it says. */
+    if (vmux_barrier(v, " DEVT") < 0) {
+        vol_io_error_latch(v, "DEVT barrier");
         return -1;
     }
     return 0;
