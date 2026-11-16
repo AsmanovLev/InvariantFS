@@ -1529,7 +1529,7 @@ static int sweep_queue_members(invfs_volume *vol, const char *name,
         size_t len = nl ? (size_t)(nl - (table + pos)) + 1 : table_len - pos;
         unsigned long idx = 0;
         unsigned long long usize = 0;
-        char line[128], mn[288], path[256];
+        char line[128], mn[288], path[256], sname[32] = "";
         size_t cl = len < sizeof line - 1 ? len : sizeof line - 1;
         uint64_t mino;
         int n;
@@ -1537,8 +1537,9 @@ static int sweep_queue_members(invfs_volume *vol, const char *name,
         memcpy(line, table + pos, cl);
         line[cl] = '\0';
         pos += len;
-        if (sscanf(line, "%lu\t%*[^\t]\t%llu", &idx, &usize) != 2) continue;
-        snprintf(mn, sizeof mn, "%s!mbr%lu", name, idx);
+        if (sscanf(line, "%lu\t%31[^\t]\t%llu", &idx, sname, &usize) != 3)
+            continue;
+        vol_container_member_name(mn, sizeof mn, name, (uint32_t)idx, sname);
         mino = vol_find(vol, mn);
         if (!mino) continue;            /* a leaf: it lives in the blob */
         /* the member's own name may carry the sanitised suffix; take the

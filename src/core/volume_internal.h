@@ -1157,6 +1157,12 @@ static inline int name_refused_internal_ns(const char *name)
  */
 int vol_name_is_container_sibling(invfs_volume *v, const char *name);
 
+/* WP-PACKED: the name of member `idx` of container `base`, exactly as the
+ * decomposition mints it ("<base>!mbr%04u[-<san>]"). Shared so the sweep's
+ * tree descent asks the volume the same question the writer answered. */
+void vol_container_member_name(char *out, size_t cap, const char *base,
+                               uint32_t idx, const char *san);
+
 /* The shape half of it, and the list of every shape a lane mints with the
  * minting site of each. WP136 promoted this out of `static` so the unlink
  * cascade and the sweep ask the identical question. A lane that adds a ninth

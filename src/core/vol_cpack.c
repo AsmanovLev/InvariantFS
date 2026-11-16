@@ -2400,6 +2400,17 @@ static void cpack_mbr_name(char *out, size_t cap, const char *base,
         snprintf(out, cap, "%s!mbr%04u", base, idx);
 }
 
+/* The same naming, for callers outside this file (the sweep's tree descent
+ * has to ask "does this member exist as an inode?", and guessing the format
+ * is exactly the bug that made the first DFS draft queue nothing: the mint
+ * pads idx to four digits and appends "-<sanitised name>" when the pack gave
+ * one). One definition, two users. */
+void vol_container_member_name(char *out, size_t cap, const char *base,
+                               uint32_t idx, const char *san)
+{
+    cpack_mbr_name(out, cap, base, idx, san);
+}
+
 
 /* Parse a member table (the enumerate output, stored verbatim as the
  * "name!mbrt" sibling): one line per member "idx<TAB>suggested_name<TAB>
