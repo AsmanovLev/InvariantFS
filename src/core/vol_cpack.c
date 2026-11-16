@@ -3153,6 +3153,24 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
         out->content_bound = 1;
         return 0;
     }
+    /* "No compression" run: the projection compresses every member with
+     * ZSTD-19 purely to estimate what the generic lane WOULD spend on it --
+     * and then the sweep stores it verbatim. On a 21,356-member Debian guest
+     * that is 21,356 zstd-19 passes (measured: the single busy core of a
+     * 20-minute decomposition), spent to model something that will not
+     * happen. The estimate that DOES hold is the announced member total: the
+     * members are stored as they are, so sum_usize is not an upper bound
+     * here, it is the cost. */
+    {
+        static int nc = -1;
+        if (nc < 0) { const char *e = getenv("INVFS_SWEEP_NO_COMPRESS");
+                      nc = (e && *e == '1'); }
+        if (nc) {
+            out->content = sum_usize;
+            out->content_bound = 0;
+            return 0;
+        }
+    }
     for (i = 0; i < nmem; i++) {
         char pm[256];
         uint8_t *mb = NULL;
@@ -4146,6 +4164,13 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     const uint8_t *fbuf = full;
     size_t fmap_len = 0;
     int streaming = (full == NULL);
+    struct timespec t_start;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
+#define CPACK_T(tag) do { if (getenv("INVFS_DEBUG_PACKS")) { \
+        struct timespec _n; clock_gettime(CLOCK_MONOTONIC, &_n); \
+        fprintf(stderr, "[cpack-t] %s: %s at %.2fs\n", name, tag, \
+            (double)(_n.tv_sec - t_start.tv_sec) + \
+            (double)(_n.tv_nsec - t_start.tv_nsec)/1e9); } } while (0)
     if (!pc->probe || !pc->probe()) {
         /* "tools absent: wait" is rc 1, which is ALSO what the DEFER_ENOSPC
          * path below returns -- but that one leaves a cls=9 stamp and this one
@@ -4492,6 +4517,10 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * priced a second time in step 5, once the map has added its own bytes
      * to `fixed` and told us what the read path would re-deflate per
      * request. */
+    { struct timespec _t; clock_gettime(CLOCK_MONOTONIC, &_t);
+      if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack-t] %s: extract+strip+map done at %.2fs\n", name,
+          (double)(_t.tv_sec - t_start.tv_sec) + (double)(_t.tv_nsec - t_start.tv_nsec)/1e9); }
+    CPACK_T("guard-inputs ready");
     if (cpack_project(mem, nmem, pmdir, (uint64_t)full_len,
                       (uint64_t)recipe_len + (uint64_t)table_len,
                       sum_usize, &proj) != 0) {
@@ -4500,6 +4529,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         goto out;
     }
 
+    CPACK_T("projection done");
     /* 5. the map command (ABI v1.1), when the pack has one: the FS-owned
      * binary partition of the container into recipe-blob and member ranges.
      * Parse + validate the SHAPE here; the byte-exactness proof runs
@@ -4871,6 +4901,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                         (uint8_t)pc->algo, pc->generation);
     }
 
+    CPACK_T("members committed");
     /* 7. WP14b pattern: defer the fresh members into THIS run's batching
      * accumulators (the flush re-reads and re-sniffs each from its live
      * record, so a head sniff is enough here; members that sniff as
