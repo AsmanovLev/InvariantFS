@@ -3,7 +3,8 @@
 
 #include "volume_internal.h"
 #include "vol_delta.h"   /* WP612 retire API */
-#include "../codecs/deflate_repro.h"   /* INVFS_DEFLATE_ENGINE_* for a window transform */
+#include "../codecs/deflate_repro.h"
+#include <zstd.h>   /* the blob is compressed when that wins */   /* INVFS_DEFLATE_ENGINE_* for a window transform */
 
 
 /* ---- PNG Repack ---- */
@@ -1000,24 +1001,54 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         memset(addr, 0, sizeof addr);
     } else {
         uint32_t bcrc;
-        phys_blocks = (blob_len + 8 + INVFS_BLOCK_SIZE - 1) /
+        const uint8_t *sblob = blob;
+        size_t sblob_len = blob_len;
+        uint8_t *cblob = NULL;
+        /* The blob is stored RAW by this path, and for a containerpack recipe
+         * that is the whole partition minus the member payloads -- measured
+         * 2.27 GiB for a 2.87 GiB Debian partition, 86.5% of it zeros, kept
+         * as 2.34 GiB of BINARY data. Compress it when that wins: the frame
+         * carries the decoded length (ZSTD content size), so nothing about
+         * e.length changes and a reader that does not know the codec still
+         * fails loudly rather than reading garbage. */
+        if (blob_len > (1u << 20)) {
+            size_t bound = ZSTD_compressBound(blob_len);
+            uint8_t *cb = (uint8_t *)malloc(bound);
+            if (cb) {
+                size_t cl = ZSTD_compress(cb, bound, blob, blob_len, 1);
+                if (!ZSTD_isError(cl) && cl + (cl >> 6) + 4096 < blob_len) {
+                    cblob = cb;
+                    sblob = cb;
+                    sblob_len = cl;
+                    /* algo stays the PACK's: e.length means "the size this
+                     * entry decodes to" for every codec reader, and for a
+                     * container that is the container's size. The compression
+                     * is therefore announced by the payload itself (a zstd
+                     * frame magic) and consumed only by cpack_recipe_seg. */
+                } else {
+                    free(cb);
+                }
+            }
+        }
+        phys_blocks = (sblob_len + 8 + INVFS_BLOCK_SIZE - 1) /
                       INVFS_BLOCK_SIZE;
         pba = alloc_blocks(v, v->sb.shadow_zone_start,
                            v->sb.shadow_zone_blocks, phys_blocks, 1,
                            INVFS_ALLOC_DATA);
         if (pba == 0) return 0;
-        hdr4[0] = (uint8_t)(blob_len & 0xFF);
-        hdr4[1] = (uint8_t)((blob_len >> 8) & 0xFF);
-        hdr4[2] = (uint8_t)((blob_len >> 16) & 0xFF);
-        hdr4[3] = (uint8_t)((blob_len >> 24) & 0xFF);
-        bcrc = invfs_crc32c(blob, blob_len);
+        hdr4[0] = (uint8_t)(sblob_len & 0xFF);
+        hdr4[1] = (uint8_t)((sblob_len >> 8) & 0xFF);
+        hdr4[2] = (uint8_t)((sblob_len >> 16) & 0xFF);
+        hdr4[3] = (uint8_t)((sblob_len >> 24) & 0xFF);
+        bcrc = invfs_crc32c(sblob, sblob_len);
         hdr4[4] = (uint8_t)(bcrc & 0xFF);
         hdr4[5] = (uint8_t)((bcrc >> 8) & 0xFF);
         hdr4[6] = (uint8_t)((bcrc >> 16) & 0xFF);
         hdr4[7] = (uint8_t)((bcrc >> 24) & 0xFF);
         if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, hdr4, 8) != 0 ||
-            io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, blob, blob_len) != 0) {
+            io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE + 8, sblob, sblob_len) != 0) {
             vol_free_blocks(v, pba, phys_blocks);
+            free(cblob);
             return 0;
         }
         /* WP27: no L2P map -- the entry itself carries the address */
@@ -1036,9 +1067,11 @@ uint64_t vol_create_blob_file(invfs_volume *v, const char *name,
         if (vol_recipe_store(v, rblob, rlen, addr) != 0) {
             free(rblob);
             vol_free_blocks(v, pba, phys_blocks);
+            free(cblob);
             return 0;
         }
         free(rblob);
+        free(cblob);
     }
     return vol_create_content_node(v, name, orig_size, addr);
 }

@@ -3275,14 +3275,41 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
     }
     const invfs_ast_block_entry *ents = NULL;
     size_t n_ents = 0;
+    uint32_t ealgo = INVFS_ALGO_NONE;
     if (vol_ast_recipe_parse(rblob, rblen, &ah, &ents, &n_ents) == 0 && n_ents >= 1) {
         pba = ents[0].pba;
+        ealgo = ents[0].algo;
     }
     vol_ast_recipe_parsed_free(&ah, ents);
     free(rblob);
     if (!pba || pba >= v->sb.total_blocks) return -1;
     if (seg_read_checked(v, pba, 0, 0, &csize, &blob) != 0)
         return -1;
+    /* A recipe the writer compressed (a containerpack recipe is mostly holes:
+     * 2.27 GiB raw, 86.5% zeros) carries a codec algo in its entry; the
+     * decoded length lives in the frame itself, so e.length keeps meaning
+     * "the container's size" and nothing else has to change. */
+    /* A recipe written compressed announces it with the zstd frame magic --
+     * see vol_create_blob_file. Only this reader looks for it, so no other
+     * codec path has to learn a new meaning for e.length. */
+    if (csize >= 8 && blob[0] == 0x28 && blob[1] == 0xB5 &&
+        blob[2] == 0x2F && blob[3] == 0xFD) {
+        unsigned long long dsz = ZSTD_getFrameContentSize(blob, csize);
+        uint8_t *dec;
+        size_t got;
+        if (dsz == ZSTD_CONTENTSIZE_ERROR || dsz == ZSTD_CONTENTSIZE_UNKNOWN) {
+            free(blob);
+            return -1;
+        }
+        dec = (uint8_t *)malloc(dsz ? (size_t)dsz : 1);
+        if (!dec) { free(blob); return -1; }
+        got = ZSTD_decompress(dec, (size_t)dsz, blob, csize);
+        free(blob);
+        if (ZSTD_isError(got) || got != dsz) { free(dec); return -1; }
+        *out = dec;
+        *out_len = got;
+        return 0;
+    }
     *out = blob;
     *out_len = csize;
     return 0;
