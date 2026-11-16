@@ -2820,6 +2820,20 @@ static int cpack_member_is_container(const uint8_t *head, size_t hlen,
     const invfs_codec *pall = invfs_codec_all(&pcn);
 
     if (!head || !hlen) return 0;
+    /* Built-in STRUCTURAL lanes (not packs) that decompose a member into
+     * parts of its own and would run on a later sweep: gzip (GZR), tar
+     * (TARR), FLAC (FLACR), PNG (PNGR). They are not codecpacks, so the pack
+     * loop below skips them -- and a member they would have claimed was
+     * packed into the payload sibling, where no lane can reach it. Measured:
+     * a tar.gz of the SAME files that sit beside it inside an ext4 image cost
+     * its full 12.5 MiB instead of deduplicating to +0.1 MiB, because the
+     * archive became a leaf. Keeping such a member an inode lets the chain
+     * continue: ext4 -> tar.gz -> GZR/TARR parts -> dedup. */
+    if ((hlen >= 2 && head[0] == 0x1F && head[1] == 0x8B) ||
+        (hlen >= 262 && !memcmp(head + 257, "ustar", 5)) ||
+        (hlen >= 4 && !memcmp(head, "fLaC", 4)) ||
+        (hlen >= 8 && !memcmp(head, "\x89PNG\r\n\x1a\n", 8)))
+        return 1;
     for (i = 0; i < pcn; i++) {
         const invfs_codec *pc = &pall[i];
         const invfs_pack_def *pd;
