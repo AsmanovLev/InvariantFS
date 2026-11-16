@@ -3199,6 +3199,19 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
      * happen. The estimate that DOES hold is the announced member total: the
      * members are stored as they are, so sum_usize is not an upper bound
      * here, it is the cost. */
+    /* MEASUREMENT KNOB, not a policy: charge the member payloads as free, so
+     * the size guard sees only what the decomposition ADDS (recipe, table,
+     * leaf rows). That is the projection a dedup-aware guard would make when
+     * every member already exists in the volume, and it exists to MEASURE how
+     * much an archive whose content is already present would cost. It is
+     * deliberately not a default: batching keeps small members from aligning
+     * with the copies that already exist, so charging them as free on a
+     * normal run would accept decompositions that do not dedupe. */
+    if (getenv("INVFS_CPACK_DEDUP_FREE") && *getenv("INVFS_CPACK_DEDUP_FREE") == '1') {
+        out->content = 0;
+        out->content_bound = 0;
+        return 0;
+    }
     {
         static int nc = -1;
         if (nc < 0) { const char *e = getenv("INVFS_SWEEP_NO_COMPRESS");
