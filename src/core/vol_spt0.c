@@ -312,6 +312,7 @@ typedef struct {
     uint64_t indeterminate;  /* an inode whose block set is UNKNOWN: see the
                               * rule above spn_inode_block_set */
     uint64_t n_inodes;
+    uint64_t cur_ino;        /* diagnostics only: whose recipe we are walking */
 } spn_walk_ctx;
 
 static uint32_t spn_crc(const invfs_spn0 *s)
@@ -722,6 +723,7 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
     spn_set_rc set;
 
     c->n_inodes++;
+    c->cur_ino = inode_id;
     set = spn_inode_block_set(v, in, &blob, &blen, &ah, &ents, &n_ents,
                               NULL, 0);
     CD("WALK inode=%llu set=%d nsegs=%zu pba0=%llu", (unsigned long long)inode_id,
@@ -742,6 +744,7 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
     c->recipes++;
     for (i = 0; i < n_ents; i++) {
         uint64_t pba = ents[i].pba, plen = 0, b;
+        int rc;
         if (!pba)
             continue;
         /* a WINDOW_SRC entry's pba field is the SOURCE INODE ID, not a
@@ -752,8 +755,8 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
             continue;
         if (pba >= v->sb.total_blocks)
             continue;
-        if (seg_extent_checked(v, pba, &plen) != 0 || plen == 0 ||
-            pba + plen > v->sb.total_blocks) {
+        rc = seg_extent_checked(v, pba, &plen);
+        if (rc != 0 || plen == 0 || pba + plen > v->sb.total_blocks) {
             /* the header is already unusable: pin the head block so the
              * free path cannot hand it out, and record the damage so
              * the restore-time check refuses instead of "restoring" it.
@@ -768,6 +771,20 @@ static int spn_walk_ino(invfs_volume *v, uint64_t inode_id,
              * extent WHOLE (it was healthy then), this map marks one block,
              * and old_map \ new_map would free the rest of a live segment.
              * spt0_pin_take reads `broken` for that reason. */
+            if (getenv("INVFS_DEBUG_SPT0")) {
+                uint8_t dbg[16];
+                memset(dbg, 0, sizeof dbg);
+                (void)io_pread(&v->io, pba * (uint64_t)INVFS_BLOCK_SIZE,
+                               dbg, sizeof dbg);
+                fprintf(stderr, "[spt0-dmg] pba=%llu plen=%llu rc=%d "
+                        "inode=%llu ent=%zu/%zu algo=%u hdr=%02x%02x%02x%02x "
+                        "%02x%02x%02x%02x\n",
+                        (unsigned long long)pba, (unsigned long long)plen,
+                        rc, (unsigned long long)c->cur_ino, i, n_ents,
+                        (unsigned)ents[i].algo,
+                        dbg[0], dbg[1], dbg[2], dbg[3],
+                        dbg[4], dbg[5], dbg[6], dbg[7]);
+            }
             if (!bit_get(c->map, pba)) {
                 bit_set(c->map, pba);
                 c->marked++;
