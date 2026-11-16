@@ -3723,8 +3723,11 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
         if (getenv("INVFS_DEBUG_PACKS")) { const char *why = NULL; char wb[160];
             cpack_map_validate(ents, nents, container_size,
                                (uint64_t)recipe_len, mem, nmem, &why);
-            fprintf(stderr, "[cpack] map_get %s: map does not validate: %s\n",
-                    name, why ? why : "(no reason)"); (void)wb; }
+            fprintf(stderr, "[cpack] map_get %s: map does not validate: %s"
+                    " (container_size=%llu recipe_len=%zu n_ents=%zu nmem=%zu)\n",
+                    name, why ? why : "(no reason)",
+                    (unsigned long long)container_size, recipe_len, nents, nmem);
+            (void)wb; }
         goto fail;
     }
     free(table);
