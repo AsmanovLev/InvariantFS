@@ -3169,8 +3169,16 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
     memset(out, 0, sizeof *out);
     out->fixed = fixed;
     out->member_count = (uint64_t)nmem;
+    /* The per-member price depends on WHERE the payloads live: a per-inode
+     * member carries a recipe, a dirent and an index entry (CPACK_MEMBER_META
+     * plus its share of unbatched block rounding); a packed leaf is one
+     * "idx<TAB>off" row inside the payload sibling. Charging the inode price
+     * to packed members refused decompositions that clearly pay -- see the
+     * constants in volume_internal.h. */
     out->member_cost = (uint64_t)nmem *
-                       (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED);
+        (cpack_blob_mode() ? (CPACK_MEMBER_META_PACKED +
+                              CPACK_MEMBER_UNBATCHED_PACKED)
+                           : (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED));
     /* The per-member metadata alone already eats the container: no need
      * to read a single payload to know this decomposition is a loss. The
      * verdict rests on the LOW side of the projection (content >= 0), which

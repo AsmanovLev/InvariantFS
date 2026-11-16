@@ -2253,6 +2253,15 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 #define CPACK_ZSTD_LANE     19
 #define CPACK_MEMBER_META   1024ull
 #define CPACK_MEMBER_UNBATCHED 256ull
+/* WP-PACKED leaf layout: a member is a (idx, offset) row in
+ * "<name>!mbrleaf" plus its table row -- tens of bytes, not a whole inode
+ * with a recipe, a dirent and an index entry. Charging the per-inode price
+ * to a packed member refuses decompositions that are a clear win:
+ * measured on a 200-member zip (2.34 MB) the guard charged 200 x 1 KiB of
+ * members plus the same per-member block rounding and declined, although
+ * the packed parts cost 2.12 MB and the leaf rows ~8 KB. */
+#define CPACK_MEMBER_META_PACKED    32ull   /* idx+offset row in !mbrleaf */
+#define CPACK_MEMBER_UNBATCHED_PACKED 0ull  /* one blob: rounding is shared */
 #define CPACK_ZGAIN_MILLE   5ull
 #define CPACK_REPRO_MAX     (4ull << 20)
 
