@@ -3330,7 +3330,10 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
         take = avail < (uint64_t)(len - done) ? (size_t)avail
                                               : len - done;
         if (en->kind == 0) {
-            if (en->src_off + rel + take > recipe_len) return -1;
+            if (en->src_off + rel + take > recipe_len) {
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] serve %s: recipe entry past the blob (src_off=%llu rel=%llu take=%zu recipe_len=%zu)\n", name, (unsigned long long)en->src_off, (unsigned long long)rel, take, recipe_len);
+                return -1;
+            }
             memcpy(dst + done, recipe + (size_t)(en->src_off + rel), take);
         } else if (en->kind == CPACK_MAP_KIND_REPRO) {
             /* kind 2: the bytes are not stored anywhere -- re-encode the raw
@@ -3372,6 +3375,7 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
         } else if (cpack_member_read(v, name, mem, nmem, moff, blob_ino,
                                      en->idx, en->src_off + rel,
                                      dst + done, take) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] serve %s: member read failed (idx=%u src_off=%llu rel=%llu take=%zu blob_ino=%llu moff=%s)\n", name, en->idx, (unsigned long long)en->src_off, (unsigned long long)rel, take, (unsigned long long)blob_ino, moff ? "yes" : "no");
             return -1;
         }
         done += take;
@@ -3400,7 +3404,16 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
     uint64_t *moff = NULL, blob_ino = 0;
     char bn[288];
 
-    if (cpack_blob_mode()) {
+    /* The LAYOUT is a property of the volume, never of this process's
+     * environment: a reader has no INVFS_CPACK_* variables, and a volume
+     * written packed must read packed. Probe the siblings instead --
+     * "<name>!mbrblob" present + "<name>!mbrleaf" listing offsets is the
+     * packed form; anything else is the historical per-inode form. (This is
+     * exactly the bug that made a DFS-decomposed level unreadable: the map
+     * cache looked up the payload sibling only under the writer's env var,
+     * found nothing, and then failed to find the leaf members as inodes
+     * either.) */
+    {
         cpack_blob_name(bn, sizeof bn, name);
         blob_ino = vol_find(v, bn);
         if (blob_ino) {
@@ -3668,10 +3681,16 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
     }
     qsort(mem, nmem, sizeof *mem, cpack_member_idx_cmp);
     if (cpack_recipe_seg(v, ino, &recipe, &recipe_len) != 0) {
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: recipe seg read failed (ino=%llu)\n", name, (unsigned long long)ino);
         goto fail;
     }
     if (cpack_map_validate(ents, nents, container_size,
                            (uint64_t)recipe_len, mem, nmem, NULL) != 0) {
+        if (getenv("INVFS_DEBUG_PACKS")) { const char *why = NULL; char wb[160];
+            cpack_map_validate(ents, nents, container_size,
+                               (uint64_t)recipe_len, mem, nmem, &why);
+            fprintf(stderr, "[cpack] map_get %s: map does not validate: %s\n",
+                    name, why ? why : "(no reason)"); (void)wb; }
         goto fail;
     }
     free(table);
@@ -3708,7 +3727,7 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
     e->nmem = nmem;
     /* packed layout: resolve the payload sibling once, here, so every read
      * serves from one inode by offset instead of vol_find per member */
-    if (cpack_blob_mode()) {
+    {
         char bn[288];
         cpack_blob_name(bn, sizeof bn, name);
         blob_ino = vol_find(v, bn);
@@ -3717,6 +3736,7 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
             if (!moff) { free(e); pthread_mutex_unlock(&v->cpacks_mu);
                          goto fail_recipe; }
             if (cpack_leaf_parse(v, name, mem, nmem, moff) < 0) {
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: leaf list does not match the member table\n", name);
                 free(moff); moff = NULL;
                 free(e); pthread_mutex_unlock(&v->cpacks_mu);
                 goto fail_recipe;
@@ -5116,7 +5136,7 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
     snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
     if (tool_write(precipe, recipe, recipe_len) != 0) goto out;
     if (mkdir(pmdir, 0700) != 0) goto out;
-    if (cpack_blob_mode()) {
+    {
         cpack_blob_name(bname, sizeof bname, name);
         blob_ino = vol_find(v, bname);
         if (blob_ino) {
