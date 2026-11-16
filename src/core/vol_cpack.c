@@ -2822,9 +2822,25 @@ static int cpack_member_is_container(const uint8_t *head, size_t hlen,
     if (!head || !hlen) return 0;
     for (i = 0; i < pcn; i++) {
         const invfs_codec *pc = &pall[i];
+        const invfs_pack_def *pd;
         if (!(pc->caps & INVFS_CODEC_CAP_CONTAINER)) continue;
         if (!pc->sniff) continue;
-        if (pc->sniff(head, hlen, name) > 0) return 1;
+        /* INVFS_CODEC_CAP_CONTAINER is shared with built-in TRANSFORMERS
+         * that also carve a file into pieces and put it back -- EXER (ELF/PE
+         * section carving) is the one that matters here. They are codecs, not
+         * codecpacks: their output is a recipe over the SAME file, so there
+         * is no member tree to descend into, and the sweep already runs them
+         * through the generic lane. Counting them made the leaf pass keep
+         * 18.7% of a Debian guest (3,990 of 21,356 files, every ELF among
+         * them) out of the payload sibling for no reason -- measured. */
+        pd = invfs_codec_pack_def(pc);
+        if (!pd || !pd->is_container) continue;
+        if (pc->sniff(head, hlen, name) > 0) {
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[leaf] %s: claimed by %s (hlen=%zu)\n",
+                        name, pc->name, hlen);
+            return 1;
+        }
     }
     return 0;
 }
