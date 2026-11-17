@@ -142,6 +142,56 @@ referenced whole large.
 - `refcount` replaces "is anyone in the bitmap pointing here": an extent dies when all
   of its leaves are unreferenced.
 
+### 7. Sweep mode: `--reconsolidate` (deferred re-packing)
+
+A file that changes is currently re-cut immediately: the old extents retire and new
+(small, possibly fragmented) extents are written. Repeated edits therefore pay the
+packing cost every time and leave a patchwork layout — many small extents, each with its
+own compression context and its own rounding. The compression is technically correct and
+still suboptimal.
+
+`invf-sweep --reconsolidate[=auto|full|<KiB>]` is the pass that re-packs the *surviving*
+content under the *current* extent policy, instead of paying for optimal packaging at
+every edit:
+
+```
+auto   (default) re-pack only where net-positive: bytes_saved >= W * bytes_written,
+                 with the same heat penalty the sweep's victim selection already uses
+full             re-pack every cold file regardless of the estimate
+<KiB>            target extent size for the re-pack (ladder floor), e.g. 1024
+```
+
+It runs **after** the matching/dedupe pass, so it packs the final layout rather than one
+it is about to change, and it reports `files considered / extents before → after /
+bytes written / bytes saved / elapsed`.
+
+What it does *not* change is when garbage is freed: superseded extents are still retired
+at the next fence, immediately and cheaply. Deferring the **free** would only grow the
+volume; what is worth deferring is the **re-compression**, and that is exactly what this
+flag controls.
+
+Shared extents are the structural problem: one physical extent can be referenced by many
+files (ADR-010 windows and `block_id`/`block_offset` slices). Re-cutting it therefore
+needs either
+
+- **(i) reverse references** — the index already answers `hash → refs`; a re-pack walks
+  them and rewrites the referencing recipes. Deterministic, no read-path change, and the
+  first implementation should do this; or
+- **(ii) indirection** — recipes name a chunk hash and the index resolves it to the
+  current location, so moving an extent is one index update and zero recipe rewrites.
+  Cheaper for re-packing, but every read gains a lookup (mitigated by the chunk cache).
+
+Gates: it must respect save-point pins (a pinned extent cannot be freed), keep the
+house "new version first, retire at the fence" ordering, require free-space headroom for
+the bytes it is about to write (the existing `sweep_enospc` admission check), and be
+resumable: a partial run leaves a consistent volume.
+
+**Interim value, before ADR-012 lands.** With the ladder available only as a global
+constant, the same pass can still re-pack cold, non-deduplicating data at a coarser
+segment size — measured on the container corpus: 64 KiB → 1 MiB takes the data footprint
+from 25.9 MiB to 20.8 MiB (−20 %). That is the cheapest way to recover most of the
+rounding waste for data that dedupe would never match anyway.
+
 ## Consequences
 
 ### Positive
