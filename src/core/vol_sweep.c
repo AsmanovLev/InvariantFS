@@ -2519,6 +2519,29 @@ static void wstats_dump_unclaimed(invfs_volume *v, const uint8_t *claimed)
 
     if (!claimed || end <= b)
         return;
+    /* Zone occupancy by ADDRESS (the detail's RAW/SHADOW are content
+     * classes, which is the distinction that made "RAW should be empty"
+     * read as a defect when it was not one): the sweep drains the RAW
+     * allocation region; uncompressed-content segments live in shadow. */
+    {
+        uint64_t z, rused = 0, sused = 0, sstart;
+        sstart = v->sb.shadow_zone_start ? v->sb.shadow_zone_start
+                                         : v->sb.raw_zone_start;
+        for (z = v->sb.raw_zone_start; z < v->sb.total_blocks; z++) {
+            if (!(v->bitmap[z >> 3] & (1u << (z & 7))))
+                continue;
+            if (z < sstart) rused++;
+            else sused++;
+        }
+        fprintf(stderr, "[unclaimed] zones by ADDRESS: raw-region %llu..%llu "
+                        "= %llu blk (%.2f MiB); shadow-region from %llu "
+                        "= %llu blk (%.2f MiB)\n",
+                (unsigned long long)v->sb.raw_zone_start,
+                (unsigned long long)sstart, (unsigned long long)rused,
+                (double)rused * INVFS_BLOCK_SIZE / (1024.0 * 1024.0),
+                (unsigned long long)sstart, (unsigned long long)sused,
+                (double)sused * INVFS_BLOCK_SIZE / (1024.0 * 1024.0));
+    }
     fprintf(stderr, "[unclaimed] region %llu..%llu\n",
             (unsigned long long)b, (unsigned long long)end);
     while (b < end) {

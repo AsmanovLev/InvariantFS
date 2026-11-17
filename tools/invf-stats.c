@@ -213,6 +213,18 @@ int main(int argc, char **argv)
 
     printf("  zones            : meta %.1f MiB | raw %d blk | shadow %d blk\n",
            meta_blocks * 4096 / 1048576.0, (int)raw_blocks, (int)shadow_blocks);
+    /* Occupancy BY ADDRESS, next to the sizes: the question "did the sweep
+     * drain RAW?" is answered here, not by the content-class lines below
+     * (a swept volume shows raw-region ~0 while raw-CLASS content stays). */
+    {
+        uint64_t rused = vol_zone_used_bytes(v, sb->raw_zone_start,
+                                             sb->shadow_zone_start);
+        uint64_t sused = vol_zone_used_bytes(v, sb->shadow_zone_start,
+                                             sb->total_blocks);
+        printf("  by address       : raw-region %.1f MiB | shadow-region "
+               "%.1f MiB occupied\n",
+               rused / 1048576.0, sused / 1048576.0);
+    }
     printf("  used             : %.1f MiB | free: %.1f MiB\n",
            used_b / 1048576.0, free_b / 1048576.0);
     if (image_allocated)
@@ -241,24 +253,34 @@ int main(int argc, char **argv)
     printf("  biggest file     : %.1f KiB %s\n",
            st.biggest_size / 1024.0, st.biggest_name);
     printf("  est. ratio       : %.2fx logical/on-disk\n", ratio);
-    printf("zones detail (physical used = content class, WP-DZ):\n");
+    /* CONTENT CLASS, not zone occupancy: a "raw-class" segment is one
+     * stored UNcompressed (compression measured no win), and it lives in
+     * whatever allocation region the writer used -- normally shadow. The
+     * old labels said "RAW"/"SHADOW", which read as "the raw zone is not
+     * empty after a sweep" and cost a session to disprove: on a swept
+     * volume the raw REGION holds 0 blocks while raw-CLASS content is
+     * still MiB-sized (impl_docs/BUG-RECLAIM-UNCLAIMED.md). */
+    printf("content classes (physical used, WP-DZ). NOT allocation "
+           "regions:\n");
     {
         double lr = st.logic_raw_bytes / 1048576.0;
         double ls = st.logic_shadow_bytes / 1048576.0;
         double pr = st.raw_used_bytes / 1048576.0;
         double ps = st.shadow_used_bytes / 1048576.0;
         if (st.raw_used_bytes)
-            printf("  RAW   : logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+            printf("  uncompressed : logic %8.1f MiB | used %8.1f MiB | "
+                   "%.2fx (compression did not win)\n",
                    lr, pr, pr ? lr / pr : 0);
         else
-            printf("  RAW   : empty\n");
+            printf("  uncompressed : empty\n");
         if (st.shadow_used_bytes)
-            printf("  SHADOW: logic %8.1f MiB | used %8.1f MiB | %.2fx\n",
+            printf("  compressed   : logic %8.1f MiB | used %8.1f MiB | "
+                   "%.2fx\n",
                    ls, ps, ps ? ls / ps : 0);
         else
-            printf("  SHADOW: empty (not swept yet)\n");
+            printf("  compressed   : empty (not swept yet)\n");
         if (st.logic_text_bytes || st.text_used_bytes)
-            printf("  TEXT  : logic %8.1f MiB | used %8.1f MiB (shared batches)\n",
+            printf("  text batch  : logic %8.1f MiB | used %8.1f MiB (shared batches)\n",
                    st.logic_text_bytes / 1048576.0, st.text_used_bytes / 1048576.0);
         if (st.unclaimed_used_bytes)
             printf("  unclaimed: %.1f MiB (allocated, no live reference)\n",
