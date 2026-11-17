@@ -315,3 +315,42 @@ container-heavy volumes the figure is the union over files as read, not the unio
 physical content. For a pure "what would content dedupe see" metric that is the right
 question; for "how much unique data is on this volume" the per-file walk must be joined
 with the container map.
+
+### Appendix: `--reconsolidate` planner, measured (`invf-reconsolidate`)
+
+Read-only planner: for each candidate file it reports the CURRENT physical
+footprint (sum of its extents' blocks, rounding included) against the footprint the
+same bytes take when re-compressed at a target chunk size -- computed by actually
+compressing in memory at zstd-19, not by a model. Nothing is written.
+
+**Ordinary files** (2848-file corpus imported into a 1 GiB volume, 2 sweeps; 360
+candidates of >= 4 KiB that are neither text-batched nor container siblings):
+
+| target chunk | current | repacked | saving |
+|---|---|---|---|
+| 64 KiB (status quo) | 6.46 MiB | 6.46 MiB | 0 (sanity: this is what is stored) |
+| 256 KiB | 6.46 MiB | 6.05 MiB | 0.41 MiB (6.4 %) |
+| 1 MiB | 6.46 MiB | 6.02 MiB | 0.44 MiB (6.8 %) |
+
+So for ordinary file data the re-pack is a real but modest win: most small files are
+already in batches and most of the rest already fits one segment.
+
+**Containers: do NOT re-pack them.** The first version of the planner included container
+siblings and the plan came out 67 % WORSE than the status quo (45.75 MiB -> 76.51 MiB on
+the two-image corpus). Two reasons, both real:
+
+1. a decomposed payload is already ONE stream cut by the container lane; re-compressing
+   its decoded bytes at a different chunk size measures a different thing;
+2. the per-file total double-counts shared extents (two identical images report the same
+   blocks twice), so a naive sum is not a footprint.
+
+Containers need the **extent ladder** (section 5), not a re-pack -- which is the measured
+-20 % from `BENCH-VS-SQUASHFS.md`. The planner therefore restricts itself to plain,
+self-contained files (`recipe_is_repackable`: no TEXT-zone slices, no ADR-010 windows).
+
+**Block grouping by type.** The mechanism asked for already exists where it pays: the
+batch accumulators sort candidates by `(family, size, index)`
+(`vol_textzone.c:266-274`) so same-family members share a compression context -- that is
+the PPMd lesson applied to storage. The planner labels every file's family and prints the
+per-family totals, and on this corpus the remaining gain comes from chunk size rather
+than grouping, because the text share is already batched by family.
