@@ -2420,6 +2420,73 @@ typedef struct {
  * counted once no matter how many live recipes name it (a shared TEXT batch
  * is referenced by the owner and by every member), so the claimed bitmap --
  * not the zone tag -- is what makes the per-class totals add up. */
+/* Diagnostic (INVFS_DEBUG_SEGS=1): per-class SEGMENT size histogram plus the
+ * block-rounding waste. A segment occupies seg_extent() whole blocks, so a
+ * 1 KiB payload still costs 4096; this measures that instead of guessing why
+ * a class reports "physical bigger than logical" (t4096 corpus: uncompressed
+ * logic 3.4 MiB -> physical 4.8 MiB, i.e. 0.70x). [0] = uncompressed class,
+ * [1] = binary/compressed class. */
+typedef struct {
+    uint64_t n, log, phys;
+    uint64_t hn[6], hlog[6], hphys[6];
+} segdbg;
+static segdbg g_segdbg[2];
+
+static void segdbg_add(int cls, uint64_t len, uint64_t plen)
+{
+    segdbg *d = &g_segdbg[cls];
+    int b;
+    if (cls < 0 || cls > 1)
+        return;
+    if (len < 4096ull)                     b = 0;
+    else if (len < 8192ull)                b = 1;
+    else if (len < (64ull << 10))          b = 2;
+    else if (len < (256ull << 10))         b = 3;
+    else if (len < (1ull << 20))           b = 4;
+    else                                   b = 5;
+    d->n++;
+    d->log += len;
+    d->phys += plen * INVFS_BLOCK_SIZE;
+    d->hn[b]++;
+    d->hlog[b] += len;
+    d->hphys[b] += plen * INVFS_BLOCK_SIZE;
+}
+
+static void segdbg_dump(void)
+{
+    static const char *names[2] = { "uncompressed", "compressed" };
+    static const char *bs[6] = { "<4K", "4-8K", "8-64K", "64-256K",
+                                 "256K-1M", ">=1M" };
+    int c, b;
+    if (!getenv("INVFS_DEBUG_SEGS"))
+        return;
+    for (c = 0; c < 2; c++) {
+        segdbg *d = &g_segdbg[c];
+        double diff;
+        if (!d->n)
+            continue;
+        diff = (double)d->phys - (double)d->log;
+        fprintf(stderr, "[segs] %s: %llu ent(s), logic %.2f MiB, physical "
+                        "%.2f MiB, %s %.2f MiB (%.1f%% of physical)\n",
+                names[c], (unsigned long long)d->n, d->log / 1048576.0,
+                d->phys / 1048576.0, diff >= 0 ? "waste" : "saving",
+                (diff >= 0 ? diff : -diff) / 1048576.0,
+                d->phys ? 100.0 * (diff >= 0 ? diff : -diff) /
+                          (double)d->phys : 0.0);
+        for (b = 0; b < 6; b++) {
+            if (!d->hn[b])
+                continue;
+            diff = (double)d->hphys[b] - (double)d->hlog[b];
+            fprintf(stderr, "[segs]   %-8s n=%-6llu logic %7.2f MiB  "
+                            "physical %7.2f MiB  %s %6.2f MiB\n", bs[b],
+                    (unsigned long long)d->hn[b], d->hlog[b] / 1048576.0,
+                    d->hphys[b] / 1048576.0,
+                    diff >= 0 ? "waste " : "saving",
+                    (diff >= 0 ? diff : -diff) / 1048576.0);
+        }
+    }
+}
+
 static void wstats_claim(invfs_volume *v, uint8_t *claimed, uint64_t pba,
                          uint64_t *phys)
 {
@@ -2491,13 +2558,21 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->text_used_bytes);
             } else if (ents[i].zone == INVFS_ZONE_BINARY) {
+                uint64_t plen = 0;
                 out->logic_shadow_bytes += ents[i].length;
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->shadow_used_bytes);
+                if (getenv("INVFS_DEBUG_SEGS") &&
+                    seg_extent(v, ents[i].pba, NULL, &plen) == 0)
+                    segdbg_add(1, ents[i].length, plen);
             } else {
+                uint64_t plen = 0;
                 out->logic_raw_bytes += ents[i].length;
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->raw_used_bytes);
+                if (getenv("INVFS_DEBUG_SEGS") &&
+                    seg_extent(v, ents[i].pba, NULL, &plen) == 0)
+                    segdbg_add(0, ents[i].length, plen);
             }
         }
     }
@@ -2622,6 +2697,7 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
         }
         out->unclaimed_used_bytes = used > cl ? used - cl : 0;
     }
+    segdbg_dump();
     free(claimed);
     return 0;
 }
