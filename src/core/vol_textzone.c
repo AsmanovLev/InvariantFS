@@ -15,6 +15,25 @@ void invfs_vol_textzone_fault_reload(void)
 
 #define TZ_BATCH_MAX  (4ull << 20)    /* user-confirmed PPMd optimum (§3) */
 
+/* INVFS_TZ_BATCH_KB overrides the batch unit for measurement (see the call
+ * site). Anything outside 4..65536 KiB is rejected loudly and the default is
+ * used, so a typo can never silently change the storage policy. */
+static size_t tz_batch_cap(void)
+{
+    const char *e = getenv("INVFS_TZ_BATCH_KB");
+    char *end = NULL;
+    unsigned long long kb;
+    if (e && e[0]) {
+        kb = strtoull(e, &end, 10);
+        if (end && *end == '\0' && kb >= 4 && kb <= 65536)
+            return (size_t)kb << 10;
+        fprintf(stderr, "warning: INVFS_TZ_BATCH_KB=%s is not 4..65536; "
+                        "using the default %llu KiB\n", e,
+                (unsigned long long)(TZ_BATCH_MAX >> 10));
+    }
+    return (size_t)TZ_BATCH_MAX;
+}
+
 
 /* one slice of one member file, inside one batch */
 typedef struct {
@@ -758,7 +777,12 @@ static int tz_flush_one(invfs_volume *v, int binary)
     open_seq = reg.next_seq;
     open_algo = binary ? INVFS_ALGO_ZSTD : INVFS_ALGO_PPMD;
 
-    bcap = (size_t)TZ_BATCH_MAX;
+    /* Pooling unit. 4 MiB is the measured PPMd optimum (§3); the knob exists
+     * so a comparison against a fixed-block archival filesystem can be run at
+     * the SAME pooling granularity (squashfs -b 1M), instead of comparing our
+     * 4 MiB context with its 128 KiB one. It moves on the same axis in both
+     * systems: bigger unit = smaller image, more read amplification. */
+    bcap = tz_batch_cap();
     if (v->arc_budget && v->arc_budget / 2 < (uint64_t)bcap)
         bcap = (size_t)(v->arc_budget / 2);
     if (bcap < 4096) bcap = 4096;
