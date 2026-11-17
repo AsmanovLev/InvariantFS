@@ -16,3 +16,4 @@ This directory documents key architectural decisions made in InvariantFS.
 | [ADR-010](ADR-010-cross-vm-dedup-via-windowed-recipes.md) | Cross-VM Deduplication via Windowed Recipes (`INVFS_ALGO_WINDOW_SRC`) | Proposed | 2026-09-25 |
 | [ADR-011](ADR-011-preflate-reversible-deflate.md) | Universal Reversible DEFLATE via `invf-preflate` (`!pfd` Sibling Architecture) | Accepted | 2026-11-02 |
 | [ADR-012](ADR-012-verbatim-space-dedup-chunk-index.md) | Deduplication over the Verbatim (Logical) Space — Chunk Index + Merkle Leaves | Proposed | 2026-11-17 |
+| [ADR-013](ADR-013-computed-view-inodes.md) | Computed (View) Inodes — Base Spec + Delta Overlay, Materialize on Sweep | Proposed | 2026-11-17 |
