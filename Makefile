@@ -188,7 +188,7 @@ HD_T := $(CURDIR)/build/hdtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-fuse invf-import invf-sweep \
-           invf-stats invf-resize invf-rollback invf-pack \
+           invf-stats invf-verbatim invf-resize invf-rollback invf-pack \
            invf-vnode invf-plugin-host
 
 # Declared FIRST so it stays the default goal: make uses the first target in
@@ -1906,6 +1906,10 @@ docs-clean:
 .PHONY: all clean test e2e fuzz flakey recipefuzz docs docs-clean release
 -include $(wildcard $(OBJ)/*.d)
 
+$(OUT)/invf-verbatim: $(OBJ)/invf-verbatim.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-verbatim.o: tools/invf-verbatim.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
 $(OUT)/invf-stats: $(OBJ)/invf-stats.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-stats.o: tools/invf-stats.c | $(OBJ)

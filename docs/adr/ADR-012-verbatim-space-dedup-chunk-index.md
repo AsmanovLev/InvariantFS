@@ -276,3 +276,42 @@ integrity; dedupe across a re-compression; range verification; index-loss recove
 4. Does a chunk match prefer the reference with the cheapest read (the extent that is
    already hot/most shared), and how is that decided without a per-extent access
    counter?
+
+## Appendix: read-only prototype, measured (`invf-verbatim`)
+
+`tools/invf-verbatim.c` builds the verbatim set in memory during a normal read-only
+walk and prints it next to the physical footprint. No format change, no writes, no new
+on-disk structure -- it exists to size the decision before anything moves.
+
+```
+invf-verbatim --top 3 v.img
+  leaf                     : 4096 B
+  files                    : 322
+  logical total            :     640.62 MiB
+  chunks hashed            : 164182
+  distinct chunks          : 32922
+  VERBATIM SPACE           :     128.60 MiB
+  already-seen data        :     512.37 MiB (80.0% of logical)
+  physical data            :      25.29 MiB
+  verbatim / physical      :       5.09 x  (compression+dedupe in effect)
+```
+
+Corpus: two identical 256 MiB ext4 images (63 MB of files inside each) imported into a
+2 GiB volume, two sweeps.
+
+What the numbers say:
+
+- **80 % of the logical bytes are repeats** -- that is the dedupe potential measured by
+  CONTENT, which the stored-byte key can only see while the transformation is identical;
+- **verbatim 128.60 MiB against 25.29 MiB physical (5.09×)**: that ratio is what
+  compression buys on top of identity, and it is the number that must stay stable when
+  the extent policy changes;
+- zero runs collapse to one chunk, so "verbatim space" is honestly the unique content,
+  not a byte count of files.
+
+Caveat, measured on the same run: the walk is per FILE, so a container and its
+decomposed members are separate files whose 4 KiB boundaries do not align -- on
+container-heavy volumes the figure is the union over files as read, not the union of
+physical content. For a pure "what would content dedupe see" metric that is the right
+question; for "how much unique data is on this volume" the per-file walk must be joined
+with the container map.
