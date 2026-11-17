@@ -2506,6 +2506,53 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
     return 0;
 }
 
+/* Diagnostic (INVFS_DEBUG_UNCLAIMED=1): print the orphaned runs -- data-region
+ * blocks allocated in the bitmap that no live recipe names -- grouped into
+ * contiguous runs, with the first 24 bytes of each run's first block so the
+ * content (zstd frame, "PK", text, zeros, ...) identifies who wrote it.
+ * Read-only; compiled in unconditionally, costs one getenv per stats call. */
+static void wstats_dump_unclaimed(invfs_volume *v, const uint8_t *claimed)
+{
+    uint64_t b = v->sb.raw_zone_start, end = v->sb.total_blocks;
+    uint64_t nruns = 0, nblk = 0;
+    uint8_t hdr[24];
+
+    if (!claimed || end <= b)
+        return;
+    fprintf(stderr, "[unclaimed] region %llu..%llu\n",
+            (unsigned long long)b, (unsigned long long)end);
+    while (b < end) {
+        uint64_t run_start, run_len = 0;
+        if (bit_get(claimed, b) ||
+            !(v->bitmap[b >> 3] & (1u << (b & 7)))) {
+            b++;
+            continue;
+        }
+        run_start = b;
+        while (b < end && !bit_get(claimed, b) &&
+               (v->bitmap[b >> 3] & (1u << (b & 7)))) {
+            run_len++;
+            b++;
+        }
+        nruns++;
+        nblk += run_len;
+        memset(hdr, 0, sizeof hdr);
+        (void)io_pread(&v->io, run_start * (uint64_t)INVFS_BLOCK_SIZE,
+                       hdr, sizeof hdr);
+        fprintf(stderr, "[unclaimed] pba %-9llu blocks %-5llu (%7.2f MiB) "
+                        "head %02x%02x%02x%02x %02x%02x%02x%02x "
+                        "%02x%02x%02x%02x %02x%02x%02x%02x\n",
+                (unsigned long long)run_start, (unsigned long long)run_len,
+                (double)run_len * INVFS_BLOCK_SIZE / (1024.0 * 1024.0),
+                hdr[0], hdr[1], hdr[2], hdr[3], hdr[4], hdr[5], hdr[6], hdr[7],
+                hdr[8], hdr[9], hdr[10], hdr[11], hdr[12], hdr[13], hdr[14],
+                hdr[15]);
+    }
+    fprintf(stderr, "[unclaimed] %llu run(s), %llu block(s), %.2f MiB\n",
+            (unsigned long long)nruns, (unsigned long long)nblk,
+            (double)nblk * INVFS_BLOCK_SIZE / (1024.0 * 1024.0));
+}
+
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
 {
     /* WP-DZ: physical per-zone attribution is by CONTENT CLASS (the AST
@@ -2538,6 +2585,8 @@ int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out)
      * blocks legitimately live past raw_zone_blocks (the contract in
      * volume.h says so). unclaimed is the one field that IS a region
      * measure by definition -- data-region blocks no live recipe names. */
+    if (have_ms && getenv("INVFS_DEBUG_UNCLAIMED"))
+        wstats_dump_unclaimed(v, claimed);
     if (have_ms) {
         uint64_t used = vol_zone_used_bytes(v, v->sb.raw_zone_start,
                                             v->sb.total_blocks);

@@ -777,11 +777,25 @@ static void dl_retire_rebase(invfs_volume *v, const uint8_t *key,
 }
 
 /* Append (takes g_delta_lock). Over-cap entries are dropped loudly (leak). */
+/* Diagnostic (INVFS_DEBUG_RETIRE=1): how many entries the retire queue
+ * receives and how many blocks the drain actually gives back. A leak with
+ * pushes==0 means nothing registered the supersession at all; pushes>0 with
+ * a small freed count means the drain refused (see its own message). */
+static unsigned long long g_dbg_retire_push, g_dbg_retire_push_blk,
+                          g_dbg_retire_freed_blk;
+#define DBG_RETIRE() (getenv("INVFS_DEBUG_RETIRE") != NULL)
+
 static void dl_retire_push(invfs_volume *v, delta_retire_ent *e)
 {
     delta_retire_ent *nr;
     if (!v || !e)
         return;
+    g_dbg_retire_push++;
+    g_dbg_retire_push_blk += e->npbas ? (unsigned long long)e->npbas : 1ull;
+    if (DBG_RETIRE())
+        fprintf(stderr, "[retire] push #%llu: %s %llu pba(s)\n",
+                g_dbg_retire_push, e->has_recipe ? "recipe" : "pbas",
+                (unsigned long long)(e->has_recipe ? 1ull : e->npbas));
     pthread_mutex_lock(&g_delta_lock);
     if (v->delta_nretire >= VOL_DELTA_RETIRE_MAX) {
         v->delta_retire_dropped++;
@@ -937,8 +951,30 @@ static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
             }
         } else if (idx != (size_t)-1) {
             delta_slot *s = &v->delta_index->slot[idx];
-            still_live = (s->seg == e->seg && s->off == e->off &&
-                          s->seq == e->seq);
+            /* Supersede retirement: the entry was staged AFTER the row
+             * committed, so the slot carried the recorded triple at that
+             * moment. Equal means the row still names that version and the
+             * entry's old segments are dead -> fire.
+             *
+             * A LATER supersede (s->seq > e->seq, seq is the monotonic
+             * v->delta_seq) leaves the entry's old segments dead TOO, so it
+             * must still fire. The equality-only test dropped exactly those,
+             * which is the unclaimed-blocks leak: measured 18.3 MiB right
+             * after writing two 256 MiB images, 13.6 MiB permanently after
+             * six sweeps and `--realize` (impl_docs/BUG-RECLAIM-UNCLAIMED.md).
+             * Firing over a newer row is safe because dl_retire_free_list
+             * still checks the entry's keep-set and pba_ref_count per block,
+             * so a share or a block the newer row still names is spared.
+             *
+             * A REWOUND slot (a doomed fence restored the previous version,
+             * s->seq < e->seq) may name the old recipe again -> do NOT fire.
+             * Entries whose span capture missed (all-zero triple) keep the
+             * legacy equality test. */
+            if (e->seg == 0 && e->off == 0 && e->seq == 0)
+                still_live = (s->seg == e->seg && s->off == e->off &&
+                              s->seq == e->seq);
+            else
+                still_live = (s->seq >= e->seq);
         }
         if (still_live) {
             live[nlive++] = *e;
@@ -969,13 +1005,34 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
         }
     }
     if (need_map) {
-        if (!v->lazy_reclaim) {
-            pba_ref_reset(v);
-            pba_ref_ensure(v);
-        }
+        /* lazy_reclaim means "the map is NOT maintained incrementally", not
+         * "it can be trusted without a rebuild": every -1 in the unlink and
+         * write paths is skipped under it (vol_dirs.c, vol_sweep.c:1500), so
+         * the map in hand still counts the superseded row's pbas as live and
+         * the pba_ref_count() gate below refuses EXACTLY the blocks the entry
+         * was staged to give back. Skipping the rebuild here therefore made
+         * the whole retire drain a no-op in the default configuration:
+         * measured 18.5 MiB unclaimed right after writing two 256 MiB
+         * images, 13.6 MiB still there after six sweeps and `--realize`,
+         * 2.6 MiB / 1.4 MiB with INVFS_LAZY_RECLAIM=0 on the same corpus
+         * (impl_docs/BUG-RECLAIM-UNCLAIMED.md).
+         *
+         * Rebuilding is the SAFE direction by the map's own contract
+         * (volume_internal.h: without the rebuild the count reads 0 for a pba
+         * a live recipe still names -- the wrong-free direction): counts come
+         * from the live set, so a block a live recipe names keeps count >= 1
+         * and is spared here. The drain runs at a fence or at close, so this
+         * walk is off the write hot path; lazy_reclaim keeps the MOUNT instant,
+         * which is what it is for. */
+        pba_ref_reset(v);
+        pba_ref_ensure(v);
     }
     for (i = 0; i < n; i++) {
         delta_retire_ent *e = &list[i];
+        if (DBG_RETIRE())
+            fprintf(stderr, "[retire] drain ent %zu: %s %llu pba(s)\n", i,
+                    e->has_recipe ? "recipe" : "pbas",
+                    (unsigned long long)(e->has_recipe ? 1ull : e->npbas));
         if (e->has_recipe) {
             if (vol_free_recipe_blocks(v, e->recipe, 0) != 0)
                 fprintf(stderr, "invfs: retire: recipe no longer "
@@ -1002,14 +1059,21 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
                 }
                 if (!keep && pba_ref_count(v, pba) == 0) {
                     uint64_t plen = 0;
-                    if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0)
+                    if (seg_extent_checked(v, pba, &plen) == 0 && plen > 0) {
                         vol_free_blocks(v, pba, plen);
+                        g_dbg_retire_freed_blk += plen;
+                    }
                 }
             }
         }
         dl_retire_free_ent(e);
     }
     free(list);
+    if (DBG_RETIRE())
+        fprintf(stderr, "[retire] drained %zu ent(s); pushes=%llu "
+                        "(~%llu blk); freed %llu blk (all drains so far)\n",
+                n, g_dbg_retire_push, g_dbg_retire_push_blk,
+                g_dbg_retire_freed_blk);
 }
 
 /* WP606 tombstone pad bodies (here for dl_wr16be/invfs_crc32c, §1). */
