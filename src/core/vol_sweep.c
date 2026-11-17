@@ -2479,6 +2479,32 @@ static void segdbg_add(int cls, uint64_t len, uint64_t plen)
     d->hphys[b] += plen * INVFS_BLOCK_SIZE;
 }
 
+/* Round-trip truth for a segment: `plen` blocks hold `8 + csize` bytes, so
+ * the wasted tail is plen*4096 - (8 + csize). The `logic` length above is the
+ * DECODED size and is the wrong yardstick for a compressed entry (it makes a
+ * well-compressed segment look like a 90% saving). */
+static void segdbg_add_stored(int cls, uint64_t csize, uint64_t plen)
+{
+    segdbg *d = &g_segdbg[cls];
+    uint64_t stored = 8 + csize, phys = plen * INVFS_BLOCK_SIZE;
+    int b;
+    if (cls < 0 || cls > 1)
+        return;
+    d->n++;
+    d->log += stored;
+    d->phys += phys;
+    /* bucket by the STORED size: that is what decides which block it lands in */
+    if (stored < 4096ull)                  b = 0;
+    else if (stored < 8192ull)             b = 1;
+    else if (stored < (64ull << 10))       b = 2;
+    else if (stored < (256ull << 10))      b = 3;
+    else if (stored < (1ull << 20))        b = 4;
+    else                                   b = 5;
+    d->hn[b]++;
+    d->hlog[b] += stored;
+    d->hphys[b] += phys;
+}
+
 static void segdbg_dump(void)
 {
     static const char *names[2] = { "uncompressed", "compressed" };
@@ -2590,16 +2616,36 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->shadow_used_bytes);
                 if (getenv("INVFS_DEBUG_SEGS") &&
-                    seg_extent(v, ents[i].pba, NULL, &plen) == 0)
-                    segdbg_add(1, ents[i].length, plen);
+                    seg_extent(v, ents[i].pba, NULL, &plen) == 0) {
+                    uint8_t sh[8];
+                    uint32_t csz = 0;
+                    if (io_pread(&v->io,
+                                 ents[i].pba * (uint64_t)INVFS_BLOCK_SIZE,
+                                 sh, sizeof sh) == 0) {
+                        memcpy(&csz, sh, 4);
+                        segdbg_add_stored(1, csz, plen);
+                    } else {
+                        segdbg_add(1, ents[i].length, plen);
+                    }
+                }
             } else {
                 uint64_t plen = 0;
                 out->logic_raw_bytes += ents[i].length;
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->raw_used_bytes);
                 if (getenv("INVFS_DEBUG_SEGS") &&
-                    seg_extent(v, ents[i].pba, NULL, &plen) == 0)
-                    segdbg_add(0, ents[i].length, plen);
+                    seg_extent(v, ents[i].pba, NULL, &plen) == 0) {
+                    uint8_t sh[8];
+                    uint32_t csz = 0;
+                    if (io_pread(&v->io,
+                                 ents[i].pba * (uint64_t)INVFS_BLOCK_SIZE,
+                                 sh, sizeof sh) == 0) {
+                        memcpy(&csz, sh, 4);
+                        segdbg_add_stored(0, csz, plen);
+                    } else {
+                        segdbg_add(0, ents[i].length, plen);
+                    }
+                }
             }
         }
     }
