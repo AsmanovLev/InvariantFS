@@ -45,6 +45,12 @@ static inline double vol_now_sec(void)
 #include "ivpack_loader.h"
 #ifdef INVFS_CORRUPT_DEBUG
 #include <stdarg.h>
+#ifndef FALLOC_FL_KEEP_SIZE
+#define FALLOC_FL_KEEP_SIZE 0x01
+#endif
+#ifndef FALLOC_FL_PUNCH_HOLE
+#define FALLOC_FL_PUNCH_HOLE 0x02
+#endif
 #ifndef _WIN32
 #include <sys/syscall.h>
 #endif
@@ -2170,6 +2176,9 @@ void vol_close(invfs_volume *v)
                 if (vol_write_sb(v) != 0)
                     fprintf(stderr, "vol_close: could not mark volume clean; "
                                     "next mount will recover\n");
+                else
+                    vol_punch_holes(v);   /* bitmap durable: give the space
+                                           * back to the host file */
             }
         } else {
             fprintf(stderr, "vol_close: final flush failed; volume stays "
@@ -3764,6 +3773,71 @@ static void vol_free_run(invfs_volume *v, uint64_t pba, uint64_t nblocks)
     }
     /* H5: freeing is the way out of the space latch -- re-evaluate */
     vol_readonly_unlatch(v);
+}
+
+/* ---- freed blocks -> sparse holes on the backing FILE ----------------
+ *
+ * Freeing blocks only clears bitmap bits: the bytes stay in the image file
+ * forever. Measured: `cp --sparse=always` of a swept volume produced 306 MB
+ * for ~55 MiB of live data (impl_docs/BUG-RECLAIM-UNCLAIMED.md, BUG 2), so an
+ * image never shrinks, `qemu-img`/sparse hosts keep paying for garbage, and a
+ * copy of the volume carries it along.
+ *
+ * SAFETY -- this runs ONLY after the bitmap recording the frees is durable
+ * (vol_close does the flush first, then marks the volume CLEAN). Punching
+ * earlier would zero bytes that a crash can still resurrect through the
+ * pre-free recipe: a recoverable volume would come back with silent zeros.
+ * It never touches an allocated block, and a save-point-pinned block stays
+ * ALLOCATED (that is what the pin is for), so it is never punched here either.
+ *
+ * Runs below VOL_PUNCH_MIN_BLOCKS are skipped: a sub-megabyte hole saves
+ * little on most filesystems and costs one syscall each. Two-device volumes
+ * are skipped for now -- the punch has to target the owning device's fd, and
+ * the shadow split needs its own accounting; a block device rejects the call
+ * anyway (EOPNOTSUPP), which is harmless for the mounted stand.
+ */
+#define VOL_PUNCH_MIN_BLOCKS 256ull   /* 1 MiB */
+
+static void vol_punch_run(invfs_volume *v, uint64_t pba, uint64_t n)
+{
+    int fd;
+    if (n < VOL_PUNCH_MIN_BLOCKS)
+        return;
+    fd = blkio_raw_fd(&v->io);
+    if (fd < 0)
+        return;
+    (void)fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                    (off_t)(pba * (uint64_t)INVFS_BLOCK_SIZE),
+                    (off_t)(n * (uint64_t)INVFS_BLOCK_SIZE));
+}
+
+void vol_punch_holes(invfs_volume *v)
+{
+    const char *e;
+    uint64_t b, end, run = 0;
+    if (!v || !v->io_open[0])
+        return;
+    e = getenv("INVFS_PUNCH_HOLE");
+    if (e && e[0] == '0' && e[1] == '\0')
+        return;                       /* explicit opt-out */
+    if (v->ndev != 1)
+        return;                       /* see the note above */
+    b = v->sb.raw_zone_start;
+    end = v->sb.total_blocks;
+    while (b < end) {
+        if (!(v->bitmap[b >> 3] & (1u << (b & 7)))) {
+            run++;
+            b++;
+            continue;
+        }
+        if (run) {
+            vol_punch_run(v, b - run, run);
+            run = 0;
+        }
+        b++;
+    }
+    if (run)
+        vol_punch_run(v, end - run, run);
 }
 
 void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks)

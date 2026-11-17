@@ -211,6 +211,11 @@ int vol_ensure_path(invfs_volume *v, const char *name);
 int  vol_read_file(invfs_volume *v, uint64_t inode_id, uint8_t **out, size_t *out_len);
 int  vol_read_raw(invfs_volume *v, uint64_t offset, void *buf, size_t len);
 void vol_free_blocks(invfs_volume *v, uint64_t pba, uint64_t nblocks);
+/* Punch the free runs of the data region out of the backing FILE (a sparse
+ * image), AFTER the bitmap that records the frees is durable. No-op on block
+ * devices, on two-device volumes, and with INVFS_PUNCH_HOLE=0. See the note
+ * at the definition in volume.c. Called from vol_close. */
+void vol_punch_holes(invfs_volume *v);
 int  vol_sweep_file(invfs_volume *v, uint64_t inode_id);
 
 /* On-demand sweep (embedded in the FS daemon, same process): mark an
