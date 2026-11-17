@@ -823,7 +823,19 @@ static int tz_flush_one(invfs_volume *v, int binary)
         }
         if (binary) {
             int bfam = invfs_binary_family(data, dlen, cand->name);
-            if (bfam == 0) {
+            /* family == 0 is a BCJ decision, not an admission one. It covers
+             * every payload under INVFS_BIN_MIN_SIZE (4096, codec.c) plus
+             * content with no code in it. Such a payload used to be thrown
+             * back to the generic floor, which gives it its OWN segment --
+             * and a segment occupies WHOLE blocks, so 2.4 KiB cost 4096.
+             * Measured on a 64 MiB / 2889 file Debian corpus: 524 gzip man
+             * pages + 340 unknown-magic binaries burned 1.90 MiB (~9% of the
+             * data footprint) on that rounding
+             * (impl_docs/BENCH-VS-SQUASHFS.md). Sub-block payloads are
+             * admitted here without the prefilter; anything at or above one
+             * block keeps the old rule (it has nothing to gain from sharing
+             * an extent and would pay read amplification for it). */
+            if (bfam == 0 && dlen >= (size_t)INVFS_BLOCK_SIZE) {
                 vol_sweep_file(v, cand->inode_id);
                 free(data);
                 continue;

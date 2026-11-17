@@ -559,6 +559,33 @@ static int sweep_dispatch(invfs_volume *v, uint64_t inode_id,
     if (!name || !name[0] || !full || full_len < 4)
         return SWEEP_DECLINED;
 
+    /* SUB-BLOCK payloads go to the binary batch BEFORE any structural lane
+     * gets to claim-and-stamp them.
+     *
+     * Why here and not lower: a segment occupies WHOLE blocks, so a 2.4 KiB
+     * payload stored as its own segment costs 4096 bytes. Measured on the
+     * 64 MiB / 2889 file Debian corpus: 524 gzip man pages (0.90 MiB) cost
+     * 2.05 MiB, and 340 unknown-magic binaries (0.57 MiB) cost 1.33 MiB --
+     * 1.90 MiB, ~9% of the whole data footprint, burned on block rounding
+     * (impl_docs/BENCH-VS-SQUASHFS.md).
+     *
+     * Why not in the batch branch further down: the builtin GZ lane claims a
+     * .gz first and, when its guard declines (a 2.4 KiB stream cannot pay
+     * for a recipe), stamps GENERIC_GUARD and RETURNS 0 -- "swept, done" --
+     * so the batch branch below is unreachable for exactly the files that
+     * need it most. Nothing is lost by pre-empting the lane here: below one
+     * block there is no decomposition to amortize.
+     *
+     * Text keeps its own lane (PPMd batch, no size gate), so it never
+     * reaches this test. A container SIBLING is left alone (its bytes belong
+     * to the container's layout). */
+    if (!vol_name_is_container_sibling(v, name) &&
+        full_len < (size_t)INVFS_BLOCK_SIZE &&
+        invfs_text_family(name, full, full_len) == 0 &&
+        bz_defer(v, inode_id, name, (uint64_t)full_len, 0) == 0) {
+        return 10;   /* sub-block payload -> shared ZSTD batch */
+    }
+
     /* WP59a: anchored files must never be claimed by a pack/container codec.
      * If the file reached the full path without a class stamp (first sweep
      * after creation), skip every codec/container branch and go straight to
