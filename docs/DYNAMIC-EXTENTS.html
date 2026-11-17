@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Динамические экстенты в InvariantFS — структуры данных</title>
+<style>
+  :root{
+    --bg:#0f1216; --fg:#e6edf3; --dim:#8b98a5; --line:#2a323c;
+    --box:#161b22; --accent:#58a6ff; --good:#3fb950; --warn:#d29922; --bad:#f85149;
+    --code:#0b0f14;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;padding:32px 20px 80px;background:var(--bg);color:var(--fg);
+       font:15px/1.65 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif}
+  main{max-width:1000px;margin:0 auto}
+  h1{font-size:27px;margin:0 0 6px}
+  h2{font-size:20px;margin:38px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+  h3{font-size:16px;margin:24px 0 8px;color:var(--accent)}
+  p{margin:8px 0}
+  .lead{color:var(--dim);margin-bottom:26px}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  code{background:#1d242c;padding:1px 5px;border-radius:4px;font-size:13px}
+  pre{background:var(--code);border:1px solid var(--line);border-radius:8px;
+      padding:14px 16px;overflow-x:auto;font-size:13px;line-height:1.5}
+  table{border-collapse:collapse;width:100%;margin:14px 0;font-size:14px}
+  th,td{border:1px solid var(--line);padding:7px 10px;text-align:left;vertical-align:top}
+  th{background:#1a2028;color:var(--dim);font-weight:600}
+  td.num{text-align:right;font-variant-numeric:tabular-nums}
+  .good{color:var(--good)} .bad{color:var(--bad)} .warn{color:var(--warn)}
+  .note{border-left:3px solid var(--accent);background:#131a23;padding:10px 14px;
+        margin:16px 0;border-radius:0 6px 6px 0}
+  .note.warn{border-color:var(--warn)}
+  figure{margin:22px 0;background:var(--box);border:1px solid var(--line);
+         border-radius:10px;padding:16px}
+  figcaption{color:var(--dim);font-size:13px;margin-top:10px;text-align:center}
+  svg{display:block;margin:0 auto;max-width:100%;height:auto}
+  .svgtxt{font:13px ui-monospace,Consolas,monospace;fill:var(--fg)}
+  .svgsmall{font:11px ui-monospace,Consolas,monospace;fill:var(--dim)}
+  .ol{color:var(--dim);font-size:13px}
+  ul{margin:8px 0 8px 22px;padding:0} li{margin:4px 0}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Динамические экстенты: что куда ссылается</h1>
+<p class="lead">Как устроено сейчас, что меняется, и пошаговый пример на 1 МиБ файле, в котором правится 2 КиБ.
+Числа взяты из замеров <code>impl_docs/BENCH-MERKLE-DEDUP.md</code> и <code>BENCH-VS-SQUASHFS.md</code>.</p>
+
+<h2>1. Как устроено сейчас</h2>
+
+<p>У файла есть <b>inode-строка</b> в B-дереве, а в ней — адрес <b>рецепта</b> (BLAKE3 от блоба рецепта).
+Рецепт — это «карта» файла: заголовок + массив записей.</p>
+
+<pre>invfs_ast_block_entry (32 Б):
+  file_offset    u64    смещение диапазона в ФАЙЛЕ
+  length         u64    длина диапазона (логическая, до распаковки)
+  zone:2  algo:6 block_id:24   зона / кодек / ключ батча
+  block_offset   u32    смещение внутри распакованного батча
+  pba            u64    физический БЛОК, с которого начинается сегмент</pre>
+
+<p>Физическая длина сегмента <b>не хранится в рецепте</b>: она лежит в 8-байтном заголовке по адресу
+<code>pba</code> (<code>[csize u32][crc u32]</code>), а фактически занимает
+<code>ceil((8+csize)/4096)</code> блоков. Отсюда всё, что мы померили: сегмент всегда выровнен на блок,
+и каждый сегмент округляется <b>отдельно</b> — 8.5 % потерь при 64-КиБ сегментах, 0.7 % при 1 МиБ.</p>
+
+<figure>
+<svg viewBox="0 0 900 250" role="img" aria-label="Текущая схема: inode, рецепт, сегменты">
+  <rect x="10" y="80" width="150" height="90" rx="8" fill="#1b2430" stroke="#58a6ff"/>
+  <text class="svgtxt" x="85" y="106" text-anchor="middle">inode row</text>
+  <text class="svgsmall" x="85" y="126" text-anchor="middle">name, size, mtime</text>
+  <text class="svgsmall" x="85" y="144" text-anchor="middle">recipe_addr</text>
+
+  <rect x="230" y="40" width="250" height="170" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text class="svgtxt" x="355" y="64" text-anchor="middle">recipe blob (один сегмент)</text>
+  <text class="svgsmall" x="355" y="86" text-anchor="middle">hdr: file_size, num_blocks</text>
+  <rect x="248" y="100" width="214" height="22" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="355" y="115" text-anchor="middle">entry[0] off=0 len=64K pba=1000</text>
+  <rect x="248" y="126" width="214" height="22" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="355" y="141" text-anchor="middle">entry[1] off=64K len=64K pba=1017</text>
+  <rect x="248" y="152" width="214" height="22" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="355" y="167" text-anchor="middle">entry[2] off=128K ... pba=1057</text>
+  <text class="svgsmall" x="355" y="194" text-anchor="middle">хранилище? нет: только адреса</text>
+
+  <rect x="560" y="52" width="150" height="46" rx="6" fill="#1b2430" stroke="#8b98a5"/>
+  <text class="svgsmall" x="635" y="72" text-anchor="middle">блок pba=1000</text>
+  <text class="svgsmall" x="635" y="88" text-anchor="middle">[csize][crc] payload…</text>
+  <rect x="560" y="108" width="150" height="46" rx="6" fill="#1b2430" stroke="#8b98a5"/>
+  <text class="svgsmall" x="635" y="128" text-anchor="middle">блок pba=1017</text>
+  <text class="svgsmall" x="635" y="144" text-anchor="middle">(следующий сегмент)</text>
+  <rect x="560" y="164" width="150" height="46" rx="6" fill="#1b2430" stroke="#8b98a5"/>
+  <text class="svgsmall" x="635" y="184" text-anchor="middle">блок pba=1057</text>
+  <text class="svgsmall" x="635" y="200" text-anchor="middle">хвост округлён до 4К</text>
+
+  <line x1="162" y1="125" x2="228" y2="125" stroke="#58a6ff" marker-end="url(#a)"/>
+  <line x1="482" y1="111" x2="558" y2="75" stroke="#8b98a5" marker-end="url(#a)"/>
+  <line x1="482" y1="137" x2="558" y2="128" stroke="#8b98a5" marker-end="url(#a)"/>
+  <line x1="482" y1="163" x2="558" y2="180" stroke="#8b98a5" marker-end="url(#a)"/>
+  <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+    <path d="M0,0 L8,4 L0,8 z" fill="#8b98a5"/></marker></defs>
+</svg>
+<figcaption>Сейчас: рецепт хранит только адреса блоков; длина хранения — в заголовке сегмента; сегмент выровнен на блок.</figcaption>
+</figure>
+
+<div class="note">
+<b>Три следствия, которые мы померили:</b>
+<ul>
+<li>каждый сегмент округляется до целого блока → 8.5 % места в мусор при 64 КиБ (2.5 % при 256 КиБ, 0.7 % при 1 МиБ);</li>
+<li>размер сегмента — глобальная константа, поэтому «мелко для дедупа / крупно для места» выбрать нельзя;</li>
+<li>ключ дедупа — хэш <i>сохранённых</i> байтов, поэтому тот же контент, сжатый другим уровнем, уже не совпадёт.</li>
+</ul>
+</div>
+
+<h2>2. Что добавляется</h2>
+
+<table>
+<tr><th>что</th><th>зачем</th><th>где живёт</th></tr>
+<tr><td><b>stored_len + sub_off</b> в записи экстента</td>
+    <td>экстент больше не обязан занимать целые блоки и не обязан начинаться с начала блока: хвост одного экстента может лежать в том же блоке, что и начало другого</td>
+    <td>рецепт (новая версия записи)</td></tr>
+<tr><td><b>Дерево Меркла</b> по plaintext (листья 4 КиБ)</td>
+    <td>сопоставление совпадений на любом уровне 4 КиБ…1 МиБ; проверка диапазона; инкрементальный пересчёт</td>
+    <td>рецепт: корень в заголовке, массивы уровней — в chunked-секции рецепта</td></tr>
+<tr><td><b>Глобальный индекс узлов</b> <code>node_hash → extent</code></td>
+    <td>дедуп ищет «этот диапазон уже где-то лежит» по хэшу узла, а не по хэшу сжатых байтов</td>
+    <td>строится свипом (как <code>pba_ref</code>), опционально персистится</td></tr>
+<tr><td><b>Суб-блочный аллокатор хвостов</b></td>
+    <td>раздавать остаток блока кусками по 512 Б</td>
+    <td>карта «блок → битмаска 8 хвостов» рядом с битмапом</td></tr>
+<tr><td><b>refcount экстента</b></td>
+    <td>экстент может быть назван несколькими файлами (совпадение = ссылка)</td>
+    <td>в индексе узлов / <code>pba_ref</code></td></tr>
+</table>
+
+<figure>
+<svg viewBox="0 0 940 340" role="img" aria-label="Новая схема: inode, рецепт, дерево, индекс, экстенты">
+  <rect x="8" y="120" width="140" height="86" rx="8" fill="#1b2430" stroke="#58a6ff"/>
+  <text class="svgtxt" x="78" y="146" text-anchor="middle">inode row</text>
+  <text class="svgsmall" x="78" y="166" text-anchor="middle">size, mtime</text>
+  <text class="svgsmall" x="78" y="184" text-anchor="middle">recipe_addr</text>
+
+  <rect x="196" y="26" width="290" height="274" rx="8" fill="#161b22" stroke="#3fb950"/>
+  <text class="svgtxt" x="341" y="50" text-anchor="middle">recipe stream (chunked)</text>
+
+  <rect x="212" y="62" width="258" height="52" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="341" y="80" text-anchor="middle">hdr: file_size, n_ext, leaf_bits=12</text>
+  <text class="svgsmall" x="341" y="98" text-anchor="middle">root_hash: 7f3a…c19e   ← идентичность</text>
+
+  <rect x="212" y="120" width="258" height="76" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="341" y="138" text-anchor="middle">extent[0] off=0     len=512K stored=? pba</text>
+  <text class="svgsmall" x="341" y="156" text-anchor="middle">extent[1] off=512K  len=4K   stored=2891 ← правка</text>
+  <text class="svgsmall" x="341" y="174" text-anchor="middle">extent[2] off=516K  len=508K stored=? pba</text>
+  <text class="svgsmall" x="341" y="190" text-anchor="middle" fill="#8b98a5">(порядок — по file_offset)</text>
+
+  <rect x="212" y="204" width="258" height="80" fill="#0b0f14" stroke="#2a323c"/>
+  <text class="svgsmall" x="341" y="222" text-anchor="middle">mtree L0: 256 листьев × 16 Б</text>
+  <text class="svgsmall" x="341" y="238" text-anchor="middle">mtree L1: 128 · L2: 64 · … · L8: 1</text>
+  <text class="svgsmall" x="341" y="258" text-anchor="middle">(верхние уровни выводятся из L0)</text>
+  <text class="svgsmall" x="341" y="274" text-anchor="middle" fill="#8b98a5">для больших файлов — отдельный поток</text>
+
+  <rect x="540" y="120" width="180" height="120" rx="8" fill="#1b2430" stroke="#d29922"/>
+  <text class="svgtxt" x="630" y="144" text-anchor="middle">индекс узлов</text>
+  <text class="svgsmall" x="630" y="164" text-anchor="middle">node_hash → (pba, sub, len)</text>
+  <text class="svgsmall" x="630" y="182" text-anchor="middle">refcount</text>
+  <text class="svgsmall" x="630" y="204" text-anchor="middle">строится свипом,</text>
+  <text class="svgsmall" x="630" y="220" text-anchor="middle">как pba_ref</text>
+
+  <rect x="760" y="60" width="170" height="60" rx="6" fill="#161b22" stroke="#8b98a5"/>
+  <text class="svgsmall" x="845" y="82" text-anchor="middle">экстент 1 МиБ</text>
+  <text class="svgsmall" x="845" y="100" text-anchor="middle">shared: refcount=3</text>
+  <rect x="760" y="132" width="170" height="60" rx="6" fill="#161b22" stroke="#3fb950"/>
+  <text class="svgsmall" x="845" y="154" text-anchor="middle">экстент 4 КиБ (правка)</text>
+  <text class="svgsmall" x="845" y="172" text-anchor="middle">stored=2891, sub_off=3072</text>
+  <rect x="760" y="204" width="170" height="60" rx="6" fill="#161b22" stroke="#8b98a5"/>
+  <text class="svgsmall" x="845" y="226" text-anchor="middle">экстент 1 МиБ</text>
+  <text class="svgsmall" x="845" y="244" text-anchor="middle">shared</text>
+
+  <line x1="150" y1="163" x2="194" y2="163" stroke="#58a6ff" marker-end="url(#b)"/>
+  <line x1="488" y1="150" x2="538" y2="170" stroke="#d29922" marker-end="url(#b)"/>
+  <line x1="722" y1="160" x2="758" y2="90" stroke="#8b98a5" marker-end="url(#b)"/>
+  <line x1="722" y1="182" x2="758" y2="162" stroke="#3fb950" marker-end="url(#b)"/>
+  <line x1="722" y1="200" x2="758" y2="232" stroke="#8b98a5" marker-end="url(#b)"/>
+  <defs><marker id="b" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+    <path d="M0,0 L8,4 L0,8 z" fill="#8b98a5"/></marker></defs>
+</svg>
+<figcaption>После изменения: рецепт = заголовок с корневым хэшем + список экстентов (по file_offset) + дерево; индекс узлов связывает хэши диапазонов с существующими экстентами.</figcaption>
+</figure>
+
+<h2>3. Пример: файл 1 МиБ, правим 2 КиБ в середине</h2>
+
+<p>Лист дерева = 4 КиБ, значит у 1 МиБ файла 256 листьев и 9 уровней (4 КиБ → 1 МиБ).
+Правка попадает в лист №128 (смещение 512 КиБ).</p>
+
+<h3>Шаг 1. Считаем дерево</h3>
+<pre>L0 (4 КиБ):  256 хэшей  → меняется 1 (лист 128)
+L1 (8 КиБ):  128        → меняется 1 (родитель листа 128)
+...
+L8 (1 МиБ):  1          → меняется корень
+root_hash тоже меняется  → файл «другой», но 255/256 листьев совпадают со старым</pre>
+
+<h3>Шаг 2. Ищем совпадения сверху вниз</h3>
+<p>Индекс знает старые узлы файла. Спуск от 1 МиБ: корень не совпал → идём в детей 512 КиБ:
+левая половина (0…512 КиБ) совпала <b>целиком</b> → это ссылка на существующий экстент, писать нечего.
+Правая половина не совпала → спускаемся: 256 КиБ, 128, 64, 32, 16, 8, 4 КиБ — на каждом уровне
+левый ребёнок совпадает, правый нет. Совпал весь путь до листа 128.</p>
+
+<figure>
+<svg viewBox="0 0 900 220" role="img" aria-label="Спуск по дереву: совпавшие и несовпавшие поддеревья">
+  <rect x="390" y="14" width="120" height="30" rx="5" fill="#3a1d1d" stroke="#f85149"/>
+  <text class="svgsmall" x="450" y="34" text-anchor="middle">1 МиБ ✗</text>
+  <line x1="450" y1="44" x2="360" y2="70" stroke="#2a323c"/>
+  <line x1="450" y1="44" x2="540" y2="70" stroke="#2a323c"/>
+  <rect x="300" y="70" width="120" height="30" rx="5" fill="#16301f" stroke="#3fb950"/>
+  <text class="svgsmall" x="360" y="90" text-anchor="middle">512 КиБ ✓ ref</text>
+  <rect x="480" y="70" width="120" height="30" rx="5" fill="#3a1d1d" stroke="#f85149"/>
+  <text class="svgsmall" x="540" y="90" text-anchor="middle">512 КиБ ✗</text>
+  <line x1="540" y1="100" x2="470" y2="126" stroke="#2a323c"/>
+  <line x1="540" y1="100" x2="610" y2="126" stroke="#2a323c"/>
+  <rect x="410" y="126" width="120" height="30" rx="5" fill="#16301f" stroke="#3fb950"/>
+  <text class="svgsmall" x="470" y="146" text-anchor="middle">256 КиБ ✓ ref</text>
+  <rect x="550" y="126" width="120" height="30" rx="5" fill="#3a1d1d" stroke="#f85149"/>
+  <text class="svgsmall" x="610" y="146" text-anchor="middle">256 КиБ ✗</text>
+  <line x1="610" y1="156" x2="560" y2="182" stroke="#2a323c"/>
+  <line x1="610" y1="156" x2="680" y2="182" stroke="#2a323c"/>
+  <rect x="500" y="182" width="120" height="30" rx="5" fill="#16301f" stroke="#3fb950"/>
+  <text class="svgsmall" x="560" y="202" text-anchor="middle">… ✓ ref</text>
+  <rect x="620" y="182" width="120" height="30" rx="5" fill="#3a1d1d" stroke="#f85149"/>
+  <text class="svgsmall" x="680" y="202" text-anchor="middle">4 КиБ ✗ пишем</text>
+  <text class="svgsmall" x="160" y="90" text-anchor="middle">совпавшие поддеревья</text>
+  <text class="svgsmall" x="160" y="108" text-anchor="middle">= 0 байт хранения</text>
+  <text class="svgsmall" x="840" y="202" text-anchor="middle">только этот лист</text>
+  <text class="svgsmall" x="840" y="220" text-anchor="middle">надо записать</text>
+</svg>
+<figcaption>Спуск «сверху вниз с жадностью»: берём самый крупный совпавший узел; несовпавшие спускаем на уровень ниже.</figcaption>
+</figure>
+
+<h3>Шаг 3. Планируем экстенты по «дырам»</h3>
+<table>
+<tr><th>дыра</th><th>размер</th><th>экстент (лестница)</th><th>почему</th></tr>
+<tr><td>правленый лист</td><td class="num">4 КиБ</td><td>4 КиБ</td><td>дырка меньше следующей ступени — мельче некуда</td></tr>
+<tr><td>новый регион 40 МиБ</td><td class="num">40 МиБ</td><td>40 × 1 МиБ</td><td>сплошной прогон: крупно = хорошее сжатие и округление 0.7 %</td></tr>
+<tr><td>хвост файла 300 КиБ</td><td class="num">300 КиБ</td><td>1 × 256 КиБ + 1 × 44 КиБ</td><td>не выходим за границу дыры</td></tr>
+</table>
+
+<h3>Шаг 4. Что в итоге лежит на диске</h3>
+<table>
+<tr><th>политика</th><th>перезаписано после правки 2 КиБ</th></tr>
+<tr><td>фиксированные экстенты 1 МиБ</td><td class="num bad">1 МиБ (весь файл)</td></tr>
+<tr><td>фиксированные экстенты 64 КиБ</td><td class="num warn">64 КиБ (сегмент с правкой)</td></tr>
+<tr><td><b>динамические + дерево</b></td><td class="num good">4 КиБ (один лист; stored ≈ 2.9 КиБ)</td></tr>
+</table>
+
+<p>На реальном корпусе (256 МиБ образ, правка 2 КиБ) это же отношение дало
+<b>44 МиБ против 1 МиБ</b> — см. <code>BENCH-MERKLE-DEDUP.md</code>.</p>
+
+<h2>4. Правило выбора размера экстента</h2>
+<pre>для каждого непокрытого прогона [a, b):
+    остаток = b - a
+    пока остаток > 0:
+        размер = наибольшая ступень лестницы ≤ остатка      # 1 МиБ, 256К, 64К, 16К, 4К
+        если размер &lt; 4096: размер = 4096                   # минимум — блок
+        писать экстент(offset=a, logical=размер)
+        a += размер;  остаток -= размер</pre>
+
+<div class="note">
+Порядок «сначала совпадения, потом лестница» — это и есть разделение, которого не хватало:
+<b>сопоставление</b> решает, что можно не писать вообще (и на каком уровне),
+<b>лестница</b> решает, каким куском писать то, что писать всё-таки надо.
+</div>
+
+<h2>5. Чтение: дерево не нужно</h2>
+<p>Дерево — это индекс <i>сопоставления</i> и <i>проверки</i>. Чтение идёт по экстентам:</p>
+<pre>read(off, len):
+    для каждого экстента с file_offset ≤ off &lt; file_offset+length:
+        прочитать (pba, sub_off, stored_len) → распаковать algo → отдать срез
+    (экстентов на файл теперь мало: 1 МиБ куски, а не 64 КиБ)</pre>
+<p>Бонус: экстентов меньше → меньше записей в рецепте → рецепт меньше. Для 1 ГиБ файла:
+16384 записи по 32–48 Б при 64 КиБ против 1024 записей при 1 МиБ.</p>
+
+<h2>6. Проверка и ремонт: дерево нужно</h2>
+<pre>verify_range(off, len):
+    взять наименьший узел дерева, покрывающий [off, len)
+    прочитать и распаковать данные этого узла
+    H(данные) == узел.hash  →  диапазон цел
+    (не нужно читать весь файл, чтобы проверить 64 КиБ)</pre>
+
+<h2>7. Компакция и refcount</h2>
+<ul>
+<li>Совпадение = <b>ссылка</b> на существующий экстент: <code>refcount++</code>. Поэтому один 1-МиБ экстент может обслуживать сотни файлов/образов.</li>
+<li>Перезапись файла, который целиком совпал, ничего не пишет: меняется только рецепт (и корень).</li>
+<li>Когда картина совпадений меняется (например, файл правится часто), компакция пересчитывает дырки и может <b>слить</b> мелкие экстенты в крупные или <b>разрезать</b> крупный на мелкие, если так больше совпадений.</li>
+<li>Освобождение: <code>refcount == 0</code> → экстент свободен; хвост возвращается суб-блочному аллокатору.</li>
+</ul>
+
+<h2>8. Цена и ограничения</h2>
+<table>
+<tr><th>статья</th><th>величина</th><th>комментарий</th></tr>
+<tr><td>индекс листьев (4 КиБ, 32 Б)</td><td class="num">0.78 %</td><td>верхние уровни выводятся из листьев, хранить не обязательно</td></tr>
+<tr><td>округление экстентов</td><td class="num">0.7 %</td><td>при 1 МиБ (было 8.5 % при 64 КиБ) + суб-блочные хвосты почти убирают остаток</td></tr>
+<tr><td>сдвиг содержимого</td><td class="num warn">77.9 % vs 100 %</td><td>фиксированные листья чувствительны к сдвигу; дерево позволяет его ловить, но это отдельная работа (CDC на наших корпусах не нужен)</td></tr>
+<tr><td>суб-блочные хвосты</td><td class="num">RMW</td><td>перезапись хвоста = read-modify-write блока; на стенде нужен выровненный fallback</td></tr>
+<tr><td>сложность</td><td class="num warn">высокая</td><td><code>INVFS_SEGMENT_SIZE</code> используется в 144 местах, включая seal (символ = сегмент) и pin-map SPT0</td></tr>
+</table>
+
+<h2>9. Замеры, на которых это построено</h2>
+<table>
+<tr><th>политика</th><th>A vs C (1 правка 2 КиБ)</th><th>A vs D (50 правок)</th><th>A vs B (сдвиг)</th></tr>
+<tr><td>экстенты 1 МиБ</td><td class="num bad">44.0 МиБ</td><td class="num">44.0 МиБ</td><td class="num">73.0 МиБ</td></tr>
+<tr><td>экстенты 64 КиБ</td><td class="num warn">4.4 МиБ</td><td class="num">5.1 МиБ</td><td class="num">69.6 МиБ</td></tr>
+<tr><td>экстенты 4 КиБ</td><td class="num good">1.0 МиБ</td><td class="num good">1.1 МиБ</td><td class="num good">56.6 МиБ</td></tr>
+<tr><td><b>динамические + дерево</b></td><td class="num good">≈1.0 МиБ</td><td class="num good">≈1.1 МиБ</td><td class="num good">≈56.6 МиБ</td></tr>
+</table>
+<p class="ol">Столбцы — сколько надо дописать поверх базового образа 256 МиБ. Источник: <code>impl_docs/BENCH-MERKLE-DEDUP.md</code>.</p>
+
+<h2>10. Одной фразой</h2>
+<p>Дерево Меркла отвечает на вопрос <b>«что не надо писать»</b> с точностью 4 КиБ,
+а лестница экстентов — на вопрос <b>«каким куском писать остальное»</b>.
+Сейчас оба ответа склеены в одну константу <code>INVFS_SEGMENT_SIZE</code>, и именно
+поэтому нельзя одновременно иметь мелкий дедуп и крупное хранение.</p>
+
+</main>
+</body>
+</html>
