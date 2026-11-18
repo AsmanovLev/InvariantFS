@@ -66,7 +66,20 @@ write(off, buf) = append to the delta log      (no special path)
 The base is never stored; the overlay is ordinary delta, so every existing property of the
 delta layer (crash consistency, fold, retire, pba refs) applies unchanged.
 
-### 2. The base spec records everything needed to reproduce the bytes
+### 2. The base spec lives in the RECIPE, as a new opcode
+
+Decided: `INVFS_ALGO_COMPUTED` is a recipe opcode, and the spec is carried in the recipe
+stream itself — not in a `!spec` sibling.
+
+Why the recipe and not a sibling: the recipe is already the per-inode program
+(`algo` + `repro_*` params + children), so a computed inode changes nothing about the
+read path — one dispatch, one place where a spec can be wrong. It is also atomic with the
+file's own metadata: the recipe is content-addressed by `recipe_addr`, so changing the
+spec changes the address (natural invalidation), and there is no second inode that can
+drift out of sync or be deleted on its own. A sibling would buy a smaller recipe at the
+cost of a second object to keep alive, refcount and validate.
+
+The spec records everything needed to reproduce the bytes:
 
 - source streams by **content reference** (inode + range, or a chunk hash once ADR-012
   lands — the spec does not care which, it is an indirection);
@@ -75,6 +88,26 @@ delta layer (crash consistency, fold, retire, pba refs) applies unchanged.
   run) so `stat` answers immediately and the content has a stable identity;
 - whether the transform is `STABLE` (pinned software implementation) or `VOLATILE` (anything
   that cannot be pinned).
+
+### 2a. Composition is asynchronous, and "not ready" is a first-class state
+
+Composing a view costs one encode run (needed for `size` and the root), so creations are
+queued rather than done inline: composing a library of thousands of tracks must not block
+the writer for minutes. An inode therefore starts `NOT_READY` and becomes `READY` when the
+first composition finishes.
+
+There is no POSIX "not ready", so the state is reported honestly in three places instead
+of being hidden:
+
+| surface | NOT_READY behaviour |
+|---|---|
+| `open()` for read | fails with `EAGAIN` (retryable — the same errno a non-blocking call uses) |
+| `stat()` | returns the inode's recorded values (size 0 until composed) and is **never** silently wrong about a ready view |
+| `user.invfs.computed` xattr | carries `not_ready`, `ready` or `volatile`, so a tool can ask the real question |
+
+A `VOLATILE` view (a transform that could not be pinned — see §5) is readable but its
+xattr says the bytes are not reproducible, which is what keeps it out of backups by
+policy rather than by accident.
 
 ### 3. Materialization is a sweep/fold decision, never a read-time surprise
 
@@ -117,6 +150,18 @@ Consequences of the rule, stated plainly:
   encoder, and it is CPU per read (cached in ARC, materialized by policy);
 - a `STABLE` view's bytes are frozen; re-composition happens only on explicit request,
   never "during the next sweep".
+
+**Chains are allowed.** A view may reference another view (decided 2026-11-17): the depth
+cap is 4 and cycles are rejected at creation, because the spec names sources and a cycle
+would make the inode unreadable by construction. Each level keeps its own pinned
+transform, so a chain is only as reproducible as its weakest link — which is why the
+composite state is `VOLATILE` if any link is.
+
+**scrub/verify does not re-encode by default.** A computed inode is verified by checking
+that its sources verify and that the spec is intact (opcode parse, pinned version present,
+root recorded); re-running the transform is expensive and belongs to an explicit
+`--verify-views` pass, which recomposes and compares the recorded root — that pass is also
+the determinism test for a pinned encoder.
 
 ### 6. Opt-in, and degradation must be loud but harmless
 
@@ -181,15 +226,19 @@ encoder, because that would change its content.
 5. **Fold** — folding an inode with a delta triggers materialization, not a recipe rewrite.
 6. **Reporting** — `du`/`stat`/`invf-stats` show the view as zero-cost and say so.
 
-## Open questions
+## Resolved questions (2026-11-17)
 
-1. Where the base spec lives: a new recipe opcode (`INVFS_ALGO_COMPUTED`) with the spec in
-   the recipe stream, or a `!spec` sibling inode? The opcode keeps one read path; the
-   sibling keeps the recipe small.
-2. Creation cost: one encode run for `size`/root — acceptable per file, but what about
-   composing thousands of views at once (a whole library)? Probably a background queue.
-3. ARC eviction for decoded views: current ARC keys on inode id; a view's decoded output is
-   large (WAV of a whole album), so it needs its own budget.
-4. Should a view be allowed to reference another view (depth 2), or is one level enough?
-5. How does `scrub`/`verify` treat a computed inode — verify the sources and the root, or
-   re-run the encoder?
+| question | decision |
+|---|---|
+| Where the base spec lives | in the recipe, as `INVFS_ALGO_COMPUTED` — one read path, atomic with the file, content-addressed (§2) |
+| Cost of creation (one encode for size/root) | queue the composition; the inode is `NOT_READY` until done, `open()` says `EAGAIN`, the xattr says why (§2a) |
+| ARC budget for decoded views | unchanged: decoded output is charged to the normal budget and evicted like anything else |
+| Chains of views | allowed, depth cap 4, cycles rejected (§5) |
+| How scrub treats a computed inode | verify sources + spec integrity; re-encode only under `--verify-views`, which compares the recorded root (§5) |
+
+## Still open
+
+1. Queue discipline for bulk composition (a whole library at once): background worker in
+   the sweep, or a separate `invf-compose` daemon? The former needs a sweep running.
+2. Whether a `VOLATILE` view should be creatable at all, or only as a temporary that a
+   policy forces to materialize.
