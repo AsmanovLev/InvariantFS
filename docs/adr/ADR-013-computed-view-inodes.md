@@ -143,13 +143,36 @@ version.
 | encode, pinned | WAV → FLAC via a **software** encoder at a recorded version | yes, for that implementation | allowed, marked `STABLE` |
 | encode, GPU or unpinned | frames → AV1 on GPU, "whatever `flac` is installed" | no | **forbidden** as a base spec |
 
+**What makes a transform `STABLE` — the checklist.** All four must hold, and each one
+is a way real encoders go `VOLATILE`:
+
+| requirement | why it fails in the wild |
+|---|---|
+| pinned implementation **and version** | zstd level 3 vs 19 already produced different bytes for the same 64 KiB (measured, `BENCH-MERKLE-DEDUP.md`); FLAC/APE/x264 builds differ between distros |
+| deterministic parameters | preset, quality, `--threads N` (a different thread count changes some encoders' output), rounding modes |
+| **no injected metadata** | gzip stores mtime and OS in the header; x264 writes its own version string into an SEI; muxers write a creation date and a "muxing application" string — identical input, different bytes |
+| no hardware/driver dependence | GPU encoders (`nvenc`, `vaapi`, `qsv`, AV1 hwenc) are **non-deterministic by nature**: different driver, card or scheduling order gives different bytes, sometimes run to run |
+
+Practical recipe for media, if a `STABLE` view is wanted: pin the encoder build, fix the
+preset and thread count, and **normalize the container metadata** (zeroed dates, fixed
+muxer/app strings). Anything less lands in `VOLATILE`.
+
 Consequences of the rule, stated plainly:
 
 - storing video in its compact form and exposing a decoded view is safe (decode only);
 - transcoding on read to another *encoded* format is allowed only for a pinned software
   encoder, and it is CPU per read (cached in ARC, materialized by policy);
 - a `STABLE` view's bytes are frozen; re-composition happens only on explicit request,
-  never "during the next sweep".
+  never "during the next sweep";
+- **`VOLATILE` cannot be a zero-storage view, and saying otherwise would be a lie.** If a
+  transform cannot be reproduced, the only way to guarantee the bytes is to store them.
+  Caching a volatile composition is worse than useless: it looks stable while the cache
+  holds, then a recomposition after eviction returns different bytes — a player seeking
+  inside such a file would read two versions of one file. So the policy is:
+  a `VOLATILE` transform either **materializes on the first composition** (it costs
+  storage, i.e. no free lunch — but the bytes are then real) or is **refused** at creation.
+  The class exists so the operator can see *why* the encoder in question is not usable as
+  a view, not to enable it.
 
 **Chains are allowed.** A view may reference another view (decided 2026-11-17): the depth
 cap is 4 and cycles are rejected at creation, because the spec names sources and a cycle
@@ -238,7 +261,8 @@ encoder, because that would change its content.
 
 ## Still open
 
-1. Queue discipline for bulk composition (a whole library at once): background worker in
-   the sweep, or a separate `invf-compose` daemon? The former needs a sweep running.
-2. Whether a `VOLATILE` view should be creatable at all, or only as a temporary that a
-   policy forces to materialize.
+1. The sweep's background worker owns bulk composition (decided 2026-11-17): composing a
+   library is a sweep job, not a daemon, because the sweep already holds the volume
+   exclusively and already has the queue discipline (defer/admission/retry) that a
+   composer needs. Consequence to accept: views created on a volume whose sweep never
+   runs stay `NOT_READY` — which `open()` reports as `EAGAIN`, so nothing lies.
