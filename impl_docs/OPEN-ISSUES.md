@@ -778,3 +778,56 @@ flock: выглядит как зависание (у нас два прогон
 Пункты 3-6 — кандидаты в мёртвый код или в неверные имена, а не в дефекты; проверять
 по одному, начиная с 4 (сессия без записи, коммитящая рецепт, — это лишняя работа на
 каждом открытии/закрытии).
+
+## Полный e2e-тир: 29 PASS / 58 (2026-11-19)
+
+Прогон `bash tools/run-e2e.sh` по каждому сьюту отдельно (без остановки на первом
+падении). Итог: **29 прошло, 29 упало**. Ниже — группировка по ПРИЧИНЕ, потому что
+29 падений ≠ 29 проблем.
+
+### A. Паки устарели относительно движка (≈12 сьютов) — ОКРУЖЕНИЕ, не код
+
+`vol: packs from volume: 0 container, 0 codec ...; built-in codecs: 15` — ни один пак
+не загружен. `test-ivpacks` прямо называет причину:
+`desc name != manifest (api_version=2 name=ext4fs version=1.0.0 pack_class=containerpack)`.
+
+Проверено отдельно **без** env-override раннера — поведение то же, значит это не мой
+`INVFS_CODECPACKS`. Паки в `/var/tmp/packs` собраны под старый ABI и живут в ДРУГОМ
+репозитории (registry, копия в `D:/.../registry-rescue`). Их надо пересобрать.
+
+Затронуты: `test-ext4fs`, `test-ntfs`, `test-ntfs-big`, `test-containerpack`,
+`test-cpack-mcost-bitexact`, `test-vdi`, `test-wim`, `test-rawdisk`, `test-ivpacks`,
+`test-sandbox` (внутри гоняет containerpack), `test-rawimg`, `test-exercarve`,
+`test-jxl`, `test-binbatch` (последние четыре считают число пак-действий).
+
+### B. Нет хостовых инструментов / нужен root (≈6) — ОКРУЖЕНИЕ
+
+`test-fatfs` (`mkfs.exfat not installed`), `test-p7z` (`no 7z archiver`),
+`test-flakey` (`/dev/mapper/...`), `test-acl`, `test-seal`, `test-put-failure`
+(rc=127), `test-flushfail` (`harness build`).
+
+### C. Предсуществующий дефект SPT0-restore (2)
+
+`test-rollback` (`refusing to roll back: inode 12 segment 0 names block 10420, which
+the save point did not record`), `test-watermark` (`rollback failed`). Тот же дефект,
+что в unit-шарде 4 (`no_ckp0_surface_test`); бисекция на `74cab2b` уже подтвердила
+предсуществование. Разбор: `WP-SPT0-PARTIAL-RECLAIM.md`.
+
+### D. Предсуществующий учёт свободных блоков (1)
+
+`test-dedupe` (`free blocks did not stabilize in 6 sweeps`, числа 120672→120586).
+
+### E. Требуют отдельного разбора — вероятно НАШИ или настоящие дефекты (6)
+
+| сьют | симптом |
+|---|---|
+| **`test-resize`** | **rc=139 (SIGSEGV)** — падение, наивысший приоритет |
+| `test-writeback-stall` | «gate-on: the drain never ran after the write path went quiet (21s) — a deferral that never ends is a leak, not a yield» |
+| `test-heat` | `INVFS_HEAT_INIT did not seed (rheat=0)` |
+| `test-multidev` | `no demotion under pressure` |
+| `test-pngflac` | `palette.png: unexpected stamp cls=8 algo=1 gen=1` |
+| `test-dedupe` (см. D) | возможно связано с `touched[]`/учётом |
+
+Порядок разбора: сначала `test-resize` (это крэш, а не ассерт), затем
+`test-writeback-stall` (похоже на реальную утечку отложенной работы), потом
+`test-heat`/`test-multidev`/`test-pngflac`.
