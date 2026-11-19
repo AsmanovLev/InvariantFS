@@ -750,6 +750,53 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
  *      under test. These exist so the LINK succeeds; each is off the
  *      map read/serve path and returns a benign "no". -------------- */
 
+/* ---- link stubs for the engine the unit under test does NOT use ----------
+ *
+ * This binary compiles src/core/vol_cpack.c ALONE (that is the unit under test:
+ * the container map's concurrency) and stubs the rest of the engine, exactly
+ * like bz_defer/invfs_binary_family below. vol_cpack.c also references the
+ * write session and the codec registry (member layout + commit), which this
+ * test never reaches -- without these stubs the TSan/ASan targets do not LINK
+ * at all, and `make test` stops at the build step before running anything.
+ * Stubbed to fail closed: a NULL session and -1 from every write call. */
+const invfs_codec *invfs_codec_all(size_t *count)
+{
+    if (count) *count = 0;
+    return NULL;
+}
+
+uint64_t vol_write_begin(invfs_volume *v, const char *name, int truncate,
+                         invfs_wsession **out)
+{
+    (void)v; (void)name; (void)truncate;
+    if (out) *out = NULL;
+    return 0;
+}
+
+int vol_write_range(invfs_wsession *ws, uint64_t offset, const uint8_t *data,
+                    size_t len)
+{
+    (void)ws; (void)offset; (void)data; (void)len;
+    return -1;
+}
+
+int vol_write_truncate(invfs_wsession *ws, uint64_t len)
+{
+    (void)ws; (void)len;
+    return -1;
+}
+
+int vol_write_commit(invfs_wsession *ws)
+{
+    (void)ws;
+    return -1;
+}
+
+void vol_write_abort(invfs_wsession *ws)
+{
+    (void)ws;
+}
+
 int bz_defer(invfs_volume *v, uint64_t inode_id, const char *name, uint64_t size, uint32_t family)
 { (void)v; (void)inode_id; (void)name; (void)size; (void)family; return 0; }
 int tz_defer(invfs_volume *v, uint64_t inode_id, const char *name, uint64_t size, uint32_t family)
