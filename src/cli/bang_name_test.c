@@ -317,8 +317,7 @@ static void leg_a2_neighbour_names_survive(void)
      * real sibling it could be. */
     static const char *safe[] = {
         "n!b",        /* the reproduced case */
-        "n!zzz", "n!x", "n!-", "n!1", "n!", "n!mbr", "n!mbr000",
-        "n!mbr00000",     /* five digits: "%04u" never prints this */
+        "n!zzz", "n!x", "n!-", "n!1", "n!", "n!mbr",
         "n!part",         /* tag with no index */
         "n!mbrt-", "n!mbrmapx", "n!jxl0", "n!recipe2", "n!part0x",
         "n!mbr0000-",     /* trailing '-' with nothing after it: never minted */
@@ -340,6 +339,19 @@ static void leg_a2_neighbour_names_survive(void)
     static const char *collide[] = {
         "n!part0", "n!recipe", "n!mbr0000-x", "n!exr0", "n!mbrt", "n!jxl",
         "n!nbli",   /* WP620 */
+        /* Digit-count cases (WP-PACKED, commit bf54544). The shape check accepts
+         * `mbr<1..7 digits>[-<san>]`, not exactly four: a container with more
+         * than 10000 members mints FIVE-digit indices ("%04u" prints 10000 as
+         * five characters), and narrowing the check to four digits made every
+         * such member a user file -- measured on a 21,356-member ext4 guest,
+         * where `rm container` left 11,356 members behind.
+         *
+         * The cost is this pair: `mbr000` (three digits) is never minted, yet it
+         * matches the shape, so `rm n` takes it. That is the same ACCEPTED
+         * RESIDUAL as `n!part0` above -- a rule that spared three digits would
+         * have to spare five, which is the regression bf54544 fixed. Pinned
+         * here so the trade stays visible. */
+        "n!mbr000", "n!mbr00000",
     };
     size_t i;
 
