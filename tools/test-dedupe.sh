@@ -308,7 +308,7 @@ echo "all $(echo "$TFILES" | wc -w) files bit-exact"
 if is_meta "$IMGT"; then
     echo ": no TEXT class line (generic ZSTD), skipping stats check"
 else
-    $B/invf-stats "$IMGT" | grep "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }
+    $B/invf-stats "$IMGT" | grep "text batch" || { echo "FAIL: no TEXT stats line"; exit 1; }
 fi
 $B/invf-verify "$IMGT" --deep | tail -1
 

@@ -40,7 +40,13 @@ fsck_clean() {
     # greps then run against a herestring (a re-readable temp file).
     body=$(cat "$log" 2>/dev/null) || return 1
     [ -n "$body" ] || return 1
-    if grep -q "format:       v0" <<<"$body"; then
+    # The metadata-tree family reports itself as `format:       v1
+    # (metadata base tree)`; older builds printed v0 for the same family. Match
+    # the FAMILY, not one spelling of it -- a gate pinned to "v0" fell through
+    # to the v2 branch (which waits for `orphans:`/`missing:` lines this format
+    # never prints) and reported "not clean" on every v1 volume, so every e2e
+    # suite using this gate died at its fsck step.
+    if grep -qE "format: +v[01]" <<<"$body"; then
         grep -q "bad pages:    0" <<<"$body" &&
         grep -q "cycles/shared: 0" <<<"$body" &&
         grep -q "nlink/fan-in:  ok" <<<"$body" &&

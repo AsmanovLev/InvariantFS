@@ -94,8 +94,8 @@ grep -qE ' 0 corrupt,' "$WORK/verify1.log" || { echo "FAIL: corrupt files"; exit
 
 # text-zone accounting shows up in stats while members are live
 if [ -x $B/invf-stats ]; then
-    $B/invf-stats "$IMG" | grep -q "TEXT  :" || { echo "FAIL: no TEXT stats line"; exit 1; }
-    $B/invf-stats "$IMG" | grep "TEXT  :"
+    $B/invf-stats "$IMG" | grep -q "text batch" || { echo "FAIL: no TEXT stats line"; exit 1; }
+    $B/invf-stats "$IMG" | grep "text batch"
 fi
 
 echo "== cat bit-exact =="
