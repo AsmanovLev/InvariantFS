@@ -125,12 +125,29 @@ int vol_fsck_scan_ex(invfs_volume *v, invfs_fsck_report *rep, int fix,
      * a harmless underestimate: it reads as "this volume is empty", and a
      * `-f` run is one keystroke away.
      *
-     * Fold first. It is what a mount would eventually do, it is cheap offline,
-     * and it makes the report describe the VOLUME instead of one of its tiers.
+     * Fold first, but NOT while a save point is live. `vol_fold` is a
+     * MUTATION: it publishes a new base root, resets the log and frees the
+     * captured head segment. SPT0 pins {base_root, delta_end}, so folding
+     * under a live window destroys the generation `invf-rollback` must
+     * restore. In a report-only `invf-fsck` that loss is silent: the sweep's
+     * "fold: not triggered" line speaks about the threshold-gated
+     * `vol_fold_request`, not this unconditional call. The next write can
+     * then reuse the captured head's pba, so even the restore's chain check
+     * passes and only the data check refuses (or, when the pba stays free,
+     * the chain check refuses first). Both are false "save point is DAMAGED"
+     * verdicts on a volume nobody damaged.
+     *
+     * Skipping the fold here keeps the window intact. The namespace audit
+     * below reads base + delta through the normal read path, so the verdict
+     * still describes the live volume; only the raw `base keys` count stays
+     * a base-only number. A repair is a different case: fsck_repair() drops
+     * a damaged save point explicitly and folds the delta back in itself.
+     * Genuine unsafe states are still refused by spt0_restore()'s tree,
+     * chain, identity and allocation checks -- nothing there is relaxed.
      */
     if (vol_delta_count(v) == 0)
         (void)vol_delta_mount(v);          /* replay: count() reads the index */
-    if (vol_delta_count(v) > 0)
+    if (vol_delta_count(v) > 0 && !v->savepoint_live)
         (void)vol_fold(v);
 
     return fsck_scan(v, rep, fix, discard_reachable);
