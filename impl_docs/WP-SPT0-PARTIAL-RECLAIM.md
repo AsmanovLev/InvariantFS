@@ -91,3 +91,30 @@
 диапазона — непрерывный прогон `old_map` от головы (прошлый захват видел здоровый
 экстент целиком), но он обязан быть персистирован и провалидирован, а не
 реконструирован эвристикой.
+
+---
+
+## Побочная находка: `invf-rollback` отказывается на свежем save point (ПРЕДСУЩЕСТВУЕТ)
+
+Воспроизведение (без FUSE):
+```
+invf-mkfs v.img 1 → invf-import v.img src ×2 → invf-sweep v.img → invf-fsck v.img → invf-rollback v.img
+invf-spt0: refusing to roll back: the delta log the save point captured is gone
+           (a fold reset it; the pinned rows are not in the pinned base root)
+```
+Но **fold не запускался** — в логе свипа:
+```
+fold: not triggered (2 records, 0 MiB; triggers 262144 / 64 MiB)
+[spt0] save point: pinned 52 blocks (4 segments, 0 already damaged) in 9 blocks at pba 62300
+save point captured (base_root=62299 delta_end=737)
+```
+То есть диагностика «a fold reset it» **ложная**: restore-проверка отвергает только что
+поставленный save point по причине, которой не было. Следствие: `invf-rollback` (undo
+последнего свипа) не работает даже в чистом сценарии, и тест
+`no_ckp0_surface_test` (щель в шарде 4) валится именно на этом прогоне — три его
+остальных LEG'а зелёные.
+
+Бисекция: на коммите `74cab2b` (до правок сессии 18 ноября: reclaim-drain, batch-hint,
+punch-hole) поведение ИДЕНТИЧНО. Значит это не регрессия, а предсуществующий дефект
+restore-пути SPT0, и его надо чинить как отдельную задачу — вместе с частичным
+reclaim, потому что обе живут в одном месте (`spt0_pin_take` / restore-проверка).
