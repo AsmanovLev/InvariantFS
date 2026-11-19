@@ -556,6 +556,12 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
                       bt_val val, uint64_t gen, bt_up *out)
 {
     uint8_t buf[INVFS_BLOCK_SIZE];
+    /* Separator keys installed by the internal-page splice below stay in
+     * these buffers in `e[]` all the way to the fall-through split and its
+     * bt_write(). They must therefore live for the whole function, not just
+     * the splice block: a block-scoped buffer dies before bt_write() copies
+     * the keys into the new page, which is a stack-use-after-scope. */
+    uint8_t rkbuf[INVFS_BLOCK_SIZE], mkbuf[INVFS_BLOCK_SIZE];
     bt_ent *e = (bt_ent *)malloc(sizeof(bt_ent) * BT_MAX_ENTRIES);
     int n, level, g;
     int cut[2];
@@ -623,7 +629,6 @@ static int bt_ins_rec(invfs_volume *v, invfs_blkptr node, bt_key key,
             /* cu.nptr is 2 or 3: splice in (nptr - 1) separators at i+1..,
              * each keyed by the FIRST key of the piece it introduces. The
              * leftmost piece stays in record i. */
-            uint8_t rkbuf[INVFS_BLOCK_SIZE], mkbuf[INVFS_BLOCK_SIZE];
             bt_key rk;
             bt_key mk = { NULL, 0 };
             int j, add = cu.nptr - 1;
