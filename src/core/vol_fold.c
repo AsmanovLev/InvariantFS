@@ -166,7 +166,7 @@ typedef struct {
     uint8_t  *val;      /* NULL for a delete record */
     uint16_t  vlen;
     uint16_t  flags;
-    uint32_t  seq;      /* порядок сбора: тай-брейк сортировки */
+    uint32_t  seq;      /* collection order: sort tie-break */
 } fold_ent;
 
 typedef struct {
@@ -240,7 +240,7 @@ static int fold_collect_cb(void *ctx_, const uint8_t *key, uint16_t klen,
     }
     e = &l->ent[l->n];
     memset(e, 0, sizeof *e);
-    e->seq = (uint32_t)l->n;             /* порядок прихода записи */
+    e->seq = (uint32_t)l->n;             /* record arrival order */
     e->key = (uint8_t *)malloc(klen ? klen : 1);
     if (!e->key) {
         l->oom = 1;

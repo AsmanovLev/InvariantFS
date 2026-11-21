@@ -1,134 +1,134 @@
-# WP-BATCH-FOLD: fold как пакетное слияние + bulk-запись дерева
+# WP-BATCH-FOLD: fold as batched merge + bulk tree write
 
-## Измеренная проблема
+## Measured problem
 
-Стенд: дельта **1 787 659 записей**, монтирование 81 с из которых **78.6 с — replay**.
-`invf-fsck -f` (он же делает fold) шёл **более часа** и не завершился.
+Stand: delta **1 787 659 records**, mount 81 s of which **78.6 s — replay**.
+`invf-fsck -f` (which also does fold) ran for **more than an hour** and did not finish.
 
-## Почему
+## Why
 
-Сейчас `vol_fold` делает:
-
-```
-для каждой из 1.79M записей: bt_ins(...)      /* COW-вставка */
-```
-
-Каждая вставка копирует путь из ~3-4 страниц → **~7 млн выделений страниц**,
-каждое с учётом в аллокаторе и reclaim, плюс (без `INVFS_MIRROR_DEFER`)
-синхронная запись на HDD. Отсюда часы.
-
-Это не «агрессивность», а неправильная форма работы: дерево, которое в памяти
-занимает десятки мегабайт, перестраивается миллионами точечных вставок.
-
-## Как надо
-
-**Потоковое слияние, каждая страница пишется один раз.**
-
-1. **База — с диска, не в ОЗУ.** Листья base-tree уже отсортированы на диске;
-   их можно читать последовательно как поток. ОЗУ не нужно вообще.
-2. **Дельта — из ОЗУ.** Её размер ограничен триггерами fold
-   (`64 MiB` / `262144` записи), то есть в норме она мала. Сортировка уже
-   есть (`fold_sort`).
-3. **Слияние на лету**: два отсортированных потока (база, дельта), last-wins
-   по `seq` для совпадающих ключей. Результат сразу уходит в листья.
-4. **Запись снизу вверх**: заполненные листья пишутся по мере готовности,
-   родительские уровни собираются в памяти (только текущий путь —
-   O(глубина × страница)), каждая страница записывается **ровно один раз**.
-5. Цена: `N / записей-на-страницу` записей вместо `N × 3-4` COW-копий.
-
-## Атомарность публикации (правило, не деталь)
+Currently `vol_fold` does:
 
 ```
-1. записать все страницы нового дерева
-2. опубликовать новый base-root (слот RT30, seq+1) + барьер
-3. только теперь сбросить дельту (RT30: delta_pba = 0) + барьер
+for each of 1.79M records: bt_ins(...)      /* COW insert */
 ```
 
-Порядок обязателен. Падение между 2 и 3 оставляет дельту на месте, а базу уже
-свёрнутой: следующий mount применит записи **повторно**, и это безопасно —
-записи абсолютные (last-wins по `seq`), повтор идемпотентен.
+Each insert copies a path of ~3-4 pages → **~7 million page allocations**,
+each accounted for in the allocator and reclaim, plus (without `INVFS_MIRROR_DEFER`)
+a synchronous write to HDD. Hence the hours.
 
-Обратный порядок (сначала сбросить дельту) при падении = **потеря данных**,
-ровно как «блоки раньше строки» в `vol_unlink`.
+This is not "aggressiveness" but the wrong approach: a tree that occupies
+tens of megabytes in memory is rebuilt with millions of point inserts.
 
-## Когда не влезает
+## How it should work
 
-Правило простое, как в LSM:
+**Streaming merge, each page written exactly once.**
 
-- сортировка дельты влезает в бюджет → в ОЗУ (обычный случай);
-- не влезает → пролить sorted runs на диск и слить k-way.
+1. **Base from disk, not RAM.** Base-tree leaves are already sorted on disk;
+   they can be read sequentially as a stream. No RAM is needed at all.
+2. **Delta from RAM.** Its size is bounded by the fold triggers
+   (`64 MiB` / `262144` records), so normally it is small. The sort already
+   exists (`fold_sort`).
+3. **On-the-fly merge**: two sorted streams (base, delta), last-wins
+   by `seq` for matching keys. The result goes straight to the leaves.
+4. **Bottom-up write**: filled leaves are written as soon as they are ready,
+   parent levels are built in memory (only the current path —
+   O(depth × page)), and each page is written **exactly once**.
+5. Cost: `N / records-per-page` writes instead of `N × 3-4` COW copies.
 
-База в ОЗУ не попадает **никогда** — она читается с диска потоком.
+## Atomicity of publish (a rule, not a detail)
 
-## Тесты, которые это принимают
+```
+1. write all pages of the new tree
+2. publish the new base-root (RT30 slot, seq+1) + barrier
+3. only now drop the delta (RT30: delta_pba = 0) + barrier
+```
 
-1. Малый том: старый fold и bulk-fold дают **логически идентичную** базу
-   (сравнивать не байты — gen/checksum различаются, — а `invf-ls` + `fsck`)
-   и одинаковый результат `vol_count_free`.
-2. Тот же A/B на томе с дельтой, пересекающей границу страницы листа.
-3. Обрыв между (2) и (3): после «краха» mount видит записи в дельте И в базе
-   и fold повторяется без потерь (идемпотентность).
-4. Замер: 1.79M записей, время fold и число записей страниц — ожидание
-   «секунды–минуты» вместо «часы».
+The order is mandatory. A crash between 2 and 3 leaves the delta in place with the base
+already folded: the next mount will apply the records **again**, and this is safe —
+records are absolute (last-wins by `seq`), so the repeat is idempotent.
 
-## Почему это важнее остального в очереди
+The reverse order (drop the delta first) on a crash = **data loss**,
+exactly like "blocks before the row" in `vol_unlink`.
 
-Без этого любой большой fold — лотерея по времени: fold на монтировании
-(см. `vol_close`, cap 400k) не может быть безопасным, пока его длительность
-непредсказуема. Плюс именно fold съедает 78 из 81 секунды монтирования.
+## When it doesn't fit
 
-## Реализовано и измерено (локально)
+The rule is simple, as in LSM:
 
-`btree_bulk_new/add/finish` в `vol_btree.c` (формат страниц остаётся внутри
-модуля), `fold_bulk_complete()` в `vol_fold.c`, гейт `INVFS_FOLD_BULK=1`.
-Порядок публикации тот же, что у инкрементального пути: bitmap → barrier →
-verify → `mbuf_root_publish` → **потом** сброс дельты под `g_delta_lock`.
+- delta sort fits in the budget → in RAM (the usual case);
+- it doesn't fit → spill sorted runs to disk and merge k-way.
 
-| проверка | результат |
+The base never goes into RAM** — it is streamed from disk.
+
+## Tests that accept this
+
+1. Small volume: old fold and bulk-fold produce a **logically identical** base
+   (compare not bytes — gen/checksum differ — but `invf-ls` + `fsck`)
+   and the same `vol_count_free` result.
+2. The same A/B on a volume with a delta crossing a leaf-page boundary.
+3. Cut between (2) and (3): after the "crash" mount sees records in the delta AND in the base
+   and fold repeats without loss (idempotency).
+4. Measurement: 1.79M records, fold time and page-write count — expectation
+   "seconds–minutes" instead of "hours".
+
+## Why this matters more than the rest of the queue
+
+Without this, any large fold is a timing lottery: fold on mount
+(see `vol_close`, cap 400k) cannot be safe while its duration
+is unpredictable. Plus fold alone eats 78 of the 81 seconds of mount time.
+
+## Implemented and measured (locally)
+
+`btree_bulk_new/add/finish` in `vol_btree.c` (the page format stays inside
+the module), `fold_bulk_complete()` in `vol_fold.c`, gate `INVFS_FOLD_BULK=1`.
+The publish order is the same as in the incremental path: bitmap → barrier →
+verify → `mbuf_root_publish` → **then** delta drop under `g_delta_lock`.
+
+| check | result |
 |---|---|
-| 60 файлов: список + md5 содержимого, A/B | совпадает |
-| `fold_test scenario` (update, delete inode, delete dirent, add) | 38/38 в обоих путях |
-| `fold_test crash-verify` (обрыв между publish и сбросом дельты) | 5/5 PASS под bulk |
-| 4000 файлов / 8006 записей | bulk **0.88 с** vs инкремент **3.36 с** |
-| 20000 файлов / 40000 записей | bulk **5.98 с** vs инкремент **20.98 с** |
-| повторный fold | «bulk path» не печатается: дельта пуста |
-| два bulk-fold подряд + импорт между ними | 4000/4000 имён |
-| 40 файлов с именами по 200+ байт | 40/40, точечный поиск работает |
+| 60 files: listing + md5 of contents, A/B | matches |
+| `fold_test scenario` (update, delete inode, delete dirent, add) | 38/38 in both paths |
+| `fold_test crash-verify` (cut between publish and delta drop) | 5/5 PASS under bulk |
+| 4000 files / 8006 records | bulk **0.88 s** vs incremental **3.36 s** |
+| 20000 files / 40000 records | bulk **5.98 s** vs incremental **20.98 s** |
+| repeated fold | "bulk path" is not printed: delta is empty |
+| two bulk-folds in a row + import between them | 4000/4000 names |
+| 40 files with 200+-byte names | 40/40, point lookup works |
 
-### Найденное ограничение тестов, не билдера
+### Test limitation found, not a builder limitation
 
-1. `btree_repair_test`, фаза с длинными именами, требовала `>= 4` листьев.
-   Это кодировало плотность упаковки инкрементального COW-пути, а не нужду
-   фазы (нужен средний лист: левый сосед для >200-байтного разделителя и
-   правый). Bulk пакует до заполнения и на этом корпусе даёт ровно 3 листа,
-   что законно. Порог исправлен на `>= 3`.
-2. Тот же тест в фазе repair решает «файл обязан резолвиться» по
-   `in_quarantine(inode_id)`, то есть предполагает, что inode-строка и
-   dirent-строка файла лежат на одной странице. Инкрементальный путь
-   (вставка inode, затем dirent, сплит пополам) случайно это выполняет;
-   плотная упаковка — нет, и один torn-лист уносит dirent-строки файлов с
-   живыми inode-строками. Дерево при этом корректно (структурно валидно,
-   «kept every readable key», «exactly the named files dropped», «every row
-   accounted for» — проходят).
-   Правильное исправление — сверять с карантином **ключ dirent**
-   (`parent || len || name`), а не inode id; это отдельная мелкая задача.
+1. `btree_repair_test`, the long-name phase, required `>= 4` leaves.
+   This encoded the packing density of the incremental COW path rather than the need
+   of the phase (a middle leaf is needed: a left neighbor for the >200-byte separator and
+   a right one). Bulk packs to fullness and yields exactly 3 leaves on this corpus,
+   which is legal. The threshold was fixed to `>= 3`.
+2. The same test in the repair phase decides "the file must resolve" based on
+   `in_quarantine(inode_id)`, i.e. it assumes that the inode row and
+   the dirent row of a file lie on the same page. The incremental path
+   (insert inode, then dirent, split in half) happens to satisfy this;
+   dense packing does not, and one torn leaf takes away the dirent rows of files with
+   live inode rows. The tree is still correct (structurally valid,
+   "kept every readable key", "exactly the named files dropped", "every row
+   accounted for" — all pass).
+   The proper fix is to check the **dirent key** against quarantine
+   (`parent || len || name`), not the inode id; that is a separate small task.
 
-### Что это значит для стенда
+### What this means for the stand
 
-1.79M записей: экстраполяция по 40k (bulk 5.98 с) — минуты, а не часы, и
-время предсказуемо (линейно по N, без N·глубина).
+1.79M records: extrapolation from 40k (bulk 5.98 s) — minutes, not hours, and
+the time is predictable (linear in N, without N·depth).
 
-### Второе ограничение той же фазы (задача на потом)
+### Second limitation of the same phase (task for later)
 
-Под плотной упаковкой `scan_rec` выбирает лист с именованными строками,
-который оказывается **последним** в дереве. `fill_vhi` тогда даёт ему
-неограниченный верх, карантин накрывает весь остаток ключевого пространства,
-и ремонт законно сносит весь namespace — после чего чек «repair dropped
-exactly the damaged subtree» падает, хотя дерево корректно.
+Under dense packing, `scan_rec` selects a leaf with named rows,
+which turns out to be **last** in the tree. `fill_vhi` then gives it
+an unbounded upper bound, quarantine covers the rest of the key space,
+and repair legitimately drops the whole namespace — after which the check "repair dropped
+exactly the damaged subtree" fails, even though the tree is correct.
 
-Починка требует переделки модели фазы, а не одной строки: выбирать жертву
-строго с правым соседом (и падать с внятным сообщением, если такого листа
-нет), а ожидания по потерям считать от карантина, а не от id.
+The fix requires reworking the phase model, not a one-line change: choose a victim
+strictly with a right neighbor (and fail with a clear message if no such leaf
+exists), and compute expected losses from quarantine, not from ids.
 
-Пока это не сделано: `make test` (bulk выключен) зелёный, как и раньше;
-`INVFS_FOLD_BULK=1 make test` падает ровно на этом чеке.
+Until this is done: `make test` (bulk disabled) is green as before;
+`INVFS_FOLD_BULK=1 make test` fails exactly on that check.

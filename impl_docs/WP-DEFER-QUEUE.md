@@ -1,178 +1,178 @@
-# WP-DEFER: одна очередь отложенных работ вместо пяти
+# WP-DEFER: one deferred-work queue instead of five
 
-> **ПОПРАВКА 2 (измерено на стенде — это первопричина, читать первым).**
+> **CORRECTION 2 (measured on the stand — this is the root cause, read first).**
 >
-> Один unlink пустого файла на стенде: wall **906 мс**, демон CPU 1080 мс,
-> блок-I/O записи **127 076 KiB = 124 МиБ**.
+> A single unlink of an empty file on the stand: wall **906 ms**, daemon CPU 1080 ms,
+> block-I/O writes **127 076 KiB = 124 MiB**.
 >
-> Битмап тома = 500 695 040 бит / 8 = **62.6 МБ**, зеркалится на два устройства
-> -> 124 МиБ. Значит на КАЖДУЮ операцию пишется весь битмап.
+> Volume bitmap = 500 695 040 bits / 8 = **62.6 MB**, mirrored onto two devices
+> -> 124 MiB. So the entire bitmap is written on EVERY operation.
 >
-> Причина: грязное отслеживание -- ОДИН непрерывный диапазон байт
+> Cause: dirty tracking -- ONE contiguous byte range
 > (`bm_lo`/`bm_hi`, volume_internal.h:1179): `if (byte < bm_lo) bm_lo = byte;
-> if (byte+1 > bm_hi) bm_hi = byte+1;`. На томе в 500 млн блоков два
-> освобождённых блока в разных местах дают диапазон на ВЕСЬ битмап. Склейка
-> есть только внутри одного байта.
+> if (byte+1 > bm_hi) bm_hi = byte+1;`. On a 500-million-block volume, two
+> freed blocks in different places give a range over the WHOLE bitmap. Coalescing
+> happens only within a single byte.
 >
-> Отсюда: 906 мс на unlink, часы на `rm -rf` 160k файлов, rsync с нулевым
-> блочным I/O. Это не латентность HDD, это объём записи (write amplification
+> Hence: 906 ms per unlink, hours for `rm -rf` of 160k files, rsync with zero
+> block I/O. This is not HDD latency, it is write volume (write amplification
 > ~30 000x).
 >
-> Правильная структура -- БИТОВАЯ КАРТА ГРЯЗНЫХ СТРАНИЦ, а не диапазон:
-> 15 300 страниц на весь том = 2 КБ бит; flush пишет только грязные страницы
-> в порядке LBA. Это и есть слайс `DFR_PAGE` из плана ниже -- он НЕ сделан.
+> The right structure -- a BITMAP OF DIRTY PAGES, not a range:
+> 15 300 pages for the whole volume = 2 KB of bits; flush writes only dirty pages
+> in LBA order. This is the `DFR_PAGE` slice of the plan below -- it has NOT been done.
 
-> **ПОПРАВКА (после чтения кода и замеров фаз — читать до всего остального).**
+> **CORRECTION (after reading the code and phase measurements — read before everything else).**
 >
-> Предпосылка ниже («пишем страницу битмапа на каждый свободный блок») **неверна**:
+> The premise below ("we write a bitmap page for every free block") is **wrong**:
 >
-> - `vol_bm_dirty` (volume_internal.h:1179) только расширяет диапазон байт
->   `bm_lo`/`bm_hi` в RAM — I/O там нет вовсе, а flush пишет ОДИН непрерывный
->   срез, то есть склейка уже есть;
-> - `vol_free_blocks` (volume.c:3428) = `spt0_block_pinned` (проверка пина в RAM)
->   + `vol_free_run` (сброс битов в RAM);
-> - замер фаз локально: **`probe+retire` = 0.00 мс**, то есть путь освобождения
->   при unlink не стоит ничего.
+> - `vol_bm_dirty` (volume_internal.h:1179) only extends the `bm_lo`/`bm_hi` byte
+>   range in RAM — there is no I/O there at all, and flush writes ONE contiguous
+>   slice, i.e. coalescing already exists;
+> - `vol_free_blocks` (volume.c:3428) = `spt0_block_pinned` (pin check in RAM)
+>   + `vol_free_run` (bit clearing in RAM);
+> - local phase measurement: **`probe+retire` = 0.00 ms**, i.e. the free path
+>   during unlink costs nothing.
 >
-> Значит слайс «free + page» не даст измеренного выигрыша, и делать его первым
-> не нужно. Реальная фаза с ненулевым временем у пустого файла — **`hold+delta`**
-> (`vol_pba_ref_hold` + `pba_ref_ensure`), и именно она единственная
-> присутствует в unlink и отсутствует в create (create 0.8 мс, delete 48 мс на
-> стенде). Это стоимость ПОДДЕРЖАНИЯ КАРТЫ ССЫЛОК НА ОПЕРАЦИЮ, а не запись
-> битмапа.
+> So the "free + page" slice will not give a measurable win, and there is no need
+> to do it first. The real nonzero-time phase for an empty file is **`hold+delta`**
+> (`vol_pba_ref_hold` + `pba_ref_ensure`), and it is the only one
+> present in unlink and absent in create (create 0.8 ms, delete 48 ms on the
+> stand). This is the cost of MAINTAINING THE REFERENCE MAP PER OPERATION, not writing
+> the bitmap.
 >
-> Пересмотренная нарезка:
+> Revised breakdown:
 >
-> 0. Замерить `vol_pba_ref_hold` / `pba_ref_ensure` по отдельности на стенде
->    (та же `[tl]`-разметка, один дополнительный маркер).
-> 1. Если подтвердится — предметом очереди становится **обслуживание
->    pba-карты**: hold/release на операцию заменить на отложенное применение на
->    fence (это и есть батчинг, только payload другой).
-> 2. `DFR_PAGE` / `DFR_FREE` — из плана убрать: они уже сделаны в коде.
+> 0. Measure `vol_pba_ref_hold` / `pba_ref_ensure` separately on the stand
+>    (the same `[tl]` marking, one extra marker).
+> 1. If confirmed, the queue's subject becomes **servicing
+>    the pba map**: replace per-operation hold/release with deferred application at
+>    a fence (this is batching, just with a different payload).
+> 2. `DFR_PAGE` / `DFR_FREE` — remove from the plan: they are already implemented in the code.
 >
 
-## Зачем
+## Why
 
-Сейчас в движке пять независимых механизмов «отложить, сгруппировать, применить
-на барьере», и у каждого своя политика, своя точка применения и свои гарантии:
+The engine currently has five independent "defer, group, apply at a barrier" mechanisms,
+each with its own policy, application point, and guarantees:
 
-| # | механизм | где | что откладывает |
+| # | mechanism | where | what it defers |
 |---|---|---|---|
-| 1 | group commit | `vol_write.c` (staged set + `vmux_barrier`) | записи дельты и данных сессии |
-| 2 | staged/doom | `dl_staged_keep` / `dl_doom_locked` | судьбу стейджа при сбое барьера |
-| 3 | reclaim | `vol_reclaim_drain`, `vol_reclaim_bump_epoch` | освобождение блоков |
-| 4 | fold | `vol_fold_request`, `g_fold_gate` | свёртку дельты в базу |
-| 5 | битмап | `vol_bm_dirty` на каждый блок | запись страниц карты |
+| 1 | group commit | `vol_write.c` (staged set + `vmux_barrier`) | delta and session data writes |
+| 2 | staged/doom | `dl_staged_keep` / `dl_doom_locked` | staging fate on barrier failure |
+| 3 | reclaim | `vol_reclaim_drain`, `vol_reclaim_bump_epoch` | block freeing |
+| 4 | fold | `vol_fold_request`, `g_fold_gate` | folding the delta into the base |
+| 5 | bitmap | `vol_bm_dirty` on every block | map page writes |
 
-Цена видна на замерах: удаление файла на стенде — **48 мс/оп** (1-2 случайных
-обращения к HDD при p50 16.7 мс), при этом **вся карта свободного места тома —
-≈ 61 МиБ, а dev0 — 3.4 МиБ**, то есть все эти страницы уже в памяти. Мы пишем
-их на каждое касание вместо «раз на барьер, по порядку».
+The cost is visible in the measurements: file deletion on the stand — **48 ms/op** (1-2 random
+HDD accesses at p50 16.7 ms), while **the whole volume free-space map is
+≈ 61 MiB, and dev0 is 3.4 MiB**, i.e. all these pages are already in memory. We write
+them on every touch instead of "once per barrier, in order".
 
-Механизм 5 — самый дорогой и самый ненужный в текущем виде.
+Mechanism 5 is the most expensive and the most unnecessary in its current form.
 
-## Модель
+## Model
 
-Одна очередь, один владелец, одна политика применения.
+One queue, one owner, one application policy.
 
 ```
-vol_defer_post(v, kind, key, arg)   -- продюсер, никогда не блокирует I/O
-vol_defer_apply(v, mode)            -- на барьере, mode = SOFT | HARD
+vol_defer_post(v, kind, key, arg)   -- producer, never blocks I/O
+vol_defer_apply(v, mode)            -- at a barrier, mode = SOFT | HARD
 ```
 
-### Виды работ и ключи коалесинга
+### Work kinds and coalescing keys
 
-| kind | ключ | коалесинг | применяется |
+| kind | key | coalescing | applied |
 |---|---|---|---|
-| `DFR_PAGE` | номер битмап/мета-страницы | битовая карта, последняя побеждает | SOFT |
-| `DFR_FREE` | pba + число блоков | массив, дедуп по pba | SOFT |
-| `DFR_RECLAIM` | — | сам пакетный (уже) | SOFT |
-| `DFR_FOLD` | — | флаг, не батч | толькo HARD и тишина |
+| `DFR_PAGE` | bitmap/meta page number | bitmap, last wins | SOFT |
+| `DFR_FREE` | pba + block count | array, dedup by pba | SOFT |
+| `DFR_RECLAIM` | — | itself batched (already) | SOFT |
+| `DFR_FOLD` | — | flag, not a batch | HARD and idle only |
 
-### Порядок применения (жёсткий, не настраивается)
+### Application order (hard-coded, not configurable)
 
 ```
-1. DFR_FREE     (сортировка по индексу битмап-страницы, дедуп)
-2. DFR_PAGE     (проход по грязному множеству в порядке LBA)
+1. DFR_FREE     (sort by bitmap-page index, dedup)
+2. DFR_PAGE     (walk the dirty set in LBA order)
 3. DFR_RECLAIM
-4. DFR_FOLD     (barrier-item: trylock + условие «нет живых писателей»)
+4. DFR_FOLD     (barrier-item: trylock + "no live writers" condition)
 ```
 
-Почему так: освобождения обязаны лечь ДО записи страниц, иначе страница уйдёт
-на диск со свободным блоком, помеченным занятым, и на следующем барьере
-перепишется второй раз. Fold идёт последним, потому что он перестраивает базу,
-к которой остальные три уже применились.
+Why this order: frees must land BEFORE page writes, otherwise a page goes
+to disk with a free block marked occupied, and at the next barrier it is
+rewritten a second time. Fold goes last because it rebuilds the base to which
+the other three have already been applied.
 
-### Политика барьера
+### Barrier policy
 
-- **SOFT** (обычный fence): применить 1-2-3, fold не трогать.
-- **HARD** (закрытие тома, mount-тишина, явный `vol_flush`): то же + fold, если
-  порог перейдён и том тих (`g_open_handles == 0`) или переполнен жёсткий кап.
-- Продюсер **никогда** не ждёт диск: только кладёт в очередь.
-- Очередь ограничена: `DFR_FREE` при переполнении применяется немедленно
-  (сортировка сохраняется), `DFR_PAGE` ограничения не требует — это битовая
-  карта размером ~2 КБ на весь том.
+- **SOFT** (ordinary fence): apply 1-2-3, leave fold alone.
+- **HARD** (volume close, mount idleness, explicit `vol_flush`): same + fold if
+  the threshold is crossed and the volume is idle (`g_open_handles == 0`) or the hard cap is hit.
+- The producer **never** waits for disk: it only enqueues.
+- The queue is bounded: `DFR_FREE` is applied immediately on overflow
+  (sorting is preserved); `DFR_PAGE` needs no bound — it is a bitmap
+  of ~2 KB for the whole volume.
 
-### Взаимодействие с аллокатором (главная ловушка)
+### Interaction with the allocator (the main trap)
 
-Отложенный `DFR_FREE` означает, что блок ещё числится занятым. Значит:
+A deferred `DFR_FREE` means the block is still considered occupied. Therefore:
 
-- аллокатор **не должен** выдать блок, лежащий в очереди на освобождение;
-- либо `vol_alloc_blocks` сначала делает `vol_defer_apply(SOFT)`, если очередь
-  непуста (простое и достаточное правило), либо ведёт `pending_free`-множество
-  и вычитает его. Первое дешевле и труднее сломать.
+- the allocator **must not** hand out a block queued for freeing;
+- either `vol_alloc_blocks` first calls `vol_defer_apply(SOFT)` if the queue
+  is nonempty (a simple and sufficient rule), or it maintains a `pending_free` set
+  and subtracts it. The former is cheaper and harder to break.
 
-## Инварианты (добыты на практике, не из головы)
+## Invariants (learned in practice, not invented)
 
-1. `dl_staged_keep` обязан вызываться **до** `di_put`.
-2. `di_put` перезаписывает слот **без сравнения seq** — параллельная запись в
-   тот же ключ молча теряется. Очередь не должна вносить параллелизм туда, где
-   его не было.
-3. Групповой fence требует учёта `delta_inflight`: иначе fold/doom видит
-   полу-применённый набор.
-4. **Fold не батчится и не параллелится.** Два одновременных fold'а уже
-   развалили том: `fold_pre_root` перетирается, и `fold_reclaim_hook`
-   освобождает страницы, которые первый fold только что опубликовал как живые.
-   Поэтому `DFR_FOLD` — item с trylock, а не элемент пачки.
-5. Освобождение применяется только после барьера, сделавшего удаление строки
-   durable (retire-семантика WP607). Перенос в батч не должен применять раньше.
-6. Порядок «строка уходит, блоки вторыми» неизменен: обратный порядок даёт
-   живую строку, указывающую на свободные блоки.
+1. `dl_staged_keep` must be called **before** `di_put`.
+2. `di_put` overwrites a slot **without comparing seq** — a concurrent write to
+   the same key is silently lost. The queue must not introduce parallelism where
+   there was none.
+3. A group fence requires accounting for `delta_inflight`: otherwise fold/doom sees
+   a half-applied set.
+4. **Fold is not batched and not parallelized.** Two concurrent folds already
+   wrecked a volume: `fold_pre_root` is overwritten, and `fold_reclaim_hook`
+   frees pages that the first fold had just published as live.
+   Therefore `DFR_FOLD` is a trylock item, not a batch member.
+5. Freeing is applied only after the barrier that made the row deletion
+   durable (retire semantics of WP607). Moving it into a batch must not apply it earlier.
+6. The order "row goes first, blocks second" is unchanged: the reverse order yields
+   a live row pointing to free blocks.
 
-## Нарезка внедрения
+## Implementation breakdown
 
-**Слайс 1 — `DFR_FREE` + `DFR_PAGE`** (единственный с измеренным выигрышем).
-`vol_bm_dirty` перестаёт быть «на блок» и становится «поставить бит в множестве»;
-`vol_free_blocks` кладёт в очередь, `vol_alloc_blocks` сливает очередь перед
-выдачей. Ожидание: 48 мс/оп → единицы мс, метрика — «записей страниц на
-операцию» (было ≈ числу освобождённых блоков, станет ≈ 0).
+**Slice 1 — `DFR_FREE` + `DFR_PAGE`** (the only one with a measured win).
+`vol_bm_dirty` stops being "per block" and becomes "set a bit in a set";
+`vol_free_blocks` enqueues, `vol_alloc_blocks` drains the queue before
+allocation. Expectation: 48 ms/op → single-digit ms, metric — "page writes per
+operation" (was ≈ the number of freed blocks, will become ≈ 0).
 
-**Слайс 2 — `DFR_RECLAIM`** переводится на ту же очередь; bump-эпохи остаются,
-но применяются на выходе очереди, а не отдельным проходом.
+**Slice 2 — `DFR_RECLAIM`** moves to the same queue; epoch bumps remain,
+but are applied at queue exit rather than in a separate pass.
 
-**Слайс 3 — `DFR_FOLD`** как barrier-item: trylock + тишина + hard cap.
-Только после того, как слайсы 1-2 поживут.
+**Slice 3 — `DFR_FOLD`** as a barrier-item: trylock + idleness + hard cap.
+Only after slices 1-2 have been live for a while.
 
-## Не-цели
+## Non-goals
 
-- Не трогаем group commit записей (`vol_write.c`): он работает и измерен.
-- Не вводим параллелизм в очередь: владелец один, применение сериализовано.
-- Не делаем «батч fold'а»: fold — эксклюзив, а не пачка.
-- Не меняем раскладку зон и контракт «RAW (dev0) умер -> Shadow (dev1) читается».
+- We do not touch record group commit (`vol_write.c`): it works and is measured.
+- We do not introduce parallelism into the queue: single owner, serialized application.
+- We do not make a "fold batch": fold is exclusive, not a batch.
+- We do not change zone layout or the contract "RAW (dev0) is dead -> Shadow (dev1) is read".
 
-## Метрики, по которым судим
+## Metrics we judge by
 
-1. `unlink`, мс/оп на стенде (сейчас 48) и локально (1.07).
-2. Число записей битмап-страниц на операцию (ожидание: падает в ~100 раз).
-3. `emerge-webrsync`: 160k файлов за 3 ч = 15 файлов/с (сейчас держит HDD).
-4. Отсутствие регрессии: `make test`, fsck CLEAN, mount без fold-в-горячем-пути.
+1. `unlink`, ms/op on the stand (currently 48) and locally (1.07).
+2. Number of bitmap page writes per operation (expectation: drops ~100x).
+3. `emerge-webrsync`: 160k files in 3 h = 15 files/s (currently HDD-bound).
+4. No regressions: `make test`, fsck CLEAN, mount without fold in the hot path.
 
-## Приложение: почему этого мало для полной картины
+## Appendix: why this is not enough for the full picture
 
-Две независимые находки, которые остаются в силе и не лечатся очередью:
+Two independent findings that still stand and are not fixed by the queue:
 
-- `vol_delete_siblings` съедает **87%** времени удаления файла с содержимым
-  локально (0.26-0.31 мс из 0.30-0.38 мс) при **нуле** сиблингов — чистый
-  CPU-налог на каскад lookup'ов; лечится флагом «есть сиблинги».
-- `probe+retire` при unlink стоит 0.00 мс: блоки освобождаются отложенно, так
-  что 48 мс приходят не из нарезки функции, а из того, что делает применение.
+- `vol_delete_siblings` eats **87%** of the time to delete a file with contents
+  locally (0.26-0.31 ms out of 0.30-0.38 ms) with **zero** siblings — a pure
+  CPU tax from cascading lookups; fixed by a "has siblings" flag.
+- `probe+retire` during unlink costs 0.00 ms: blocks are freed lazily, so
+  the 48 ms come not from that function's path but from what the application does.

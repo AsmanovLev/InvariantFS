@@ -1,148 +1,148 @@
-# Инварианты InvariantFS
+# InvariantFS Invariants
 
-Список утверждений, которые обязаны быть верны, и **чем каждое проверяется**.
-Смысл документа: три бага прожили месяцы не потому, что архитектура плохая, а
-потому, что инвариант существовал только в комментарии. Комментарий не падает.
+A list of statements that must hold, and **how each is checked**.
+The point of the document: three bugs lived for months not because the architecture was bad, but
+because the invariant existed only in a comment. A comment does not fail.
 
-Формат записи: `утверждение` → проверка → что печатается при нарушении.
-
----
-
-## I1. Паспорт парности совпадает на обоих устройствах (режим A)
-
-**Утверждение.** После каждого flush `DEVT.sync_seq` на dev0 равен `DEVT.sync_seq`
-на dev1, и оба лежат на диске (не в кэше устройства).
-
-**Проверка.** В рантайме: сразу после записи `vol_write_devt` перечитывает оба
-паспорта и сравнивает (`INVFS_PERF_ADD(PERF_DEVT_WRITES)` рядом).
-
-- печатается: `devt: MISMATCH right after the bump: dev0=N dev1=M (wrote N)`
-- ограничение: 20 сообщений за процесс, дальше одна строка «further
-  mismatches are not logged»
-
-**Почему именно так.** Сертификат, который проверяется только при открытии
-тома, имеет единственный способ сообщить о поломке — скопировать гигабайты.
-Проверка в точке записи говорит правду сразу и стоит два чтения по 188 байт.
-
-**Границы.** Инвариант относится к режиму A. В режиме B паспорта независимы и
-сравнивать их не с чем.
+Entry format: `statement` → check → what is printed on violation.
 
 ---
 
-## I2. Барьер идёт после записи паспорта
+## I1. Pairing Passport Matches on Both Devices (Mode A)
 
-**Утверждение.** Между записью `DEVT` и возвратом из `vol_commit_mirror` есть
+**Statement.** After every flush, `DEVT.sync_seq` on dev0 equals `DEVT.sync_seq`
+on dev1, and both are on disk (not in the device cache).
+
+**Check.** At runtime: immediately after the write, `vol_write_devt` rereads both
+passports and compares them (`INVFS_PERF_ADD(PERF_DEVT_WRITES)` is right there).
+
+- printed: `devt: MISMATCH right after the bump: dev0=N dev1=M (wrote N)`
+- limit: 20 messages per process, then a single line "further
+  mismatches are not logged"
+
+**Why this way.** A certificate that is checked only when the volume is opened
+has only one way to report breakage — copy gigabytes.
+A check at the write point tells the truth immediately and costs two reads of 188 bytes each.
+
+**Scope.** The invariant applies to mode A. In mode B, the passports are independent and
+there is nothing to compare them with.
+
+---
+
+## I2. Barrier Comes After Writing the Passport
+
+**Statement.** Between the write of `DEVT` and the return from `vol_commit_mirror` there is
 `vmux_barrier`.
 
-**Проверка.** Наблюдением: у HDD нет FUA и включён write cache, поэтому без
-барьера `sync_seq` расходится навсегда (наблюдалось 693544/693543, стабильно).
-Автоматической проверки нет — это проверяется кодом и I1.
+**Check.** By observation: HDD has no FUA and write cache is enabled, so without
+the barrier, `sync_seq` diverges forever (observed 693544/693543, consistently).
+There is no automatic check — this is verified by code inspection and I1.
 
 ---
 
-## I3. Запись паспорта не проигрывает ресинку
+## I3. Writing the Passport Does Not Lose to Resync
 
-**Утверждение.** `DEVT` пишется в каждое устройство **напрямую**, а не через
-мультиплексор.
+**Statement.** `DEVT` is written to every device **directly**, not through
+the multiplexer.
 
-**Проверка.** I1 ловит нарушение в момент flush'а, где параллельно идёт
-ресинк (наблюдалось `dev0=697511 dev1=697510` при успешном возврате).
-
----
-
-## I4. Блок 0 не теряет чужие поля
-
-**Утверждение.** Любой писатель блока 0 патчит **своё** поле и не переписывает
-блок из буфера, прочитанного раньше, без пере-сериализации соседей.
-
-**Проверка.** Эталон — `vol_write_rdp0`: читает через мукс, обновляет `DEVT` из
-памяти с пересчётом CRC, пишет целый блок через мукс (то есть в оба
-устройства).
-
-**История.** До правки `vol_write_rdp0` писал блок только в dev0: тень не
-получала `RDP0` вообще, а из старого буфера мог вернуться устаревший `DEVT`.
+**Check.** I1 catches a violation at flush time, where resync runs
+concurrently (observed `dev0=697511 dev1=697510` with a successful return).
 
 ---
 
-## I5. Ресинк не копирует больше, чем занято
+## I4. Block 0 Does Not Lose Other Fields
 
-**Утверждение.** Граница ресинка = наибольший **аллоцированный** блок
-метаданных, а не конец зарезервированной зоны; страницы, совпадающие на обоих
-устройствах, не пишутся.
+**Statement.** Any writer of block 0 patches **its own** field and does not rewrite the
+block from an earlier-read buffer without re-serializing the neighbors.
 
-**Проверка.** Печатается всегда:
+**Check.** Reference implementation — `vol_write_rdp0`: reads through the mux, updates `DEVT` from
+memory with CRC recalculation, writes the whole block through the mux (i.e. to both
+devices).
+
+**History.** Before the fix, `vol_write_rdp0` wrote the block only to dev0: shadow did not
+receive `RDP0` at all, and a stale `DEVT` could return from the old buffer.
+
+---
+
+## I5. Resync Does Not Copy More Than Is Occupied
+
+**Statement.** The resync boundary = the highest **allocated** block of
+metadata, not the end of the reserved zone; pages that match on both
+devices are not written.
+
+**Check.** Always printed:
 ```
 vol: mirror resync: dev1 <- dev0 (N bytes in use of the M reserved; ...)
 vol: mirror resync: X of N bytes already equal, Y written
 ```
-Ожидание: `Y` — единицы мегабайт при расхождении в блок; `N` заметно меньше
-`M`.
+Expected: `Y` is a few megabytes for a one-block mismatch; `N` is noticeably smaller
+than `M`.
 
-**Почему безопасно.** Живая метаданная страница — это аллоцированный блок,
-поэтому выше последнего занятого живого быть не может. Если битмап не загружен —
-откат к полному span'у: медленный ресинк правилен, угадывающий — нет.
-
----
-
-## I6. Данные попадают на тень до того, как метаданные на неё сошлются
-
-**Утверждение.** При `raw_mirror=1` (и при переносе свипом) копия сегмента на
-dev1 записывается **раньше**, чем публикуется рецепт/inode-строка на dev1.
-
-**Проверка.** Наблюдением по порядку в `write_segment_blocks` /
-`vol_sweep` (данные → рецепт → publish → освобождение). Автотеста нет —
-**долг**: нужен crash-тест с обрывом на каждой стадии
-(`INVFS_*_ABORT_AT`, как у fold).
+**Why safe.** A live metadata page is an allocated block,
+so nothing live can exist above the last occupied one. If the bitmap is not loaded —
+fall back to the full span: a slow resync is correct, a guessing one is not.
 
 ---
 
-## I7. Освобождение старого блока — только после публикации
+## I6. Data Reaches Shadow Before Metadata References It
 
-**Утверждение.** При переносе сегмента старый `pba` не освобождается и его
-refcount не трогается, пока `publish` не прошёл.
+**Statement.** With `raw_mirror=1` (and with a sweep migration), the segment's copy on
+dev1 is written **before** the recipe/inode row is published on dev1.
 
-**Проверка.** Комментарий в `vol_sweep.c` описывает транзакцию; поведение
-проверяется краш-тестом (см. I6, долг).
-
----
-
-## I8. Обход namespace не делает повторной работы
-
-**Утверждение.** `walk_dir` не резолвит путь от корня на каждую запись: номер
-inode и тип берутся из листинга каталога.
-
-**Проверка.** `[perf-trace] build_file_table: total=… (walk=…, qsort=…)`.
-Регрессия видна сразу: до правки walk был 103.8 с, после — 20.9 с на 322 888
-файлах.
+**Check.** By observing the order in `write_segment_blocks` /
+`vol_sweep` (data → recipe → publish → free). There is no automated test —
+**debt**: a crash test is needed, aborting at each stage
+(`INVFS_*_ABORT_AT`, as with fold).
 
 ---
 
-## I9. Обход не молчит о неполноте
+## I7. Old Block Is Freed Only After Publishing
 
-**Утверждение.** Обход, который не дошёл до конца, не притворяется полным:
-`vol_walk_result` / `vol_walk_commit` взводят латч, `vol_walk_abandon`
-печатает решение, `build_file_table` помечает таблицу деградировавшей.
+**Statement.** During a segment migration, the old `pba` is not freed and its
+refcount is not touched until `publish` has completed.
 
-**Проверка.** Тесты `walk_status*` и сообщения `invf-fuse: the namespace walk
-did not complete…`.
-
----
-
-## I10. Инварианты не проверяются «на глаз»
-
-**Утверждение.** Каждое утверждение выше либо проверяется рантайм-строкой,
-либо имеет тест, либо явно помечено как долг.
-
-**Проверка.** Этот файл. Если инвариант описан в `CONCEPTS.md`, но здесь его
-нет — он не проверяется.
+**Check.** The comment in `vol_sweep.c` describes the transaction; the behavior
+is checked by a crash test (see I6, debt).
 
 ---
 
-## Инварианты, которых у нас нет, но они были бы полезны
+## I8. Namespace Walk Does No Repeated Work
 
-- проверка, что `RDP0` на обоих устройствах совпадает после flush (после
-  правки I4 должен, но никто не смотрит);
-- проверка, что тень не содержит ссылок на RAW-блоки после sweep (это
-  условие «чистой» потери dev0);
-- проверка, что после seal метаданные тени полны по всем засвипленным файлам
-  (условие читаемости тени в одиночку).
+**Statement.** `walk_dir` does not resolve the path from the root for every entry: the inode
+number and type are taken from the directory listing.
+
+**Check.** `[perf-trace] build_file_table: total=… (walk=…, qsort=…)`.
+A regression is immediately visible: before the fix, walk took 103.8 s, after — 20.9 s on 322,888
+files.
+
+---
+
+## I9. The Walk Does Not Stay Silent About Incompleteness
+
+**Statement.** A walk that did not reach the end does not pretend to be complete:
+`vol_walk_result` / `vol_walk_commit` set the latch, `vol_walk_abandon`
+prints the decision, `build_file_table` marks the table as degraded.
+
+**Check.** The `walk_status*` tests and the `invf-fuse: the namespace walk
+did not complete…` messages.
+
+---
+
+## I10. Invariants Are Not Checked "by Eye"
+
+**Statement.** Every statement above is either checked by a runtime line,
+or has a test, or is explicitly marked as debt.
+
+**Check.** This file. If an invariant is described in `CONCEPTS.md` but is not here,
+it is not checked.
+
+---
+
+## Invariants We Do Not Have but Would Find Useful
+
+- a check that `RDP0` matches on both devices after flush (after
+  the I4 fix it should, but nobody looks);
+- a check that shadow contains no references to RAW blocks after sweep (this is
+  the condition for a "clean" loss of dev0);
+- a check that after seal, shadow metadata is complete for all swept files
+  (the condition for shadow being readable on its own).

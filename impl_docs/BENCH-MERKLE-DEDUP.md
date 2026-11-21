@@ -1,78 +1,78 @@
-# Меркле-дедуп: многоуровневое сопоставление против 64-КиБ-only (замер)
+# Merkle dedupe: multi-level matching versus 64-KiB-only (measurement)
 
-Измерено 2026-11-17 оффлайн, без ФС: чтобы решить, окупается ли дерево хэшей,
-нужны числа, а не рассуждения.
+Measured 2026-11-17 offline, without a filesystem: to decide whether the hash tree pays off,
+we need numbers, not reasoning.
 
-## Методика
+## Methodology
 
-Корпус (всё в `/dev/shm`, выгружено из `small.img` через `ext4fs extract_batch`):
-4 образа ext4 по 256 МиБ, ~64 МБ файлов внутри (2848 файлов):
+Corpus (all in `/dev/shm`, extracted from `small.img` via `ext4fs extract_batch`):
+4 ext4 images of 256 MiB each, ~64 MB of files inside (2848 files):
 
-| образ | что это |
+| image | what it is |
 |---|---|
-| `A.img` | базовый (`mkfs.ext4 -d srcA`) |
-| `B.img` | ТОТ ЖЕ набор файлов, другая геометрия ext4 (`-b 4096 -I 256`) = **сдвиг** метаданных |
-| `C.img` | A + один файл изменён на 2 КиБ + один новый файл |
-| `D.img` | A + 50 файлов изменены по 1 КиБ |
+| `A.img` | base (`mkfs.ext4 -d srcA`) |
+| `B.img` | THE SAME set of files, different ext4 geometry (`-b 4096 -I 256`) = metadata **shift** |
+| `C.img` | A + one file changed by 2 KiB + one new file |
+| `D.img` | A + 50 files changed by 1 KiB each |
 
-Хэширование: листья по 4 КиБ, `blake2b(128 бит)`; узел уровня k =
-`H(ребёнок0 || ребёнок1)`; уровни 4/16/64/256/1024 КиБ. Пул совпадений --
-узлы образа A. (BLAKE3-дерево устроено так же; взял blake2b ради скорости
-эксперимента -- класс хэша тот же.)
+Hashing: leaves of 4 KiB, `blake2b(128 bit)`; node at level k =
+`H(child0 || child1)`; levels 4/16/64/256/1024 KiB. Match pool --
+nodes of image A. (A BLAKE3 tree works the same way; I used blake2b for the sake of
+experiment speed -- the hash class is the same.)
 
-Метрика: доля байт образа, покрытая узлами, чей хэш уже есть в пуле.
+Metric: the fraction of image bytes covered by nodes whose hash is already in the pool.
 
-## Результаты
+## Results
 
 ```
-A vs A (идентичные)                                   4 КиБ 100.0% ... 1 МиБ 100.0%
-A vs B (сдвиг метаданных, те же файлы)
-   4 КиБ  77.9%   16 КиБ 73.7%   64 КиБ 72.8%   256 КиБ 72.0%   1 МиБ 71.5%
-A vs C (1 файл изменён на 2 КиБ + 1 новый)
-   4 КиБ  99.6%   16 КиБ 99.3%   64 КиБ 98.3%   256 КиБ 94.1%   1 МиБ 82.8%
-A vs D (50 файлов изменены по 1 КиБ)
-   4 КиБ  99.6%   16 КиБ 99.2%   64 КиБ 98.0%   256 КиБ 93.9%   1 МиБ 82.8%
+A vs A (identical)                                     4 KiB 100.0% ... 1 MiB 100.0%
+A vs B (metadata shift, same files)
+   4 KiB  77.9%   16 KiB 73.7%   64 KiB 72.8%   256 KiB 72.0%   1 MiB 71.5%
+A vs C (1 file changed by 2 KiB + 1 new)
+   4 KiB  99.6%   16 KiB 99.3%   64 KiB 98.3%   256 KiB 94.1%   1 MiB 82.8%
+A vs D (50 files changed by 1 KiB each)
+   4 KiB  99.6%   16 KiB 99.2%   64 KiB 98.0%   256 KiB 93.9%   1 MiB 82.8%
 ```
 
-## Что это значит для размера
+## What this means for size
 
-Пересчёт в «сколько придётся дописать поверх A» (256 МиБ образ):
+Recalculation into “how much has to be appended on top of A” (256 MiB image):
 
-| политика | A vs C | A vs D | A vs B (сдвиг) |
+| policy | A vs C | A vs D | A vs B (shift) |
 |---|---|---|---|
-| экстенты 1 МиБ | 44.0 МиБ | 44.0 МиБ | 73.0 МиБ |
-| экстенты 64 КиБ | 4.4 МиБ | 5.1 МиБ | 69.6 МиБ |
-| экстенты 4 КиБ | **1.0 МиБ** | 1.1 МиБ | **56.6 МиБ** |
-| динамические (по структуре совпадений) | **~1.0 МиБ** | ~1.1 МиБ | ~56.6 МиБ |
+| 1 MiB extents | 44.0 MiB | 44.0 MiB | 73.0 MiB |
+| 64 KiB extents | 4.4 MiB | 5.1 MiB | 69.6 MiB |
+| 4 KiB extents | **1.0 MiB** | 1.1 MiB | **56.6 MiB** |
+| dynamic (by match structure) | **~1.0 MiB** | ~1.1 MiB | ~56.6 MiB |
 
-Главное: **крошечная правка отравляет весь узел своего размера на всех уровнях
-выше**. Один файл, изменённый на 2 КиБ, при 1-МиБ экстентах заставляет
-перезаписать 44 МиБ, а при 4-КиБ обнаружении -- 1 МиБ. Это 44x разницы на
-одном изменении.
+The key point: **a tiny edit poisons the entire node of its size at all levels
+above**. One file changed by 2 KiB, with 1-MiB extents, forces
+rewriting 44 MiB, while with 4-KiB detection -- 1 MiB. That is a 44x difference on
+a single change.
 
-## Вывод: динамические экстенты + дерево снимают компромисс
+## Conclusion: dynamic extents + tree remove the tradeoff
 
-Раньше мы мерили две противоположные вещи:
-- место/сжатие/округление любят КРУПНЫЕ экстенты (64 КиБ: waste 8.5%,
-  1 МиБ: 0.7%; сжатие 4-КиБ сегментов хуже на 23-32%);
-- дедуп любит МЕЛКИЕ (4 КиБ: 99.6% против 82.8%).
+Previously we measured two opposing things:
+- space/compression/rounding like LARGE extents (64 KiB: waste 8.5%,
+  1 MiB: 0.7%; compression of 4-KiB segments is 23-32% worse);
+- dedupe likes SMALL ones (4 KiB: 99.6% versus 82.8%).
 
-Дерево разделяет эти два решения:
-1. **Сопоставление** идёт по листьям 4 КиБ (и/или по любому уровню) -- дедуп
-   видит мелкие совпадения.
-2. **Хранение** -- только непокрытые прогоны, размер экстента = естественный
-   размер прогона по лестнице (маленькая дырка -> 4 КиБ, сплошной новый регион
-   -> 1 МиБ). Крупные экстенты получают хорошее сжатие и низкое округление,
-   мелкие -- только там, где иначе потеряли бы весь узел.
-3. Компакция сливает/режет экстенты, когда картина совпадений меняется.
+The tree separates these two decisions:
+1. **Matching** runs on 4-KiB leaves (and/or at any level) -- dedupe
+   sees small matches.
+2. **Storage** -- only uncovered runs, with extent size = the natural
+   run size from the ladder (a small hole -> 4 KiB, a solid new region
+   -> 1 MiB). Large extents get good compression and low rounding,
+   small ones -- only where otherwise the whole node would be lost.
+3. Compaction merges/splits extents when the match picture changes.
 
-## Цена
+## Cost
 
-- **Индекс**: 32 Б на 4-КиБ лист = 0.78% логического объёма; уровни 16/64 КиБ
-  выводятся из листьев и хранить их не обязательно. Это дешевле 9%, которые мы
-  теряем на округлении сейчас.
-- **Сдвиг** остаётся слабым местом (A vs B: 77.9% при 4 КиБ). Дерево позволяет
-  его ловить (серия совпавших узлов со смещением = детектор сдвига), но это
-  отдельная работа; CDC на наших корпусах не нужен (замерено ранее).
-- **Инкрементальность**: правка файла = пересчёт изменённых листьев и пути к
-  корню (log n) вместо чтения и хэширования сохранённых байтов, как сейчас.
+- **Index**: 32 B per 4-KiB leaf = 0.78% of logical volume; levels 16/64 KiB
+  are derived from the leaves and need not be stored. This is cheaper than the 9% we
+  lose to rounding now.
+- **Shift** remains a weak spot (A vs B: 77.9% at 4 KiB). The tree makes it
+  possible to catch (a series of matching nodes with an offset = a shift detector), but this
+  is separate work; CDC is not needed on our corpora (measured earlier).
+- **Incrementality**: editing a file = recomputing the changed leaves and the path to
+  the root (log n) instead of reading and hashing the stored bytes, as now.

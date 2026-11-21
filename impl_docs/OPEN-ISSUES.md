@@ -1,208 +1,213 @@
-# Открытые вопросы и измеренные проблемы
+# Open Issues and Measured Problems
 
-> **Активный баг с подробным разбором: `impl_docs/BUG-RECLAIM-UNCLAIMED.md`**
-> (`unclaimed` блоки не возвращаются reclaim'ом — это и есть весь проигрыш по
-> месту против squashfs: 54.9 МиБ против 24 МБ, при живом содержимом 23.4 МиБ).
+> **Active bug with detailed analysis: `impl_docs/BUG-RECLAIM-UNCLAIMED.md`**
+> (`unclaimed` blocks are not reclaimed — this is the entire space deficit
+> against squashfs: 54.9 MiB vs 24 MB, with live content of 23.4 MiB).
 
-**Это не план релиза.** Состав v0.7 заранее неизвестен — изменений ожидается
-много, и записывать «что там будет» смысла нет: к моменту выпуска половина
-поменяется. `CHANGELOG.md` пишется по факту, на выходе.
+**This is not a release plan.** The contents of v0.7 are not known in advance —
+many changes are expected, and there is no point in writing down "what will be
+in it": half of it will change by the time it is released. `CHANGELOG.md` is
+written after the fact, on the way out.
 
-Документ нужен для другого: **не потерять измерения**. Здесь то, что найдено и
-проверено на реальных данных (стенд, 322k файлов, 3M записей дельты, образы
-дистрибутивов), с числами и точной причиной. Каждый пункт — кандидат в работу,
-а не обещание.
+The document serves a different purpose: **not to lose measurements**. It
+contains what was found and verified on real data (stand, 322k files, 3M delta
+records, distribution images), with numbers and the exact cause. Each item is
+a work candidate, not a promise.
 
-Политика формата при этом не меняется: ломаем тихо, миграционного кода не
-пишем (см. `CONCEPTS.md` §9).
+The format policy does not change: break things quietly, do not write
+migration code (see `CONCEPTS.md` §9).
 
 ---
 
-## 1. Что уже сделано (вошло в v0.7 из работы 2026-11-15/16)
+## 1. What has already been done (included in v0.7 from the 2026-11-15/16 work)
 
-| # | коммит | суть |
+| # | commit | summary |
 |---|---|---|
-| 1 | `7376c3b` | fold: `qsort` вместо вставок (O(n²)→O(n log n)); честные сообщения по коду возврата `vol_fold_request`; трассировка отказов |
-| 2 | `32044ed` | mirror: барьер после записи `DEVT` (сертификат стал durable); `vol_write_rdp0` пишет блок 0 через мукс с пересчётом CRC |
-| 3 | `d5359a6` | mirror: ресинк ограничен занятой частью (битмап) + сравнение перед записью (писано 1 МБ вместо 32 ГБ) |
-| 4 | `ec83899` | mirror: `DEVT` пишется напрямую в каждое устройство + самопроверка `devt: MISMATCH` |
-| 5 | `cbe4856` | mount: обход не резолвит путь заново (106 с → 21 с на 322k файлов) |
-| 6 | `1acae70` | mkfs: inode-area от `dev0_blocks` (30 ГиБ → 1.85 ГиБ), `INVFS_META_FILES`, зажим `INVFS_META_FRAC` поднят |
-| 7 | `3fd9ff0` | sweep `--no-compress`: дедуп без перекодирования; не убивает контейнерную декомпозицию |
-| 8 | `3c76be1` | `INVFS_RAW_NO_COMPRESS`; `invfs_profile_zstd_level(TURBO)` = 1 (было 19) |
-| 9 | `d333187`,`7ede024`,`6095578` | docs: `CONCEPTS.md`, `INVARIANTS.md`, решения по sweep; исправлены два врущих комментария |
+| 1 | `7376c3b` | fold: `qsort` instead of insertions (O(n²)→O(n log n)); honest messages by `vol_fold_request` return code; failure tracing |
+| 2 | `32044ed` | mirror: barrier after writing `DEVT` (the certificate became durable); `vol_write_rdp0` writes block 0 through the mutex with CRC recalculation |
+| 3 | `d5359a6` | mirror: resync limited to the occupied part (bitmap) + comparison before writing (1 MB written instead of 32 GB) |
+| 4 | `ec83899` | mirror: `DEVT` is written directly to each device + `devt: MISMATCH` self-check |
+| 5 | `cbe4856` | mount: traversal does not re-resolve the path (106 s → 21 s on 322k files) |
+| 6 | `1acae70` | mkfs: inode-area from `dev0_blocks` (30 GiB → 1.85 GiB), `INVFS_META_FILES`, `INVFS_META_FRAC` clamp raised |
+| 7 | `3fd9ff0` | sweep `--no-compress`: dedupe without re-encoding; does not kill container decomposition |
+| 8 | `3c76be1` | `INVFS_RAW_NO_COMPRESS`; `invfs_profile_zstd_level(TURBO)` = 1 (was 19) |
+| 9 | `d333187`,`7ede024`,`6095578` | docs: `CONCEPTS.md`, `INVARIANTS.md`, sweep decisions; fixed two lying comments |
 
-Проверено на стенде: две загрузки подряд без `dev1 is stale`, `sync_seq` равен,
-`MISMATCH` нет, загрузка 96 с (из них 45 — таймаут GRUB), монтаж ~23 с.
+Verified on the stand: two consecutive boots without `dev1 is stale`, `sync_seq`
+equal, no `MISMATCH`, boot 96 s (45 of them the GRUB timeout), mount ~23 s.
 
 ---
 
-## 2. Изменения формата (ломающие, все в одном бампе)
+## 2. Format changes (breaking, all in one bump)
 
 ### 2.1 `DEVT` v2
 
-- `meta_high_water` — верхняя граница ресинка без опоры на битмап;
-- `shadow_gen` — поколение снимка тени (для режима checkpoint);
-- `INVFS_DEVT_VERSION` = 2. Старые тома читаются как «нет валидного DEVT» →
-  один полный ресинк при первом открытии (приемлемо).
+- `meta_high_water` — upper bound for resync without relying on the bitmap;
+- `shadow_gen` — generation of the shadow snapshot (for checkpoint mode);
+- `INVFS_DEVT_VERSION` = 2. Old volumes are read as "no valid DEVT" →
+  one full resync on first open (acceptable).
 
-### 2.2 Раскладка членов контейнера: `!mbrblob`
+### 2.2 Container member layout: `!mbrblob`
 
-Сейчас: inode на каждого члена (`!mbrNNNN`) — 21 356 членов Debian-образа дают
-21 356 записей в name-индексе, при лимите `CPACK_MAX_MEMBERS = 1 048 576`.
+Currently: one inode per member (`!mbrNNNN`) — 21,356 members of the Debian
+image produce 21,356 entries in the name index, with the limit
+`CPACK_MAX_MEMBERS = 1 048 576`.
 
-План: при числе членов выше порога (`INVFS_CPACK_PACKED_MIN`, по умолчанию 512)
-хранить члены **одним блобом**:
+Plan: when the member count is above the threshold (`INVFS_CPACK_PACKED_MIN`,
+default 512), store the members **as a single blob**:
 
 ```
-<name>            рецепт (BINARY, algo пака)
-<name>!mbrblob    данные членов подряд
-<name>!mbrt       таблица (idx, name, usize)
-<name>!mbrmap     карта (только seekable паки)
+<name>            recipe (BINARY, pack algo)
+<name>!mbrblob    member data back-to-back
+<name>!mbrt       table (idx, name, usize)
+<name>!mbrmap     map (seekable packs only)
 ```
 
-Смещения вычисляются из таблицы (кумулятивно по `idx`), поэтому блоб можно
-писать `pwrite` в любом порядке, а срезы батча не обязаны идти по порядку.
+Offsets are computed from the table (cumulative by `idx`), so the blob can be
+written with `pwrite` in any order, and batch slices need not be consecutive.
 
-Чтение — фазами:
-- **1** — ФС материализует членов из блоба во временный каталог, зовёт `rebuild`
-  (корректно, но N temp-файлов на чтение);
-- **2** — новая команда пака `rebuild_batch <recipe> <blob> <table> <out>`,
-  чтение одним вызовом без temp-файлов.
+Reading — in phases:
+- **1** — the filesystem materializes the members from the blob into a
+  temporary directory and calls `rebuild` (correct, but N temp files per read);
+- **2** — new pack command `rebuild_batch <recipe> <blob> <table> <out>`,
+  reading in one call without temp files.
 
-### 2.3 Тривиальный рецепт и inline-данные (мелкие файлы)
+### 2.3 Trivial recipe and inline data (small files)
 
-- ступень 1: одиночный экстент → `recipe` = (pba, len), `recipe_addr` = сигнальный
-  ноль + флаг; экономия ~8.4 КБ из 12.7 КБ и почти весь CPU;
-- ступень 2: данные ≤ ~1.5 КБ внутрь строки inode (по образцу симлинков,
-  `INVFS_META_SLACK` уже резервирует место); цель ~0.5 КБ/файл.
+- step 1: single extent → `recipe` = (pba, len), `recipe_addr` = sentinel
+  zero + flag; saving ~8.4 KB out of 12.7 KB and almost all the CPU;
+- step 2: data ≤ ~1.5 KB inside the inode row (as with symlinks,
+  `INVFS_META_SLACK` already reserves space); target ~0.5 KB/file.
 
-### 2.4 Политика числа членов
+### 2.4 Member count policy
 
-- `CPACK_MAX_MEMBERS` = 1M формально, но по цене (4–12 КБ метаданных на мелкий
-  член) неадекватен: ввести потолок (например 100k) с явным отказом;
-- батч-срез режется **и по байтам, и по числу** (256 МиБ **или** 4096 членов);
-- под каждый срез — свой подкаталог `<mbr>/b<N>/`, чтобы скретч-каталог никогда
-  не держал больше 4096 записей.
+- `CPACK_MAX_MEMBERS` = 1M nominally, but in cost terms (4–12 KB of metadata
+  per small member) it is inadequate: introduce a cap (e.g. 100k) with an
+  explicit refusal;
+- batch slices are cut **both by bytes and by count** (256 MiB **or** 4096
+  members);
+- each slice gets its own subdirectory `<mbr>/b<N>/` so that the scratch
+  directory never holds more than 4096 entries.
 
 ---
 
-## 3. Корректность
+## 3. Correctness
 
-| # | пункт | статус |
+| # | item | status |
 |---|---|---|
-| 3.1 | Инварианты из `INVARIANTS.md` — оформить как тесты (в первую очередь I1 `DEVT` MISMATCH, I4 блок 0) | план |
-| 3.2 | Чистое выключение: `remount,ro` + flush/close, чтобы `DEVT` не расходился в принципе | план |
-| 3.3 | Рекурсия свипа в одном прогоне (collect→transform цикл с ограничением глубины) | план |
-| 3.4 | Возврат места за **один** свип: SPT0 держит старые блоки до следующего прогона | план |
-| 3.5 | `lazy_reclaim=1` по умолчанию = удаления не возвращают место; либо авто-реклайм, либо громкое предупреждение | решение |
-| 3.6 | `no_ckp0_surface_test` (шард 4) — пре-существующий сбой; починить или задокументировать | долг |
+| 3.1 | Invariants from `INVARIANTS.md` — turn into tests (first of all I1 `DEVT` MISMATCH, I4 block 0) | plan |
+| 3.2 | Clean shutdown: `remount,ro` + flush/close so that `DEVT` cannot diverge at all | plan |
+| 3.3 | Sweep recursion in a single run (collect→transform loop with depth limit) | plan |
+| 3.4 | Space reclaimed in **one** sweep: SPT0 holds old blocks until the next run | plan |
+| 3.5 | `lazy_reclaim=1` by default = deletions do not reclaim space; either auto-reclaim or a loud warning | decision |
+| 3.6 | `no_ckp0_surface_test` (shard 4) — pre-existing failure; fix or document | debt |
 
 ---
 
-## 4. Производительность (измерено → цель)
+## 4. Performance (measured → target)
 
-| метрика | сейчас | цель v0.7 |
+| metric | now | v0.7 target |
 |---|---|---|
-| монтаж, `build_file_table` (322k файлов) | 21 с | ≤ 8 с (параллельный обход) |
-| `vol_open` (дельта 0) | 1.5 с | 1.5 с |
-| fold 3M записей (bulk) | минуты | минуты (не регрессировать) |
-| ресинк при расхождении | 1 МБ записи, 21 ГБ чтения | high-water в `DEVT` → ~2 ГБ чтения |
-| мелкий файл | 12.7 КБ, ~16 мс | 4.3 КБ (ступень 1), 0.5 КБ (ступень 2) |
-| `fold_collect_cb` | pread на запись | два прохода: собрать ссылки, потом последовательный скан |
-| контейнерная лейна | 21 356 членов = 62 мин; RSS 5.4 ГБ на разделе 3 ГБ | `extract_batch` (≈2–4 мин) + потоковое чтение вместо whole-file |
-| загрузка до ssh | 96 с (45 — таймаут GRUB) | ~55 с (таймаут 5 с) |
+| mount, `build_file_table` (322k files) | 21 s | ≤ 8 s (parallel traversal) |
+| `vol_open` (delta 0) | 1.5 s | 1.5 s |
+| fold of 3M records (bulk) | minutes | minutes (no regression) |
+| resync on divergence | 1 MB written, 21 GB read | high-water in `DEVT` → ~2 GB read |
+| small file | 12.7 KB, ~16 ms | 4.3 KB (step 1), 0.5 KB (step 2) |
+| `fold_collect_cb` | pread per record | two passes: collect references, then sequential scan |
+| container lane | 21,356 members = 62 min; RSS 5.4 GB on a 3 GB partition | `extract_batch` (≈2–4 min) + streaming read instead of whole-file |
+| boot to ssh | 96 s (45 — GRUB timeout) | ~55 s (5 s timeout) |
 
 ---
 
-## 5. Эксплуатация и стенд
+## 5. Operations and stand
 
-1. GRUB timeout 3 → 5 с (был поднят до 45 при борьбе с порядком загрузки).
-2. `INVFS_TOOL_SCRATCH` — только на ФС с поддержкой Landlock (не `/mnt/*`,
-   не tmpfs на маленьком разделе): иначе `extract` получает EACCES и падает
-   **молча** (stderr хелпера по умолчанию в `/dev/null`).
-3. `INVFS_LAZY_RECLAIM=0` на стенде (цена — `pba_ref_ensure` 1.26 с при открытии).
-4. Чистая переустановка на новый том с исправленным `mkfs` (metadata 1.85 ГиБ
-   вместо 30, `INVFS_META_FILES` под реальное число файлов).
-5. `invf-verify --deep` как обязательный шаг приёмки.
+1. GRUB timeout 3 → 5 s (had been raised to 45 while fighting boot order).
+2. `INVFS_TOOL_SCRATCH` — only on a filesystem with Landlock support (not
+   `/mnt/*`, not tmpfs on a small partition): otherwise `extract` gets EACCES
+   and fails **silently** (helper stderr goes to `/dev/null` by default).
+3. `INVFS_LAZY_RECLAIM=0` on the stand (the cost is `pba_ref_ensure` 1.26 s on
+   open).
+4. Clean reinstall onto a new volume with the fixed `mkfs` (metadata 1.85 GiB
+   instead of 30, `INVFS_META_FILES` for the real file count).
+5. `invf-verify --deep` as a mandatory acceptance step.
 
 ---
 
-## 6. Кандидаты в работу (без обязательств и сроков)
+## 6. Work candidates (no commitments or deadlines)
 
-Формат: `DEVT` v2 (`meta_high_water`, `shadow_gen`) — один бамп на все ломающие
-изменения; раскладка членов `!mbrblob` выше порога; тривиальный рецепт для
-одноэкстентных файлов; inline-данные ≤1.5 КБ; политика числа членов и нарезки
-батча.
+Format: `DEVT` v2 (`meta_high_water`, `shadow_gen`) — one bump for all breaking
+changes; `!mbrblob` member layout above the threshold; trivial recipe for
+single-extent files; inline data ≤1.5 KB; member count and batch slicing policy.
 
-Корректность: инварианты как тесты; чистое выключение; рекурсия свипа в одном
-прогоне; возврат места за один свип; политика `lazy_reclaim`.
+Correctness: invariants as tests; clean shutdown; sweep recursion in one run;
+space reclaimed in one sweep; `lazy_reclaim` policy.
 
-Производительность: параллельный обход имён; two-pass `fold_collect_cb`;
-`extract_batch` в паках; потоковое чтение контейнеров вместо whole-file.
+Performance: parallel name traversal; two-pass `fold_collect_cb`;
+`extract_batch` in packs; streaming reads of containers instead of whole-file.
 
-Эксплуатация: GRUB-таймаут 5 с; `INVFS_TOOL_SCRATCH` только на Landlock-ФС;
-`INVFS_LAZY_RECLAIM=0` на стенде; переустановка на новый том.
+Operations: GRUB timeout 5 s; `INVFS_TOOL_SCRATCH` only on a Landlock filesystem;
+`INVFS_LAZY_RECLAIM=0` on the stand; reinstall onto a new volume.
 
-## Найденное 2026-11-16 (поздний вечер)
+## Found on 2026-11-16 (late evening)
 
-### Тесты и контейнерпаки нельзя гонять из `/mnt/d` (drvfs) — Landlock
+### Tests and container packs cannot be run from `/mnt/d` (drvfs) — Landlock
 
-Любой пак, чей исполняемый файл лежит на drvfs, не запускается: хелпер
-запускается под Landlock, а правила на drvfs не ставятся, поэтому открытие
-скрипта пака получает `EACCES`:
+Any pack whose executable lies on drvfs fails to start: the helper runs under
+Landlock, and rules cannot be set on drvfs, so opening the pack script gets
+`EACCES`:
 
 ```
 python3: can't open file '.../splt_test.codecpack/splt.py': [Errno 13] Permission denied
 [cpack] enumerate failed: ... (tool absent, or the container is not in a form it reads)
 ```
 
-Диагностируется только с `INVFS_HELPER_VERBOSE=1` — иначе stderr хелпера уходит
-в `/dev/null` и выглядит как «пак не умеет этот контейнер». Тот же корень, что
-и у скретча на drvfs (запись), только здесь — чтение.
+This is diagnosable only with `INVFS_HELPER_VERBOSE=1` — otherwise the helper's
+stderr goes to `/dev/null` and it looks like "the pack cannot handle this
+container". Same root cause as scratch on drvfs (writing), except here it is
+reading.
 
-**Правило:** прогоны с контейнерпаками — из worktree на нативной ФС
-(`/var/tmp/wt_*`), не из `S:\`/`D:\`.
+**Rule:** runs with container packs — from a worktree on a native filesystem
+(`/var/tmp/wt_*`), not from `S:\`/`D:\`.
 
-### `tools/test-containerpack.sh`: пре-существующий сбой
+### `tools/test-containerpack.sh`: pre-existing failure
 
-`FAIL: corrupt map (guard): rollback left the volume dirty` — воспроизводится на
-коммите `3c76be1` (до работы по упакованной раскладке) и на `bf54544`
-одинаково. Не связан с листьями/блобом; разбирать отдельно.
+`FAIL: corrupt map (guard): rollback left the volume dirty` — reproduces on
+commit `3c76be1` (before the packed layout work) and on `bf54544` alike. Not
+related to leaves/blob; investigate separately.
 
-### Рекурсия контейнеров в ФС: измеренный результат
+### Container recursion in the filesystem: measured result
 
-`debian12.qcow2` (1.1 ГБ) целиком, `--no-compress`, `INVFS_SWEEP_MAX_FILE=4G`:
+`debian12.qcow2` (1.1 GB) in full, `--no-compress`, `INVFS_SWEEP_MAX_FILE=4G`:
 
 ```
-свип #1  debian12.qcow2: qcow2 (codecpack)            -> 4 файла
-свип #2  ...!mbr0001-diskimg: rawdisk (codecpack)     -> 9 файлов
-          3 085 959 168 B  ...!mbr0001-p0001   (гостевой ext4)
+sweep #1  debian12.qcow2: qcow2 (codecpack)            -> 4 files
+sweep #2  ...!mbr0001-diskimg: rawdisk (codecpack)     -> 9 files
+          3 085 959 168 B  ...!mbr0001-p0001   (guest ext4)
             130 023 424 B  ...!mbr0015-p0015   (EFI, fat32)
-свип #3  ...!mbr0001-p0001: ext4fs (codecpack)        -> 1 ч 22 мин
+sweep #3  ...!mbr0001-p0001: ext4fs (codecpack)        -> 1 h 22 min
          ...!mbr0015-p0015: fatfs  (codecpack)
-         в томе: файлы гостя (gshadow, group, grub.cfg, index.db, ...)
-         dedupe: 1819 сегментов, 57.0 МиБ
-         used 2233 МиБ, invf-ls: 4096 file(s) INCOMPLETE
+         in volume: guest files (gshadow, group, grub.cfg, index.db, ...)
+         dedupe: 1819 segments, 57.0 MiB
+         used 2233 MiB, invf-ls: 4096 file(s) INCOMPLETE
 ```
 
-Цена: **21 356 инодов на один образ** (по 4-12 КиБ метаданных каждый) и
-~175 мс на члена (пак заново парсит контейнер на каждый `extract`; `batch`
-у `ext4fs` не объявлен).
+The cost: **21,356 inodes for one image** (4–12 KiB of metadata each) and
+~175 ms per member (the pack re-parses the container on every `extract`;
+`batch` is not declared by `ext4fs`).
 
-### Место после декомпозиции не сходится: один повреждённый сегмент
-### отключает reclaim
+### Space after decomposition does not add up: one corrupted segment
+### disables reclaim
 
-Измерено на 2.9-ГиБ разделе Debian (`ext4fs`, листовая раскладка, **со сжатием**):
+Measured on a 2.9-GiB Debian partition (`ext4fs`, leaf layout, **with compression**):
 
 ```
-до разложения          : used  714 МиБ   (образ сжат как один поток: 5.09x на нулях)
-после свипа #1         : used 1209 МиБ
-после свипа #2         : used 1447 МиБ
-после свипа #3, #4     : used 1451 МиБ   (12 файлов в томе, swept=0)
+before decomposition    : used  714 MiB   (image compressed as one stream: 5.09x on zeros)
+after sweep #1         : used 1209 MiB
+after sweep #2         : used 1447 MiB
+after sweep #3, #4     : used 1451 MiB   (12 files in volume, swept=0)
 ```
 
-Рост объясняется не рецептом и не листьями, а журналом сохранения:
+The growth is explained not by the recipe or the leaves, but by the savepoint journal:
 
 ```
 [spt0] save point: 1 of 9927 segments have an extent this walk could not VERIFY
@@ -212,269 +217,277 @@ python3: can't open file '.../splt_test.codecpack/splt.py': [Errno 13] Permissio
 [spt0] save point: pinned 62743 blocks (9927 segments, 1 already damaged)
 ```
 
-То есть **один** сегмент с неверифицируемым экстентом (torn frame header)
-делает весь захват нереклаймящим: старые блоки не возвращаются, а каждый
-следующий свип добавляет новый пиннинг (~245 МиБ на 62 743 блока).
+That is, **one** segment with an unverifiable extent (torn frame header)
+makes the entire capture non-reclaiming: old blocks are not returned, and
+every subsequent sweep adds new pinning (~245 MiB for 62,743 blocks).
 
-Что делать (по приоритету):
-1. найти источник torn frame header (кто и когда пишет заголовок не целиком);
-2. сделать освобождение ПОСЕГМЕНТНЫМ: неподтверждённый сегмент держит только
-   свой head-блок (политика уже так формулирует), а остальные сегменты захвата
-   освобождаются; сейчас "carry one generation longer" применяется ко всему;
-3. только после этого мерять стоимость декомпозиции по месту.
+What to do (in priority order):
+1. find the source of the torn frame header (who writes the header
+   incompletely, and when);
+2. make release PER-SEGMENT: an unconfirmed segment holds only its head block
+   (the policy already says so), while the other segments of the capture are
+   released; currently "carry one generation longer" applies to everything;
+3. only after that measure the space cost of decomposition.
 
-Композиция тома после разложения (для справки): 12 файлов —
-`p1.img` (рецепт, 2.9 ГиБ logical / 0.31 ГиБ непустого),
-`!mbrblob` 604 МиБ (листья), `!mbrleaf` 329 КБ (21 353 строки),
-`!mbrmap` 1.2 МБ, `!mbrt` 528 КБ, плюс 7 членов-контейнеров (например
-`core.img` — настоящий контейнер, оставлен инодом).
+Volume composition after decomposition (for reference): 12 files —
+`p1.img` (recipe, 2.9 GiB logical / 0.31 GiB non-empty),
+`!mbrblob` 604 MiB (leaves), `!mbrleaf` 329 KB (21,353 rows),
+`!mbrmap` 1.2 MB, `!mbrt` 528 KB, plus 7 container members (e.g.
+`core.img` — a real container, left as an inode).
 
-### ДИАГНОЗ: "повреждённый сегмент" -- это блоб контейнера, а не порча
+### DIAGNOSIS: the "corrupted segment" is the container blob, not corruption
 
-Найдено на томе с разложенным `p1.img` (2.9 ГиБ, ext4fs, листовая раскладка):
+Found on a volume with decomposed `p1.img` (2.9 GiB, ext4fs, leaf layout):
 
 ```
 [spt0-dmg] pba=343451 plen=0 rc=-1 inode=2 ent=0/1 algo=17 hdr=eabe6891d801829a
 ```
 
-`inode 2` -- сама запись контейнера `p1.img`. Рядом, по сырым байтам тома:
+`inode 2` -- the container record `p1.img` itself. Nearby, by raw volume bytes:
 
 ```
-pba=343450: 42504733 5e020000 ...   <- "BPG3", заголовок БЛОБА начинается здесь
-pba=343451: eabe6891 d801829a 45345243 50303031   <- сюда указывает запись
+pba=343450: 42504733 5e020000 ...   <- "BPG3", BLOB header starts here
+pba=343451: eabe6891 d801829a 45345243 50303031   <- the record points here
 ```
 
-То есть `recipe_addr` блоб-записи адресует payload блоба (на блок позже его
-заголовка), а обход savepoint'а зовёт на этом адресе `seg_extent_checked()`,
-который ожидает **заголовок кадра сегмента** (4B csize + 4B crc). У блоба его
-нет и быть не может -- он лежит под `BPG3`-страницей. Проверка проваливается,
-`broken++`, и по политике "при повреждении не освобождать" захват перестаёт
-возвращать место; каждый следующий свип добавляет новый пиннинг
-(62 743 блока = 245 МиБ), и `used` растёт: 714 -> 1209 -> 1447 -> 1451 МиБ.
+That is, `recipe_addr` of the blob record addresses the blob payload (one block
+past its header), while the savepoint traversal calls `seg_extent_checked()` at
+that address, which expects a **segment frame header** (4B csize + 4B crc). A
+blob has no such header and cannot have one -- it lies under the `BPG3` page.
+The check fails, `broken++`, and under the "do not release on corruption"
+policy the capture stops returning space; every subsequent sweep adds new
+pinning (62,743 blocks = 245 MiB), and `used` grows: 714 -> 1209 -> 1447 ->
+1451 MiB.
 
-Данные ЦЕЛЫ: ломается проверка, а не содержимое. Чтение контейнера работает
-(бит-в-бит проверено отдельно).
+The data is INTACT: it is the check that breaks, not the content. Container
+reads work (verified bit-for-bit separately).
 
-Что чинить: в обходе savepoint'а различать вид рецепта. Если запись --
-блоб (рецепт в BLOB-зоне, `recipe_addr` адресует payload под `BPG3`), пиннить
-диапазон блоков блоба (заголовок + payload по длине из заголовка), а не
-прогонять по нему проверку кадра. Это же снимает рост места при повторных
-свипах.
+What to fix: in the savepoint traversal, distinguish the kind of recipe. If the
+record is a blob (recipe in the BLOB zone, `recipe_addr` addressing the payload
+under `BPG3`), pin the blob's block range (header + payload by the length from
+the header) instead of running a frame check over it. This also removes the
+space growth on repeated sweeps.
 
-## КРИТИЧНО: рецепт контейнера больше INVFS_RECIPE_STREAM_MAX -- потеря данных
+## CRITICAL: container recipe larger than INVFS_RECIPE_STREAM_MAX -- data loss
 
-Воспроизведено на чистом томе (6 ГиБ) с одним файлом `p1.img` (раздел Debian
-2.87 ГиБ), листовая раскладка, `--no-compress` НЕ используется:
+Reproduced on a clean volume (6 GiB) with a single file `p1.img` (Debian
+partition 2.87 GiB), leaf layout, `--no-compress` NOT used:
 
 ```
-до свипа   : invf-cat vol.img p1.img   -> 3 085 959 168 B, бит-в-бит ок
-свип #1    : p1.img: ext4fs (codecpack)
-после      : invf-cat                  -> 3 031 711 744 B  (потеряно 54 247 424 B)
+before sweep: invf-cat vol.img p1.img   -> 3 085 959 168 B, bit-for-bit ok
+sweep #1    : p1.img: ext4fs (codecpack)
+after       : invf-cat                  -> 3 031 711 744 B  (lost 54 247 424 B)
              segment CRC mismatch: inode 2 seg 0 pba 343451 algo 17
 ```
 
-То есть **один свип делает разложенный контейнер нечитаемым**: рецепт
-(2 439 560 938 B) теряет хвост ~54 МиБ.
+That is, **one sweep makes the decomposed container unreadable**: the recipe
+(2,439,560,938 B) loses a tail of ~54 MiB.
 
-Причина по размеру: `INVFS_RECIPE_STREAM_MAX = 64 МиБ` (invarifs.h:1507) --
-документированный предел рецепта, а рецепт ext4fs здесь **2.27 ГиБ**, в 36 раз
-больше. Лейна его приняла, записала и отчиталась успехом; стража при коммите
-даже проверила бит-в-битность (чтение ЧЕРЕЗ карту её не трогает), а пиннинг
-savepoint'а/чтение сегмента -- трогают, и там всё рассыпается.
+The reason is size: `INVFS_RECIPE_STREAM_MAX = 64 MiB` (invarifs.h:1507) --
+the documented recipe limit, while the ext4fs recipe here is **2.27 GiB**, 36
+times larger. The lane accepted it, wrote it, and reported success; the commit
+guard even checked bit-for-bitness (reads THROUGH the map do not touch it), but
+savepoint pinning/segment reads do touch it, and everything falls apart there.
 
-Дополнительно: в per-inode раскладке этот же прогон **убивает машину по OOM**
-(12 ГиБ RAM): каждый член создаётся через vol_create_file() с payload'ом в
-памяти, плюс `invf-cat` того же контейнера просит 8.8 ГиБ (anon-rss 5.8 ГиБ) --
-OOM killer убил и свип, и чтение.
+Additionally: in the per-inode layout this same run **kills the machine with
+OOM** (12 GiB RAM): each member is created via vol_create_file() with its
+payload in memory, plus `invf-cat` of the same container asks for 8.8 GiB
+(anon-rss 5.8 GiB) -- the OOM killer killed both the sweep and the read.
 
-### Что чинить (по порядку)
+### What to fix (in order)
 
-1. **Лейна обязана отказать**, если рецепт пака не влезает в
-   `INVFS_RECIPE_STREAM_MAX` -- с внятным сообщением ("recipe too large for
-   this volume format; refusing to decompose"). Сейчас -- принимает и ломает.
-2. **Рецепт ext4fs должен быть разряжённым**: он включает ВСЕ неаллоцированные
-   блоки раздела (2.27 ГиБ, из них 86.5% нулей, остальное мусор), потому что
-   rebuild обязан воспроизвести образ бит-в-бит. Формат рецепта надо сделать
-   "набор диапазонов + что заполнить нулями", а не "весь раздел минус члены":
-   это уводит размер с 2.27 ГиБ к ~0.31 ГиБ (реальные метаданные ext4).
-3. Только после 1-2 возвращаться к учёту места и к политике reclaim
-   (all-or-nothing в spt0 -- отдельная задача, см. выше).
+1. **The lane must refuse** if the pack recipe does not fit into
+   `INVFS_RECIPE_STREAM_MAX` -- with a clear message ("recipe too large for
+   this volume format; refusing to decompose"). Right now it accepts and
+   breaks.
+2. **The ext4fs recipe must be sparse**: it includes ALL unallocated blocks
+   of the partition (2.27 GiB, of which 86.5% are zeros and the rest garbage),
+   because
+   rebuild must reproduce the image bit-for-bit. The recipe format should
+   become "a set of ranges + what to fill with zeros", not "the whole
+   partition minus members": this takes the size from 2.27 GiB down to
+   ~0.31 GiB (real ext4 metadata).
+3. Only after 1-2 return to space accounting and the reclaim policy
+   (all-or-nothing in spt0 is a separate task, see above).
 
-### Отдельно: почему это не поймали раньше
+### Separately: why this was not caught earlier
 
-`invf-verify` на таком томе говорит `state: CLEAN`: он не проверяет CRC
-сегментов рецепта, а чтение через карту раскладку не трогает. То есть
-единственный надёжный детектор -- `invf-cat` контейнера ПОСЛЕ свипа.
+`invf-verify` on such a volume says `state: CLEAN`: it does not check recipe
+segment CRCs, and reads through the map do not touch the layout. So the only
+reliable detector is `invf-cat` of the container AFTER the sweep.
 
-### /tmp в этой WSL -- tmpfs на 5.8 ГиБ, и он переполняется молча
+### /tmp in this WSL -- tmpfs at 5.8 GiB, and it overflows silently
 
-`/tmp` (и `/dev/shm`) смонтированы как tmpfs, каждый на 50% RAM. Запись за
-предел даёт обычный `ENOSPC` посреди операции, а инструменты сообщают это
-по-разному:
+`/tmp` (and `/dev/shm`) are mounted as tmpfs, each at 50% of RAM. Writing beyond
+the limit gives an ordinary `ENOSPC` in the middle of an operation, and tools
+report it in different ways:
 
-- `invf-cat ... > /tmp/x.img` печатает `write failed: stdout` и оставляет
-  ОБРЕЗАННЫЙ файл -- это выглядело как "потеря данных после свипа" и стоило
-  нескольких часов диагностики (настоящей порчи не было);
-- `cc` падает с `fatal error: error writing to /tmp/cc*.s: No space left on
-  device` при `df /` = 818 ГиБ свободно (vhdx большой, а tmpfs -- нет).
+- `invf-cat ... > /tmp/x.img` prints `write failed: stdout` and leaves a
+  TRUNCATED file -- this looked like "data loss after a sweep" and cost
+  several hours of diagnosis (there was no real corruption);
+- `cc` fails with `fatal error: error writing to /tmp/cc*.s: No space left on
+  device` while `df /` shows 818 GiB free (the vhdx is large, tmpfs is not).
 
-Правило: крупные артефакты (образы, вывод чтения, корпуса для замеров) --
-только в `/dev/shm` при явном контроле `df -h /dev/shm`, либо на Windows-диск;
-`/tmp` держать пустым. Перед любым замером -- `df -h /tmp /dev/shm /`.
+Rule: large artifacts (images, read output, measurement corpora) -- only in
+`/dev/shm` with explicit `df -h /dev/shm` checks, or on a Windows disk; keep
+`/tmp` empty. Before any measurement -- `df -h /tmp /dev/shm /`.
 
-### OpenZL: замер на нашем рецепте -- выигрыша нет, место ему в паке, не в ядре
+### OpenZL: measurement on our recipe -- no gain, it belongs in the pack, not the core
 
-Собран `github.com/meta/openzl` (BSD, C11/C++17, `make`, без folly/boost -- т.е.
-встраивание реально возможно, в отличие от DwarFS). CLI `zli` с профилями.
+Built `github.com/meta/openzl` (BSD, C11/C++17, `make`, no folly/boost -- i.e.
+embedding is actually possible, unlike DwarFS). CLI `zli` with profiles.
 
-Сэмпл 256 МиБ того же рецепта ext4fs (2.27 ГиБ / раздел 2.87 ГиБ):
+A 256 MiB sample of the same ext4fs recipe (2.27 GiB / 2.87 GiB partition):
 
-| вариант | сжатие |
+| option | compression |
 |---|---|
 | zstd-19 | 26.24x |
 | OpenZL i8 | 22.19x |
 | OpenZL serial / lz | 21.12x |
-| zstd-1 (сейчас в ФС) | 20.10x |
+| zstd-1 (currently in the filesystem) | 20.10x |
 | OpenZL le-u32 | 18.69x |
 | OpenZL le-u64 | 15.56x |
 
-Без описания формата OpenZL работает как LZ и проигрывает zstd-19. Его
-преимущество живёт в `custom_parsers/` (csv, parquet, numpy, onnx, gguf).
+Without a format description OpenZL behaves like LZ and loses to zstd-19. Its
+advantage lives in `custom_parsers/` (csv, parquet, numpy, onnx, gguf).
 
-Состав рецепта (почему формат-aware тут не поможет):
-   нули 1.97 ГиБ (86.5%), непустое 0.31 ГиБ, наша AST-таблица 683 КБ (0.03%).
-То есть структурировать в рецепте нечего: 0.31 ГиБ -- это содержимое
-НЕаллоцированных блоков раздела (остатки сборки образа), которое rebuild
-обязан воспроизвести бит-в-бит.
+Recipe composition (why format-aware will not help here):
+   zeros 1.97 GiB (86.5%), non-empty 0.31 GiB, our AST table 683 KB (0.03%).
+That is, there is nothing to structure in the recipe: 0.31 GiB is the content
+of UNALLOCATED blocks of the partition (leftovers from the image build), which
+rebuild must reproduce bit-for-bit.
 
-Вывод: (1) в `vol_create_blob_file` оставить zstd-1; (2) OpenZL -- кандидат
-ВНУТРЬ ПАКА `ext4fs` (структурное хранение битмапов/таблиц инодов/журнала:
-2.27 ГиБ -> десятки МиБ) и/или как кодек generic-лейны для структурированных
-пользовательских данных.
+Conclusion: (1) keep zstd-1 in `vol_create_blob_file`; (2) OpenZL is a candidate
+INSIDE the `ext4fs` PACK (structured storage of bitmaps/inode tables/journal:
+2.27 GiB -> tens of MiB) and/or as a codec of the generic lane for structured
+user data.
 
-### Решение: структурный рецепт -- отложен; структура -- не наша забота
+### Decision: structural recipe -- deferred; structure is not our concern
 
-Структурный рецепт (пак описывает битмапы/инод-таблицы/журнал семантически,
-свободное место = "здесь нули") снимается с повестки как **не наша
-ответственность**: за то, какие блоки свободны, отвечают менеджеры VM и
-TRIM/discard. Если образ приходит с discard-информацией (qcow2 discard,
-разрежённый raw, `e2image`), "здесь нули" приходит СВЕРХУ, и пак не должен
-угадывать семантику ext4.
+The structural recipe (the pack describes bitmaps/inode tables/the journal
+semantically, free space = "zeros here") is removed from the agenda as **not our
+responsibility**: VM managers and TRIM/discard are responsible for which blocks
+are free. If the image comes with discard information (qcow2 discard, sparse
+raw, `e2image`), "zeros here" comes FROM ABOVE, and the pack should not guess
+ext4 semantics.
 
-Отложено, но не забыто: если появится требование "ужать образ без потери
-бит-в-бит", это делается сменой контракта (exact vs functional) и живёт в
-паке, а не в ядре. Замерная прикидка была: 2.27 ГиБ рецепта -> единицы МиБ.
+Deferred, but not forgotten: if a requirement appears to "shrink the image
+without losing bit-for-bitness", this is done by changing the contract (exact
+vs functional) and lives in the pack, not in the core. The measured estimate
+was: 2.27 GiB of recipe -> units of MiB.
 
-Что из этого следует практически и уже сделано/делается:
-1. Рецепт сжимается (zstd-1, 42x) -- то есть нули больше не стоят места.
-2. `strip` не обязан материализовать нули: если пак эмитит рецепт с "дырами",
-   ФС всё равно схлопывает нулевые сегменты дедупом -- отдельной работы не
-   нужно.
-3. Приоритет -- скорости и корректности паков (batch), а не структурному
-   кодированию.
+What follows from this practically and is already done/being done:
+1. The recipe is compressed (zstd-1, 42x) -- so zeros no longer cost space.
+2. `strip` does not have to materialize zeros: if the pack emits a recipe with
+   "holes", the filesystem still collapses zero segments by dedupe -- no
+   separate work is needed.
+3. Priority -- the speed and correctness of packs (batch), not structural
+   encoding.
 
-### Гранулярность: измерено, что даёт блок 4 КиБ
+### Granularity: measured what a 4 KiB block gives
 
-Тот же корпус (Debian 12 / Fedora 41 / openSUSE 15.6, raw, нули исключены):
+The same corpus (Debian 12 / Fedora 41 / openSUSE 15.6, raw, zeros excluded):
 
-| | 4 КиБ | 64 КиБ (сейчас) |
+| | 4 KiB | 64 KiB (now) |
 |---|---|---|
-| внутри Debian | 15.0 % | 10.8 % |
-| внутри Fedora | 12.4 % | 9.2 % |
-| внутри openSUSE | 4.6 % | 0.0 % |
-| всего | 12.7 % | 7.4 % |
+| within Debian | 15.0 % | 10.8 % |
+| within Fedora | 12.4 % | 9.2 % |
+| within openSUSE | 4.6 % | 0.0 % |
+| total | 12.7 % | 7.4 % |
 | Debian <-> Fedora | 0.09 % | 0.00 % |
 | Debian <-> openSUSE | 4.60 % | 0.01 % |
 | Fedora <-> openSUSE | 0.19 % | 0.00 % |
 
-Выводы:
-1. Межобразный дедуп при 4 КиБ -- до 4.6%, и только на паре, у которой есть
-   общий контент (Debian/openSUSE). Debian/Fedora остаётся 0.09%: там нечего
-   делить.
-2. Основной прирост -- ВНУТРИ образа (openSUSE 0 -> 4.6%, Debian 10.8 -> 15.0).
-3. Итого +5.3 пункта за 16x записей индекса. 4 КиБ фиксированного блока даёт
-   почти столько же, сколько CDC 8 КиБ (4.60 vs 4.68%) -- content-defined
-   граница не нужна.
-4. Перед сменой SEGMENT_SIZE мерить цену: индекс дедупа, pba_ref, время свипа,
-   память. Менять только если цена ниже выигранных пунктов.
+Conclusions:
+1. Cross-image dedupe at 4 KiB -- up to 4.6%, and only on the pair that has
+   shared content (Debian/openSUSE). Debian/Fedora stays at 0.09%: there is
+   nothing to share.
+2. The main gain is INSIDE the image (openSUSE 0 -> 4.6%, Debian 10.8 -> 15.0).
+3. Overall +5.3 points for 16x index entries. A fixed 4 KiB block gives almost
+   as much as 8 KiB CDC (4.60 vs 4.68%) -- a content-defined boundary is not
+   needed.
+4. Before changing SEGMENT_SIZE, measure the cost: dedupe index, pba_ref, sweep
+   time, memory. Change only if the cost is lower than the points gained.
 
-### Цепочка рекурсии рвётся на архивах без пака (tar.gz) -- теряется дедуп
+### The recursion chain breaks on archives without a pack (tar.gz) -- dedupe is lost
 
-Измерено (том в /dev/shm, 256-МиБ ext4 образ):
+Measured (volume in /dev/shm, 256 MiB ext4 image):
 
-| вариант | used |
+| option | used |
 |---|---|
-| A: образ с 50 МиБ файлов вразброс | 62.6 МиБ |
-| B: A + `tar.gz` ТЕХ ЖЕ файлов внутри образа | 75.1 МиБ |
+| A: image with 50 MiB of scattered files | 62.6 MiB |
+| B: A + `tar.gz` of THE SAME files inside the image | 75.1 MiB |
 
-Разница = 12.5 МиБ, т.е. архив стоит полных своих 13 МБ и НЕ дедуплицируется с
-идентичными файлами рядом.
+The difference is 12.5 MiB, i.e. the archive costs its full 13 MB and is NOT
+deduped against identical files next to it.
 
-Причина: `tar.gz` не сниффит ни один пак реестра (ext4fs/fatfs/iso9660/ntfs/
-xfs/qcow2/rawdisk/vdi/wim/p7z/jxl; p7z смотрит на магию 7z). Встроенные GZR/
-TARR воспроизводят такой файл бит-в-бит, но членов не выставляют, поэтому
-дедупу нечего ловить. В листовой раскладке архив уходит листом в блоб, в
-per-inode -- остаётся одним файлом `...!mbrNNNN-dup.tar.gz` без частей.
+Reason: no pack in the registry sniffs `tar.gz` (ext4fs/fatfs/iso9660/ntfs/
+xfs/qcow2/rawdisk/vdi/wim/p7z/jxl; p7z looks at the 7z magic). The built-in GZR/
+TARR reproduce such a file bit-for-bit but do not expose members, so dedupe has
+nothing to catch. In the leaf layout the archive goes into a blob as a leaf; in
+the per-inode layout it stays a single file `...!mbrNNNN-dup.tar.gz` with no
+parts.
 
-Следствие: рекурсия работает только там, где есть ПАК. Цепочка
-`qcow2 -> raw -> MBR -> ext4 -> файлы` проходит, а `... -> tar.gz -> члены`
-рвётся.
+Consequence: recursion works only where there is a PACK. The chain
+`qcow2 -> raw -> MBR -> ext4 -> files` passes, while `... -> tar.gz -> members`
+breaks.
 
-Задача: пак `targz` (gzip -> tar -> члены) или расширение `p7z` на gzip/tar:
-estimate, enumerate (файлы внутри tar), extract, strip (заголовки tar +
-описание deflate), rebuild бит-в-бит, желательно batch и map. Даёт (а) дедуп
-содержимого архивов с распакованными файлами, (б) ещё уровень DFS.
+Task: a `targz` pack (gzip -> tar -> members) or an extension of `p7z` to
+gzip/tar: estimate, enumerate (files inside tar), extract, strip (tar headers +
+deflate description), bit-for-bit rebuild, preferably batch and map. Gives
+(a) dedupe of archive contents against extracted files, (b) another DFS level.
 
-### Цепочка GZR -> TARR: TAR работает, GZIP отказывает на реальных потоках
+### The GZR -> TARR chain: TAR works, GZIP refuses on real streams
 
-Проверено на одном и том же tar (42 МБ, 3149 файлов):
+Verified on the same tar (42 MB, 3149 files):
 
-| вход | класс после свипа | части |
+| input | class after sweep | parts |
 |---|---|---|
-| `d2.tar` (без сжатия) | CONTAINER{algo=tarr(8)} | **2153 части** |
-| `gzip -1 / -6 / -9` (GNU gzip) | GENERIC_GUARD{algo=gzr(9)} | нет |
-| `python gzip` (zlib, level 6, wbits=-15) | GENERIC_GUARD{algo=gzr(9)} | нет |
+| `d2.tar` (no compression) | CONTAINER{algo=tarr(8)} | **2153 parts** |
+| `gzip -1 / -6 / -9` (GNU gzip) | GENERIC_GUARD{algo=gzr(9)} | none |
+| `python gzip` (zlib, level 6, wbits=-15) | GENERIC_GUARD{algo=gzr(9)} | none |
 
-Причина в vol_cpack.c: проба перебирает (level 1..9) x (memLevel 7..9) x
-strategy=DEFAULT x windowBits=-15 и требует ПОБАЙТОВО совпадающего deflate-
-потока. GNU gzip использует собственный deflate (не zlib) -- не совпадёт
-никогда; zlib-поток совпадает только если это ровно тот же zlib, что слинкован
-у нас (системный или stock). Итог: `.tar.gz` в реальных образах не разлагается,
-содержимое архива для дедупа невидимо.
+The cause is in vol_cpack.c: the probe iterates (level 1..9) x (memLevel 7..9) x
+strategy=DEFAULT x windowBits=-15 and requires a BYTE-FOR-BYTE matching deflate
+stream. GNU gzip uses its own deflate (not zlib) -- it will never match; a zlib
+stream matches only if it is exactly the same zlib that is linked
+in our build (system or stock). Result: `.tar.gz` in real images is not
+decomposed, and the archive contents are invisible to dedupe.
 
-Следствие для дедупа: цепочка
-`qcow2 -> raw -> MBR -> ext4 -> tar` работает до членов tar (и там дедуп
-ловит), а `... -> tar.gz` -- нет.
+Consequence for dedupe: the chain
+`qcow2 -> raw -> MBR -> ext4 -> tar` works down to tar members (and dedupe
+catches them there), while `... -> tar.gz` -- does not.
 
-Варианты (по возрастанию цены):
-1. **функциональный режим**: распаковать gzip, положить tar как член (TARR),
-   при сборке сжать заново -- байты .tar.gz будут другими, содержимое
-   идентичным. То есть та же смена контракта exact/functional, что отложена
-   для образов. Для архивов это обычно приемлемо (как zip/qcow2 и делают).
-2. расширять реплику deflate до алгоритма GNU gzip -- тяжело и хрупко по
-   версиям.
-3. хранить и deflate-поток, и распакованную структуру -- двойное хранение,
-   не вариант.
+Options (in increasing cost):
+1. **functional mode**: unpack gzip, put tar as a member (TARR), compress it
+   again at rebuild -- the .tar.gz bytes will be different, the content
+   identical. This is the same exact/functional contract change deferred for
+   images. For archives this is usually acceptable (as zip/qcow2 do).
+2. extend the deflate replica to the GNU gzip algorithm -- hard and fragile
+   across versions.
+3. store both the deflate stream and the unpacked structure -- double storage,
+   not an option.
 
-Пока контракт не изменен, цепочка на gzip останавливается ПО ЗАМЫСЛУ (лучше
-честный отказ, чем битый rebuild).
+Until the contract is changed, the chain stops at gzip BY DESIGN (an honest
+refusal is better than a broken rebuild).
 
-## РЕШЕНО (дизайн): бит-точный deflate через preflate, а не перебор версий zlib
+## RESOLVED (design): bit-exact deflate via preflate, not a search over zlib versions
 
-Проблема, из-за которой не был написан zip-пак: deflate-потоки в реальных zip
-делают разные энкодеры (Info-ZIP, 7-Zip, libdeflate, zopfli, Go, Java, zlib),
-и бит-в-бит их не воспроизвести набором "своих" zlib. Брутфорс версий и
-параметров -- 650 пересжатий на поток, для zip с 5000 членов это часы.
+The problem that prevented writing a zip pack: deflate streams in real zip
+files are made by different encoders (Info-ZIP, 7-Zip, libdeflate, zopfli, Go,
+Java, zlib), and they cannot be reproduced bit-for-bit with a set of "our"
+zlibs. Brute-forcing versions and parameters -- 650 recompressions per stream,
+which is hours for a zip with 5000 members.
 
-Найдено и проверено: **microsoft/preflate-rs** (Apache-2.0, Rust, v0.8.0,
-в проде у Microsoft). Он разбирает поток в токены, УГАДЫВАЕТ параметры
-энкодера (hash algorithm, chain depth, nice-length, window, стратегия
-блочного разбиения), а хранит только РАСХОЖДЕНИЯ с предсказанием (CABAC).
-Неизвестные энкодеры тоже восстанавливаются точно -- корректировок больше.
+Found and verified: **microsoft/preflate-rs** (Apache-2.0, Rust, v0.8.0,
+used in production at Microsoft). It parses the stream into tokens, GUESSES the
+encoder parameters (hash algorithm, chain depth, nice-length, window, block
+splitting strategy), and stores only DEVIATIONS from the prediction (CABAC).
+Unknown encoders are also recovered exactly -- with more corrections.
 
-Замер на реальном тексте (4 МБ из Debian):
+Measurement on real text (4 MB from Debian):
 
-| поток zlib | корректировки | % от потока | % от plaintext |
+| zlib stream | corrections | % of stream | % of plaintext |
 |---|---|---|---|
 | level 1 | 60 B | 0.003% | 0.0015% |
 | level 6 | 3 262 B | 0.199% | 0.082% |
@@ -483,380 +496,399 @@ strategy=DEFAULT x windowBits=-15 и требует ПОБАЙТОВО совп�
 | filtered | 59 729 B | 3.4% | 1.49% |
 | rle | 37 934 B | 1.5% | 0.95% |
 
-Плюс сквозная проверка `util --verify` на реальных `real.zip` (5.9 МБ) и
-`real.tar.gz` (6.0 МБ): восстановление бит-в-бит подтверждено, контейнер
-preflate оказался на 5.6-7.3% меньше, чем zstd поверх архива как есть.
+Plus an end-to-end `util --verify` check on real `real.zip` (5.9 MB) and
+`real.tar.gz` (6.0 MB): bit-for-bit recovery confirmed, and the preflate
+container turned out 5.6-7.3% smaller than zstd over the archive as-is.
 
-Интеграция: **helperpack** `deflate_preflate` (внешний процесс). Причины:
-- Apache-2.0 несовместима с линковкой в GPL-2.0-only ядро, а процесс -- можно;
-- есть C-API (`dll`: create_compression_context / compress_buffer /
-  decompress_buffer / get_compression_stats) и сканер deflate-потоков по
-  файлам (zip/pdf/png/docx) в пакете `container`;
-- CPU ~4 МБ/с на поток -- фоновому свипу приемлемо, ядру блокироваться нельзя.
+Integration: **helperpack** `deflate_preflate` (external process). Reasons:
+- Apache-2.0 is incompatible with linking into the GPL-2.0-only core, while a
+  process is fine;
+- there is a C-API (`dll`: create_compression_context / compress_buffer /
+  decompress_buffer / get_compression_stats) and a scanner for deflate streams
+  in files (zip/pdf/png/docx) in the `container` package;
+- CPU ~4 MB/s per stream -- acceptable for a background sweep, but the core
+  must not block.
 
-Что это даёт: zip, tar.gz, docx/xlsx, pdf, png внутри образов становятся
-делящимися -- их plaintext ложится в части (дедуп + наши лейны сжатия), а
-корректировки (сотые доли процента) в рецепт. Обещание exact сохраняется.
-Измеренный эффект на нашем сценарии: архив внутри образа стоит +0.1 МиБ
-вместо +12.5 МиБ.
+What this gives: zip, tar.gz, docx/xlsx, pdf, png inside images become
+shareable -- their plaintext goes into parts (dedupe + our compression lanes),
+and the corrections (hundredths of a percent) into the recipe. The exact
+promise is preserved. Measured effect in our scenario: an archive inside an
+image costs +0.1 MiB instead of +12.5 MiB.
 
-## КЛЮЧЕВОЕ (уточнено): дедуп видит сохранённые байты, а ломает его БАТЧИНГ, не сжатие
+## KEY POINT (clarified): dedupe sees stored bytes, and what breaks it is BATCHING, not compression
 
 `vol_dedupe.c`: "BLAKE3 over the STORED bytes of every live segment ([8B header]
 + csize payload -- a complete, deterministic function of what is on disk)".
-То есть совпадать должны СОХРАНЁННЫЕ байты, а не содержимое.
+That is, what must match is the STORED bytes, not the content.
 
-Отсюда все наблюдения сессии:
+Hence all session observations:
 
-| случай | дедуп | почему |
+| case | dedupe | why |
 |---|---|---|
-| две идентичные копии файла | 73.8% | файлы сжаты одинаково -> байт-в-байт |
-| почти-дубликаты (те же файлы, сдвиг) | 1.88x | файлы выровнены по своим началам |
-| член архива <-> тот же файл вразброс | НЕТ | файл сжат отдельно, член -- внутри блоба: разные контексты сжатия |
-| все замеры с --no-compress | ДА | хранятся plaintext-сегменты |
+| two identical copies of a file | 73.8% | files compressed the same way -> byte-for-byte |
+| near-duplicates (same files, shifted) | 1.88x | files are aligned to their own starts |
+| archive member <-> same file scattered | NO | the file is compressed separately, the member -- inside a blob: different compression contexts |
+| all measurements with --no-compress | YES | plaintext segments are stored |
 
-УТОЧНЕНИЕ (проверено кодом и замером): сжатие сегмента -- посегментное с ЧИСТЫМ
-контекстом (`ZSTD_compress(cbuf+8, cbound, plain, enc_len, level)`,
-vol_write.c:480), поэтому одинаковый 64-КиБ plaintext всегда даёт одинаковые
-сохранённые байты. Значит "сжатие ломает дедуп" -- НЕВЕРНО.
+CLARIFICATION (verified by code and measurement): segment compression is
+per-segment with a CLEAN context (`ZSTD_compress(cbuf+8, cbound, plain, enc_len, level)`,
+vol_write.c:480), so identical 64-KiB plaintext always produces identical
+stored bytes. So "compression breaks dedupe" is INCORRECT.
 
-Ломает его БАТЧИНГ: мелкие файлы склеиваются в общие буферы (TZ_BATCH_MAX) и
-сжимаются как единое целое (`class: BATCHED_BIN{algo=zstd-bcj}`, `block=1` в
-середине батча -- замерено). У члена архива в 4 КиБ нет собственных сегментов,
-поэтому совпасть с standalone-файлом он не может по построению.
+What breaks it is BATCHING: small files are glued into shared buffers
+(TZ_BATCH_MAX) and compressed as a whole (`class: BATCHED_BIN{algo=zstd-bcj}`,
+`block=1` in the middle of a batch -- measured). A 4 KiB archive member has no
+own segments, so by construction it cannot match a standalone file.
 
-Измерено на zip-паке (deflate_preflate): zip из одного 4-МБ файла рядом с этим
-же файлом стоит +1.9 МиБ при размере zip 1 МБ (файл ушёл в батч, блоб -- нет).
-На zip из 200 мелких файлов добавка +1.9 МиБ при 2.34 МБ архива (19%).
+Measured on the zip pack (deflate_preflate): a zip of one 4-MB file next to
+the same file costs +1.9 MiB with a 1 MB zip (the file went into a batch, the
+blob did not). For a zip of 200 small files the addition is +1.9 MiB with a
+2.34 MB archive (19%).
 
-### Следствие для архитектуры
+### Architectural implication
 
-Чтобы дедуп работал ПОСЛЕ сжатия, сжимать надо не файл целиком, а каждый
-уникальный сегмент отдельно: тогда одинаковые сегменты дают одинаковые байты
-и дедуп их видит. Цена -- окно сжатия 64 КиБ вместо файла (потеря ~1.5-2x на
-сжимаемости), выигрыш -- дедуп перестаёт зависеть от контекста.
+For dedupe to work AFTER compression, one must compress not the whole file but
+each unique segment separately: then identical segments produce identical bytes
+and dedupe sees them. The cost is a 64 KiB compression window instead of a file
+(a ~1.5-2x loss in compressibility), the gain is that dedupe stops depending on
+context.
 
-Альтернатива: писать члены RAW (дедуп по plaintext) и сжимать только
-уникальные сегменты после дедупа. Но тогда страж размера должен быть
-dedup-aware: части, чей plaintext уже есть в томе, стоят ~0, а сейчас он
-заряжает их полным размером и отказывает.
+Alternative: write members RAW (dedupe on plaintext) and compress only unique
+segments after dedupe. But then the size guard must be dedup-aware: parts whose
+plaintext is already in the volume cost ~0, while currently it charges them
+full size and refuses.
 
-Это же объясняет, почему leaf-раскладка (один блоб на все члены) ломает
-дедуп: границы членов попадают внутрь сегментов, а после сжатия блоба
-сегменты вообще не совпадают с отдельно сжатыми файлами.
+This also explains why the leaf layout (one blob for all members) breaks
+dedupe: member boundaries fall inside segments, and after blob compression the
+segments do not match separately compressed files at all.
 
-Порядок работ, если дедуп содержимого архивов нужен по-настоящему:
-1. dedup-aware проекция в страже (части, уже присутствующие в томе, стоят ~0);
-2. посегментное сжатие (или RAW-хранение членов) вместо посжатия блоба;
-3. только после этого измерять выигрыш zip/tar.gz -- сейчас он меряется
-   против дедупа, который структурно не может сработать.
+Work order, if dedupe of archive contents is really needed:
+1. dedup-aware projection in the guard (parts already present in the volume
+   cost ~0);
+2. per-segment compression (or RAW storage of members) instead of compressing
+   the blob;
+3. only then measure the zip/tar.gz gain -- right now it is measured against
+   dedupe that structurally cannot work.
 
-### Итог по дедупу содержимого архивов (zip-пак): не срабатывает, причины названы
+### Result on dedupe of archive contents (zip pack): does not work, reasons identified
 
-Проверено на zip из одного 4-МБ файла, рядом лежит тот же файл:
+Verified on a zip of one 4-MB file with the same file next to it:
 
-| прогон | добавка от zip (1.9 МБ) |
+| run | addition from zip (1.9 MB) |
 |---|---|
-| обычный (сжатие вкл) | +1.9 МиБ |
-| `--no-compress` (члены RAW) | +2.5 МиБ |
-| `--no-compress` + `INVFS_CPACK_DEDUP_FREE=1` (страж не заряжает члены) | +2.5 МиБ |
+| normal (compression on) | +1.9 MiB |
+| `--no-compress` (members RAW) | +2.5 MiB |
+| `--no-compress` + `INVFS_CPACK_DEDUP_FREE=1` (guard does not charge members) | +2.5 MiB |
 
-То есть dedup-aware страж **сам по себе ничего не даёт**: даже когда он
-разрешает разложение и члены лежат в RAW, совпадения не происходит.
+That is, a dedup-aware guard **by itself achieves nothing**: even when it allows
+decomposition and the members lie RAW, no match occurs.
 
-Причины (все три подтверждены):
-1. **Батчинг**: мелкие файлы склеиваются в общие буферы (TZ_BATCH_MAX) и
-   сжимаются как целое -- у члена нет собственных сегментов (`class
-   BATCHED_BIN`, `block=1` внутри батча). Сжатие тут ни при чём: сжатие
-   посегментное с чистым контекстом (vol_write.c:480), одинаковый 64-КиБ
-   plaintext даёт одинаковые байты.
-2. **Смещения внутри блоба**: член начинается с произвольного offset, поэтому
-   его байты попадают в другие 64-КиБ границы, чем у standalone-копии.
-3. **Правила прохода дедупа**: TEXT-батчи пропускаются (принадлежат владельцу),
-   whole-file blobs объявлены уникальными по построению (vol_dedupe.c).
+Reasons (all three confirmed):
+1. **Batching**: small files are glued into shared buffers (TZ_BATCH_MAX) and
+   compressed as a whole -- the member has no own segments (`class
+   BATCHED_BIN`, `block=1` inside the batch). Compression is irrelevant here:
+   compression is per-segment with a clean context (vol_write.c:480), identical
+   64-KiB plaintext gives identical bytes.
+2. **Offsets inside the blob**: a member starts at an arbitrary offset, so its
+   bytes fall on different 64-KiB boundaries than those of a standalone copy.
+3. **Dedupe traversal rules**: TEXT batches are skipped (owned), whole-file
+   blobs are declared unique by construction (vol_dedupe.c).
 
-Оставлен измерительный ключ `INVFS_CPACK_DEDUP_FREE=1` (страж заряжает члены
-как 0) -- только для замеров, дефолтом не включать: он разрешает разложение,
-которое не дедуплицируется.
+The measurement key `INVFS_CPACK_DEDUP_FREE=1` is left in place (the guard charges
+members as 0) -- for measurements only, do not enable by default: it allows
+decomposition that does not dedupe.
 
-### Что реально надо сделать, если дедуп содержимого архивов нужен
+### What actually needs to be done if archive content dedupe is needed
 
-Не страж, а раскладка: член должен занимать СВОИ сегменты, выровненные по
-своему началу (не попадать в общий батч). Тогда одинаковый член из двух
-архивов даёт одинаковые сегменты и дедуп видит его после сжатия.
+Not the guard, but the layout: a member must occupy ITS OWN segments, aligned to
+its own start (not land in a shared batch). Then the same member from two
+archives produces identical segments and dedupe sees it after compression.
 
-Цена при 64-КиБ сегментах: до 63 КиБ неиспользуемого хвоста на члена (~32 КиБ
-в среднем) -- для 1 млн мелких файлов это десятки ГБ, то есть неприемлемо.
-При 4-КиБ сегментах та же схема стоит ~2 КиБ на члена, и одновременно растёт
-дедуп разных дистрибутивов (замерено: 7.4% -> 12.7%).
+The cost at 64-KiB segments: up to 63 KiB of unused tail per member (~32 KiB
+on average) -- for 1M small files that is tens of GB, i.e. unacceptable.
+At 4-KiB segments the same scheme costs ~2 KiB per member, and cross-distro
+dedupe improves at the same time (measured: 7.4% -> 12.7%).
 
-Вывод: **размер сегмента -- тот же рычаг для дедупа архивов, что и для
-межобразного дедупа**, а dedup-aware страж -- вспомогательная мера, не
-решение.
+Conclusion: **segment size is the same lever for archive dedupe as it is for
+cross-image dedupe**, while a dedup-aware guard is a supporting measure, not a
+solution.
 
-## Сравнение при РАВНЫХ пресетах: содержимое на паритете, портит метаданные
+## Comparison at EQUAL presets: content at parity, metadata spoils it
 
-Корпус: 2 идентичные копии образа 256 МиБ (70 МБ файлов внутри), 512 МиБ логически.
-Пресет выровнен: InvariantFS `INVFS_PROFILE=balanced` = zstd-19, squashfs
-`-comp zstd -Xcompression-level 19`.
+Corpus: 2 identical copies of a 256 MiB image (70 MB of files inside), 512 MiB
+logically. The preset is aligned: InvariantFS `INVFS_PROFILE=balanced` = zstd-19,
+squashfs `-comp zstd -Xcompression-level 19`.
 
-| | размер |
+| | size |
 |---|---|
-| squashfs zstd-19 (4 копии в одном архиве -> 2 копии) | 25 МБ |
-| squashfs zstd-3 | 29 МБ |
-| squashfs без сжатия | 73 МБ |
-| InvariantFS zstd-19, `used` | 110.1 МиБ |
-| InvariantFS zstd-3 | 113 МиБ |
-| InvariantFS без сжатия | 115 МиБ |
+| squashfs zstd-19 (4 copies in one archive -> 2 copies) | 25 MB |
+| squashfs zstd-3 | 29 MB |
+| squashfs without compression | 73 MB |
+| InvariantFS zstd-19, `used` | 110.1 MiB |
+| InvariantFS zstd-3 | 113 MiB |
+| InvariantFS without compression | 115 MiB |
 
-Разбор 110 МиБ по статьям (invf-stats -v):
-  SHADOW 24.5 МиБ -- содержимое (сжатие 26.35x и дедуп: обе копии делят ОДИН
-                       рецепт и pba 173001, то есть дедуп сработал)
-  RAW     4.0 МиБ
-  метаданные ~82 МиБ -- несвёрнутая дельта: 77 719 записей
+Breakdown of 110 MiB by category (invf-stats -v):
+  SHADOW 24.5 MiB -- content (compression 26.35x and dedupe: both copies share
+                       ONE recipe and pba 173001, so dedupe worked)
+  RAW     4.0 MiB
+  metadata ~82 MiB -- unfolded delta: 77 719 records
                        (save point: base_root=130998 delta_end=208717)
 
-`--realize` не меняет (не пиннинг), fold не срабатывает: порог 262 144 записи.
+`--realize` does not change this (not pinning), fold does not trigger: the
+threshold is 262,144 records.
 
-ВЫВОД: по содержимому мы на паритете с squashfs (24.5 против 25 МБ), а
-видимый проигрыш в 4 раза -- это журнал изменений, который по политике копится
-до 262 144 записей и только потом свёртывается.
+CONCLUSION: on content we are at parity with squashfs (24.5 vs 25 MB), while the
+visible 4x loss is the change journal, which by policy accumulates up to 262,144
+records and only then gets folded.
 
-Задачи (по важности):
-1. fold-политика: складывать дельту по размеру, а не только по числу записей;
-   предусмотреть fold при размонтировании/закрытии тома.
-2. После этого повторить сравнение -- ожидаем ~30 МиБ против 25 МБ squashfs.
+Tasks (by importance):
+1. fold policy: fold the delta by size, not only by record count; provide a
+   fold on volume unmount/close.
+2. After that repeat the comparison -- expect ~30 MiB vs squashfs's 25 MB.
 
-### Разбор `used` при равных пресетах: паритет по содержимому, мусор не убирается
+### Breakdown of `used` at equal presets: content at parity, garbage not removed
 
-Исправление предыдущего вывода ("в 4 раза хуже squashfs"): `used` включает
-ЗАРЕЗЕРВИРОВАННУЮ метазону, поэтому сравнивать его напрямую нельзя.
+Correction to the previous conclusion ("4x worse than squashfs"): `used`
+includes the RESERVED metazone, so it cannot be compared directly.
 
-Полная арифметика (2 копии образа 256 МиБ, 66 МБ файлов, zstd-19):
-
-```
-used 119.0 MiB = SHADOW 23.5 (содержимое) + RAW 3.9
-               + unclaimed 27.5 (аллоцировано, живых ссылок нет)
-               + meta 64.1 (РАЗМЕР метазоны, задан mkfs)
-```
-
-Выводы:
-1. По СОДЕРЖИМОМУ -- паритет с squashfs: 23.5 МиБ против 25 МБ (и дедуп
-   работает: обе копии делят один рецепт и pba).
-2. `meta 64.1 MiB` -- это резерв метазоны (для 2 ГиБ тома), а не данные.
-   На стенде после фикса mkfs он ~1.7% вместо 30 ГиБ.
-3. **`unclaimed 27.5 MiB` -- настоящий мусор: не уходит ни за 6 свипов, ни
-   после `--realize`.** Это та же болезнь "reclaim не забирает", что и
-   spt0-broken (см. выше): без неё наш footprint на этом корпусе был бы
-   ~27 МиБ против 25 МБ squashfs, а с ней -- ~51 МиБ.
-
-Про TEXT-зону: в листовой раскладке она НЕ используется -- члены пишутся в
-блоб сессией записи, а блоб потом сжимается посегментно (zstd). Батчинг
-(TEXT) остаётся для обычных мелких файлов вне контейнеров.
-
-Про fold: `vol_fold_request()` вызывается ТОЛЬКО из FUSE при монтировании
-(src/cli/fuse_fs.c:4655) и из тестов; комментарий в volume.h ("This is what
-WP-M18's sweep calls") расходится с кодом -- свип fold не делает. При этом
-дельта тут была маленькой (1068 записей), так что на 119 МиБ она не влияла;
-но расхождение комментария и кода стоит исправить.
-
-## Найденное 2026-11-17 (ночь): свободное место в образе и warning
-
-### Где на самом деле стоит мусор из свободного места
-
-Опыт: образ ext4 64 МиБ, 4 МиБ файлов, затем 40 МиБ случайных данных записаны
-и удалены (через `debugfs rm`), т.е. свободное место заполнено мусором.
-После декомпозиции:
+Full arithmetic (2 copies of a 256 MiB image, 66 MB of files, zstd-19):
 
 ```
-recipe: blob 32784 B                      <- рецепт СЖАТ (zstd), нули почти бесплатны
+used 119.0 MiB = SHADOW 23.5 (content) + RAW 3.9
+               + unclaimed 27.5 (allocated, no live references)
+               + meta 64.1 (METAZONE SIZE, set by mkfs)
+```
+
+Conclusions:
+1. On CONTENT -- parity with squashfs: 23.5 MiB vs 25 MB (and dedupe works:
+   both copies share one recipe and pba).
+2. `meta 64.1 MiB` is the metazone reserve (for a 2 GiB volume), not data.
+   On the stand after the mkfs fix it is ~1.7% instead of 30 GiB.
+3. **`unclaimed 27.5 MiB` is real garbage: it does not go away in 6 sweeps, nor
+   after `--realize`.** This is the same "reclaim does not take it" disease as
+   spt0-broken (see above): without it our footprint on this corpus would be
+   ~27 MiB vs squashfs's 25 MB, and with it -- ~51 MiB.
+
+On the TEXT zone: in the leaf layout it is NOT used -- members are written to a
+blob by the write session, and the blob is then compressed per-segment (zstd).
+TEXT batching remains for ordinary small files outside containers.
+
+On fold: `vol_fold_request()` is called ONLY from FUSE at mount time
+(src/cli/fuse_fs.c:4655) and from tests; the comment in volume.h ("This is what
+WP-M18's sweep calls") disagrees with the code -- the sweep does not fold. The
+delta here was small (1068 records), so it did not affect the 119 MiB;
+but the comment/code discrepancy is worth fixing.
+
+## Found 2026-11-17 (night): free space in the image and a warning
+
+### Where the garbage from free space actually sits
+
+Experiment: a 64 MiB ext4 image with 4 MiB of files, then 40 MiB of random data
+written and deleted (via `debugfs rm`), i.e. free space filled with garbage.
+After decomposition:
+
+```
+recipe: blob 32784 B                      <- recipe COMPRESSED (zstd), zeros nearly free
 content classes: compressed logic 64.0 MiB | used 42.5 MiB | 1.50x
 ```
 
-То есть 42.5 МиБ реально заняты, но **в рецепте их нет** -- рецепт 32 КБ.
-Мусор попадает в другой канал пака, не в recipe-блоб.
+That is, 42.5 MiB is really occupied, but **it is not in the recipe** -- the
+recipe is 32 KB. The garbage goes into a different pack channel, not the
+recipe blob.
 
-Контрольный опыт: тот же образ, но свободное место нулевое (`truncate`+`mkfs`):
-рецепт 32.8 КБ, сжатый класс 64.0 МиБ -> 4.3 МиБ (14.91x). Разница 4.3 против
-42.5 МиБ -- это и есть цена незанулённого свободного места.
+Control experiment: the same image, but with zeroed free space (`truncate`+
+`mkfs`): recipe 32.8 KB, compressed class 64.0 MiB -> 4.3 MiB (14.91x). The
+difference of 4.3 vs 42.5 MiB is the price of non-zeroed free space.
 
-### Почему предупреждение в ядре не работает
+### Why the warning in the core does not work
 
-Ядро видит только (recipe_len, full_len). Recipe сжимается, поэтому доля
-рецепта остаётся маленькой и в "плохом" случае (32 КБ на 64 МиБ): проверка
-`recipe_len > 20% * full_len` не срабатывает никогда. Правку откатили.
+The core sees only (recipe_len, full_len). The recipe is compressed, so its share
+stays small even in the "bad" case (32 KB per 64 MiB): the check
+`recipe_len > 20% * full_len` never fires. The change was reverted.
 
-**Правильное место -- пак: он знает число свободных блоков раздела.** Именно
-`ext4fs`/`ntfs`/`xfs` должны на decompose говорить: "N МиБ (P%) образа --
-свободные блоки, и M% из них непусты; занулите/TRIM внутри гостя перед
-упаковкой". Ядру для этого пришлось бы парсить ФС гостя, чего оно не делает.
+**The right place is the pack: it knows the number of free blocks in the
+partition.** It is `ext4fs`/`ntfs`/`xfs` that should say on decompose: "N MiB
+(P%) of the image are free blocks, and M% of them are non-empty; zero out/TRIM
+inside the guest before packing". For the core to do this it would have to parse
+the guest filesystem, which it does not.
 
-### ЛОВУШКА: свип "висит", если жив FUSE-монтаж того же тома
+### TRAP: a sweep "hangs" if a FUSE mount of the same volume is alive
 
-`invf-sweep <img>` при живом `invf-fuse` на том же образе не падает, а ЖДЁТ
-flock: выглядит как зависание (у нас два прогона "по 20 минут" на 64-МиБ
-образе, которые оказались мгновенными после `kill` монтажа). Проверять
-`pgrep -a invf-fuse` и снимать монтаж перед замерами; не полагаться на
-`fusermount -u` в цепочке `cp && sync && fusermount` -- он может не сработать,
-и процесс остаётся.
+`invf-sweep <img>` with a live `invf-fuse` on the same image does not fail, it
+WAITS on flock: this looks like a hang (two of our runs "of 20 minutes" on a
+64-MiB image turned out to be instantaneous after `kill` of the mount). Check
+`pgrep -a invf-fuse` and unmount before measurements; do not rely on
+`fusermount -u` in a `cp && sync && fusermount` chain -- it may fail to work,
+leaving the process alive.
 
-## Тиры тестов: что нашлось при возврате к зелёным (2026-11-19)
+## Test tiers: what was found while returning to green (2026-11-19)
 
-### Исправлено
+### Fixed
 
-1. **Сборка блокировала unit-тир** (`24329f7`): цель `invf-cpack_map_conc_tsan/asan/test`
-   не линковалась (`invfs_codec_all` + `vol_write_begin/range/truncate/commit/abort`).
-   Цель компилирует `vol_cpack.c` в одиночку и стабит остальной движок; стабы были
-   неполные. Бинарь не собирался НИКОГДА => `make test` падал на build-шаге, то
-   есть unit-тир не запускался целиком. Добавлены fail-closed стабы.
-2. **`fsck_clean` был прибит к несуществующему формату** (`cdeca14`,
-   ПРЕДСУЩЕСТВУЮЩЕЕ): гейт проверял `format:       v0`, а metadata-tree формат
-   печатает `format:       v1 (metadata base tree)`. Любой v1-том проваливался во
-   вторую ветку (ждёт `orphans:`/`missing:`, которых формат не печатает) и
-   объявлялся грязным => **каждый** e2e-сьют с этим гейтом умирал на шаге fsck.
-   Теперь матчится семейство `format: v[01]`.
-3. **Ренейм ярлыка сломал парсер** (`cdeca14`): `test-textzone.sh` и
-   `test-dedupe.sh` искали `"TEXT  :"`, переименованный в `text batch` (`ef4f992`).
-4. **`bang_name_test` кодировал неверное правило** (`af3b5bc`): требовал, чтобы
-   `n!mbr000`/`n!mbr00000` пережили `unlink('n')` («%04u never prints this») --
-   неверно: для idx >= 10000 `%04u` печатает пять цифр, и `bf54544` расширил форму
-   до 1..7 именно поэтому. Имена переведены в `collide[]` как принятый остаток.
+1. **The build blocked the unit tier** (`24329f7`): target
+   `invf-cpack_map_conc_tsan/asan/test` did not link (`invfs_codec_all` +
+   `vol_write_begin/range/truncate/commit/abort`). The target compiles
+   `vol_cpack.c` alone and stubs out the rest of the engine; the stubs were
+   incomplete. The binary never built => `make test` failed at the build step,
+   i.e. the unit tier never ran at all. Added fail-closed stubs.
+2. **`fsck_clean` was nailed to a nonexistent format** (`cdeca14`,
+   PRE-EXISTING): the gate checked `format:       v0`, while the metadata-tree
+   format prints `format:       v1 (metadata base tree)`. Any v1 volume fell
+   into the second branch (expecting `orphans:`/`missing:`, which the format
+   does not print) and was declared dirty => **every** e2e suite with this gate
+   died at the fsck step. Now the `format: v[01]` family is matched.
+3. **A label rename broke the parser** (`cdeca14`): `test-textzone.sh` and
+   `test-dedupe.sh` looked for `"TEXT  :"`, renamed to `text batch` (`ef4f992`).
+4. **`bang_name_test` encoded an incorrect rule** (`af3b5bc`): it required
+   `n!mbr000`/`n!mbr00000` to survive `unlink('n')` ("%04u never prints this") --
+   wrong: for idx >= 10000 `%04u` prints five digits, and `bf54544` extended the
+   form to 1..7 for exactly this reason. The names are moved into `collide[]` as
+   an accepted remnant.
 
-### Осталось красным
+### Still red
 
-- **unit шард 4: `no_ckp0_surface_test`** (ПРЕДСУЩЕСТВУЕТ, бисекция на `74cab2b`
-  подтвердила). `invf-rollback` отвергает только что поставленный save point с
-  текстом «the delta log ... gone (a fold reset it)», хотя fold НЕ запускался
-  (`fold: not triggered (2 records, 0 MiB)` в том же логе) и захват прошёл
-  (`base_root=62299 delta_end=737`, 52 блока запинено). Чинить вместе с частичным
-  reclaim -- обе задачи в `spt0_pin_take`/restore-проверке. Разбор:
+- **unit shard 4: `no_ckp0_surface_test`** (PRE-EXISTING, bisection on `74cab2b`
+  confirmed). `invf-rollback` rejects a just-placed save point with the text
+  "the delta log ... gone (a fold reset it)", although fold did NOT run
+  (`fold: not triggered (2 records, 0 MiB)` in the same log) and the capture
+  succeeded (`base_root=62299 delta_end=737`, 52 blocks pinned). Fix together with partial
+  reclaim -- both tasks are in `spt0_pin_take`/restore checking. Analysis:
   `WP-SPT0-PARTIAL-RECLAIM.md`.
-- **e2e сьют 2: `test-dedupe.sh`** — `FAIL: free blocks did not stabilize in 6
-  sweeps`. Замер (замер в логе): 120672 → 120622 → 120618 → 120607 → 120586 →
-  120586, дельта 17/50/4/11/21/0. Свободные блоки МОНОТОННО убывают, то есть
-  каждый свип выделяет метаданные (новый save point ~9 блоков + записи дельты), а
-  не освобождает. Наш reclaim-drain наоборот освобождает, так что это не он; но
-  НЕ бисектировано. Родственно предсуществующему unit-падению `dedupe_test`
-  («free blocks increased after deduplication»). Следующий шаг: бисекция на
-  `74cab2b` + решить, чего сьют вправе требовать (стабилизация counts при
-  поколенческих save-point'ах недостижима по построению, либо свип обязан
-  освобождать предыдущий пин).
+- **e2e suite 2: `test-dedupe.sh`** — `FAIL: free blocks did not stabilize in 6
+  sweeps`. Measurement (from the log): 120672 → 120622 → 120618 → 120607 →
+  120586 → 120586, delta 17/50/4/11/21/0. Free blocks decrease MONOTONICALLY,
+  i.e. each sweep allocates metadata (a new save point ~9 blocks + delta
+  records) rather than releasing it. Our reclaim-drain does the opposite --
+  it releases, so it is not the cause; but this has NOT been bisected. Related
+  to the pre-existing unit failure `dedupe_test`
+  ("free blocks increased after deduplication"). Next step: bisection on
+  `74cab2b` + decide what the suite is entitled to demand (stabilization of
+  counts with generational save points is unattainable by construction, or the
+  sweep is obliged to release the previous pin).
 
-## Слепой/полуслепой маппинг: находки по пути записи (2026-11-19)
+## Blind/semi-blind mapping: findings on the write path (2026-11-19)
 
-Запускали картографирование кода агентами на `opencode-go/hy4-flash-free` с запретом
-опираться на комментарии. Отчёт по пути записи (`vol_write.c` + `vol_sweep.c`,
-сохранён в `/var/tmp/blind/seeded-writepath.md`) дал 6 «подозрительных» мест. Ниже —
-разбор: что подтверждается по коду, что нет.
+We ran code mapping with agents on `opencode-go/hy4-flash-free` with comments
+forbidden as a source. The report on the write path (`vol_write.c` +
+`vol_sweep.c`, saved to `/var/tmp/blind/seeded-writepath.md`) produced 6
+"suspicious" spots. Below is the analysis: what is confirmed by the code, what
+is not.
 
-### Подтверждено по коду (требует теста)
+### Confirmed by code (needs a test)
 
-1. **`touched[]`: разные индексные домены.** Заполняется ОТНОСИТЕЛЬНЫМ индексом
-   (`rel_j = j % s->child_segs`, `vol_write.c:435,568`), а читается в ENOSPC-прехеке
-   АБСОЛЮТНЫМ `j` (`vol_write.c:856`). Пока файл в пределах одного child'а
-   (по умолчанию `INVFS_CHILD_SEGS_DEFAULT = 65536` сегментов = 4 ГиБ) значения
-   совпадают; за границей child'а прехек читает чужие слоты и неверно считает
-   `fresh`. Эффект: недо/пере-оценка запаса перед записью (может отказать раньше или
-   пропустить перерасход), не порча. В e2e-легах `INVFS_CHILD_SEGS` форсится малым,
-   то есть это ловится тестом, а не только на 4+ ГиБ файлах. Нужен тест:
-   запись через границу child'а с `-o child_segs=2`.
-2. **`sweep_thread_worker` пересжимает только `zone==RAW && pba!=0`**
-   (`vol_sweep.c:1558`): уже-BINARY/TEXT сегменты повторно не пересматриваются. То
-   есть утверждение «свип пересжимает все сегменты» неверно по коду — это объясняет,
-   почему смена уровня zstd не улучшает уже сжатые данные.
+1. **`touched[]`: different index domains.** It is filled with a RELATIVE index
+   (`rel_j = j % s->child_segs`, `vol_write.c:435,568`), but read in the
+   ENOSPC precheck with the ABSOLUTE `j` (`vol_write.c:856`). As long as the
+   file is within one child (by default `INVFS_CHILD_SEGS_DEFAULT = 65536`
+   segments = 4 GiB) the values coincide; past the child boundary the precheck
+   reads someone else's slots and miscounts `fresh`. Effect: under/over-estimate
+   of headroom before writing (it may refuse early or miss an overrun), not
+   corruption. In e2e legs `INVFS_CHILD_SEGS` is forced small, so this is caught
+   by a test, not only on 4+ GiB files. A test is needed: writing across a child
+   boundary with `-o child_segs=2`.
+2. **`sweep_thread_worker` recompresses only `zone==RAW && pba!=0`**
+   (`vol_sweep.c:1558`): already-BINARY/TEXT segments are not reconsidered. That
+   is, the claim "the sweep recompresses all segments" is incorrect by code --
+   this explains why changing the zstd level does not improve already compressed
+   data.
 
-### Не подтверждено / требует отдельной проверки
+### Not confirmed / requires separate checking
 
-3. `wheat_carry` пишется дважды и в этих файлах не читается (`vol_write.c:20,113,710`).
-4. `dirty` ставится, но `vol_write_commit_impl` его не проверяет (`:1051-1234`):
-   сессия без записи всё равно коммитит рецепт.
-5. `s->new_id` выделяется и проверяется guard'ом свипа, но публикуется другой id
-   (`:1151-1168`).
-6. `vol_sweep_file_generic` (`vol_sweep.c:2019`) вызывает полный `vol_sweep_file`
-   (`:2022`) — имя уже, чем тело; `sweep_locate_ctx` (`:138-143`) не используется.
+3. `wheat_carry` is written twice and is not read in these files (`vol_write.c:20,113,710`).
+4. `dirty` is set, but `vol_write_commit_impl` does not check it (`:1051-1234`):
+   a session with no writes still commits a recipe.
+5. `s->new_id` is allocated and checked by the sweep guard, but a different id
+   is published (`:1151-1168`).
+6. `vol_sweep_file_generic` (`vol_sweep.c:2019`) calls the full `vol_sweep_file`
+   (`:2022`) -- the name is narrower than the body; `sweep_locate_ctx`
+   (`:138-143`) is unused.
 
-Пункты 3-6 — кандидаты в мёртвый код или в неверные имена, а не в дефекты; проверять
-по одному, начиная с 4 (сессия без записи, коммитящая рецепт, — это лишняя работа на
-каждом открытии/закрытии).
+Items 3-6 are candidates for dead code or misleading names, not defects; check
+them one at a time, starting with 4 (a no-write session committing a recipe is
+extra work on every open/close).
 
-## Полный e2e-тир: 29 PASS / 58 (2026-11-19)
+## Full e2e tier: 29 PASS / 58 (2026-11-19)
 
-Прогон `bash tools/run-e2e.sh` по каждому сьюту отдельно (без остановки на первом
-падении). Итог: **29 прошло, 29 упало**. Ниже — группировка по ПРИЧИНЕ, потому что
-29 падений ≠ 29 проблем.
+A run of `bash tools/run-e2e.sh` against each suite separately (without stopping
+at the first failure). Result: **29 passed, 29 failed**. Below is grouping by
+CAUSE, because 29 failures ≠ 29 problems.
 
-### A. Паки устарели относительно движка (≈12 сьютов) — ОКРУЖЕНИЕ, не код
+### A. Packs are stale relative to the engine (≈12 suites) — ENVIRONMENT, not code
 
-`vol: packs from volume: 0 container, 0 codec ...; built-in codecs: 15` — ни один пак
-не загружен. `test-ivpacks` прямо называет причину:
+`vol: packs from volume: 0 container, 0 codec ...; built-in codecs: 15` — no
+packs are loaded. `test-ivpacks` names the reason directly:
 `desc name != manifest (api_version=2 name=ext4fs version=1.0.0 pack_class=containerpack)`.
 
-Проверено отдельно **без** env-override раннера — поведение то же, значит это не мой
-`INVFS_CODECPACKS`. Паки в `/var/tmp/packs` собраны под старый ABI и живут в ДРУГОМ
-репозитории (registry, копия в `D:/.../registry-rescue`). Их надо пересобрать.
+Verified separately **without** the runner's env override -- behavior is the
+same, so this is not my `INVFS_CODECPACKS`. The packs in `/var/tmp/packs` were
+built against an old ABI and live in a DIFFERENT repository (registry, copy at
+`D:/.../registry-rescue`). They need to be rebuilt.
 
-Затронуты: `test-ext4fs`, `test-ntfs`, `test-ntfs-big`, `test-containerpack`,
+Affected: `test-ext4fs`, `test-ntfs`, `test-ntfs-big`, `test-containerpack`,
 `test-cpack-mcost-bitexact`, `test-vdi`, `test-wim`, `test-rawdisk`, `test-ivpacks`,
-`test-sandbox` (внутри гоняет containerpack), `test-rawimg`, `test-exercarve`,
-`test-jxl`, `test-binbatch` (последние четыре считают число пак-действий).
+`test-sandbox` (runs containerpack internally), `test-rawimg`, `test-exercarve`,
+`test-jxl`, `test-binbatch` (the last four count pack actions).
 
-### B. Нет хостовых инструментов / нужен root (≈6) — ОКРУЖЕНИЕ
+### B. Missing host tools / root needed (≈6) — ENVIRONMENT
 
 `test-fatfs` (`mkfs.exfat not installed`), `test-p7z` (`no 7z archiver`),
 `test-flakey` (`/dev/mapper/...`), `test-acl`, `test-seal`, `test-put-failure`
 (rc=127), `test-flushfail` (`harness build`).
 
-### C. Предсуществующий дефект SPT0-restore (2)
+### C. Pre-existing SPT0-restore defect (2)
 
 `test-rollback` (`refusing to roll back: inode 12 segment 0 names block 10420, which
-the save point did not record`), `test-watermark` (`rollback failed`). Тот же дефект,
-что в unit-шарде 4 (`no_ckp0_surface_test`); бисекция на `74cab2b` уже подтвердила
-предсуществование. Разбор: `WP-SPT0-PARTIAL-RECLAIM.md`.
+the save point did not record`), `test-watermark` (`rollback failed`). The same
+defect as in unit shard 4 (`no_ckp0_surface_test`); bisection on `74cab2b` has
+already confirmed it is pre-existing. Analysis: `WP-SPT0-PARTIAL-RECLAIM.md`.
 
-### D. Предсуществующий учёт свободных блоков (1)
+### D. Pre-existing free-block accounting (1)
 
-`test-dedupe` (`free blocks did not stabilize in 6 sweeps`, числа 120672→120586).
+`test-dedupe` (`free blocks did not stabilize in 6 sweeps`, numbers 120672→120586).
 
-### E. Требуют отдельного разбора — вероятно НАШИ или настоящие дефекты (6)
+### E. Need separate analysis — probably OURS or real defects (6)
 
-| сьют | симптом |
+| suite | symptom |
 |---|---|
-| **`test-resize`** | **rc=139 (SIGSEGV)** — падение, наивысший приоритет |
-| `test-writeback-stall` | «gate-on: the drain never ran after the write path went quiet (21s) — a deferral that never ends is a leak, not a yield» |
+| **`test-resize`** | **rc=139 (SIGSEGV)** — a crash, highest priority |
+| `test-writeback-stall` | "gate-on: the drain never ran after the write path went quiet (21s) — a deferral that never ends is a leak, not a yield" |
 | `test-heat` | `INVFS_HEAT_INIT did not seed (rheat=0)` |
 | `test-multidev` | `no demotion under pressure` |
 | `test-pngflac` | `palette.png: unexpected stamp cls=8 algo=1 gen=1` |
-| `test-dedupe` (см. D) | возможно связано с `touched[]`/учётом |
+| `test-dedupe` (see D) | possibly related to `touched[]`/accounting |
 
-Порядок разбора: сначала `test-resize` (это крэш, а не ассерт), затем
-`test-writeback-stall` (похоже на реальную утечку отложенной работы), потом
+Analysis order: first `test-resize` (this is a crash, not an assert), then
+`test-writeback-stall` (looks like a real deferred-work leak), then
 `test-heat`/`test-multidev`/`test-pngflac`.
 
-## Схема «агент в worktree»: результат двух попыток (2026-11-19)
+## "Agent in worktree" scheme: result of two attempts (2026-11-19)
 
-**Работает.** Агент B (SPT0 rollback) нашёл архитектурную причину и починил её:
-`invf-fsck` без `-f` безусловно звал `vol_fold()` и мутировал том под живым save
-point. Дифф 20 строк, гейты прогнаны мной независимо (no_ckp0 PASS, rollback PASS,
-watermark PASS), коммит `89d76da`.
+**Worked.** Agent B (SPT0 rollback) found the architectural cause and fixed it:
+`invf-fsck` without `-f` unconditionally called `vol_fold()` and mutated the
+volume under a live save point. A 20-line diff, gates run independently by me
+(no_ckp0 PASS, rollback PASS, watermark PASS), commit `89d76da`.
 
-**Провалился по инфраструктуре.** Агент A (`test-resize` SIGSEGV) получил
-`server_error: The inference service is overloaded` (rc=1), `RESULT.md` не написал,
-а успел изменить только **харнесс** `tools/test-resize.sh`:
-- `export INVFS_LAZY_RECLAIM=0` (иначе прямой прогон сьюта наследует env вызывающего);
-- сборка `bin/invf-anchor_test` по требованию (это не часть `make -j8` TOOLS).
+**Failed on infrastructure.** Agent A (`test-resize` SIGSEGV) got
+`server_error: The inference service is overloaded` (rc=1), did not write
+`RESULT.md`, and only managed to change the **harness** `tools/test-resize.sh`:
+- `export INVFS_LAZY_RECLAIM=0` (otherwise a direct suite run inherits the
+  caller's env);
+- build `bin/invf-anchor_test` on demand (it is not part of `make -j8` TOOLS).
 
-Эти правки **не** являются фиксом крэша и в основное дерево НЕ взяты: правка теста
-вместо причины запрещена правилами задачи. Обе могут быть полезны отдельно —
-проверить и, если нужны, применять осознанно, а не как «зелёный тест».
+These edits are **not** a crash fix and were NOT taken into the main tree:
+fixing the test instead of the cause is forbidden by the task rules. Both may
+be useful separately -- check them and, if needed, apply consciously, not as a
+"green test".
 
-**SIGSEGV в `test-resize` остаётся открытым.** Подозреваемый из слепой карты:
-`vol_reclaim.c` освобождает страницы метаданных; пин-гард стоит только в
-`volume.c` (и намеренный обход `v->retain_release=1` — не дефект). Нужен
-минимальный повтор: resize + reclaim + запиненная страница.
+**The SIGSEGV in `test-resize` remains open.** Suspect from the blind map:
+`vol_reclaim.c` frees metadata pages; the pin guard is only in `volume.c`
+(and the deliberate bypass `v->retain_release=1` is not a defect). A minimal
+repro is needed: resize + reclaim + a pinned page.
 
-## Агент C (`touched[]`): фикс верный, но тест НЕ доказывает дефект — отклонено
+## Agent C (`touched[]`): the fix is correct, but the test does NOT prove the defect -- rejected
 
-Агент в worktree `/var/tmp/wtC` предложил верный по смыслу фикс:
+An agent in worktree `/var/tmp/wtC` proposed a fix correct in substance:
 ```c
 -        for (j = first; j <= last; j++)
 -            if (!(j < s->touched_cap && s->touched[j])) fresh++;
@@ -865,30 +897,30 @@ watermark PASS), коммит `89d76da`.
 +            if (!(rel_j < s->touched_cap && s->touched[rel_j])) fresh++;
 +        }
 ```
-и новый тест `src/cli/write_touched_domain_test.c` (`child_segs=4`, тугой бюджет,
-проверка отсутствия ложного ENOSPC).
+and a new test `src/cli/write_touched_domain_test.c` (`child_segs=4`, tight
+budget, check for no false ENOSPC).
 
-**Гейт приёмки провален:** тест проходит **и без фикса** (проверено: `git stash`
-правки `vol_write.c`, пересборка, прогон — те же 8/8 PASS). То есть тест
-нечувствителен, а фикс без падающего теста не принимается (правило задачи).
+**Acceptance gate failed:** the test passes **without the fix too** (verified:
+`git stash` of the `vol_write.c` edits, rebuild, run -- the same 8/8 PASS). The
+test is not sensitive, and a fix without a failing test is not accepted (task
+rule).
 
-**Почему нечувствителен.** Разница между абсолютным и относительным индексом
-проявляется только когда ОДИН И ТОТ ЖЕ относительный слот `j % child_segs`
-трогается дважды в РАЗНЫХ child'ах: тогда абсолютное чтение видит чужой/нулевой
-слот и считает сегмент «свежим», а относительное — уже тронутым. Тест же трогает
-разные относительные слоты, поэтому оба варианта дают одинаковый `fresh`.
+**Why it is insensitive.** The difference between the absolute and relative
+index appears only when the SAME relative slot `j % child_segs` is touched twice
+in DIFFERENT children: then the absolute read sees someone else's/zero slot and
+considers the segment "fresh", while the relative one is already touched. The
+test touches different relative slots, so both variants give the same `fresh`.
 
-**Что должно быть в чувствительном тесте** (рецепт для следующей попытки):
-1. `child_segs = 2..4`, том с бюджетом, где разница в ОДИН сегмент уже
-   переворачивает вердикт (подобрать `reserved_blocks`/`hard_min_blocks`, а не
+**What a sensitive test should contain** (recipe for the next attempt):
+1. `child_segs = 2..4`, a volume with a budget where a ONE-segment difference
+   already flips the verdict (pick `reserved_blocks`/`hard_min_blocks`, not
    `meta_reserved_pct`);
-2. записать сегмент в child 0, затем **тот же относительный** слот в child 1
-   (`j` и `j + child_segs`) — так, чтобы `touched[rel]` был выставлен;
-3. ПОВТОРНО тронуть этот же относительный слот в следующем child'е и потребовать
-   отсутствия `-2`;
-4. контрольная нога: тот же сценарий без фикса обязан давать `-2` (иначе тест
-   снова вакуумный).
+2. write a segment in child 0, then **the same relative** slot in child 1
+   (`j` and `j + child_segs`) so that `touched[rel]` is set;
+3. RE-touch that same relative slot in the next child and require no `-2`;
+4. control leg: the same scenario without the fix must give `-2` (otherwise the
+   test is vacuous again).
 
-Патч сохранён в `/var/tmp/patches/touched-domain-REJECTED.patch` (не влит).
-Дефект по-прежнему считается реальным по инспекции кода, но формально
-недоказанным.
+The patch is saved at `/var/tmp/patches/touched-domain-REJECTED.patch` (not
+merged). The defect is still considered real by code inspection, but formally
+unproven.

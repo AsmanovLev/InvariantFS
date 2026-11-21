@@ -1,33 +1,33 @@
-# Честное сравнение с squashfs (место) — измерено
+# An honest comparison with squashfs (space) — measured
 
-Корпус: каталог 64 МиБ, 2889 файлов (реальный Debian), выгружен из
-`/dev/shm/small.img` через `ext4fs extract_batch`. Сжатие zstd-19 у обоих.
-InvariantFS: том 1 ГиБ, запись через FUSE, 3 свипа `INVFS_PROFILE=balanced`.
+Corpus: a 64 MiB directory, 2889 files (real Debian), extracted from
+`/dev/shm/small.img` via `ext4fs extract_batch`. zstd-19 compression on both.
+InvariantFS: 1 GiB volume, writing via FUSE, 3 sweeps `INVFS_PROFILE=balanced`.
 
-## Ключевая методическая ошибка, которую надо не повторить
+## Key methodological error not to repeat
 
-Сравнивать нельзя при разных единицах пулинга. У нас единица — `TZ_BATCH_MAX`
-(4 МиБ), у squashfs блок 128 КиБ (максимум 1 МиБ). Первое сравнение "22.8 МиБ
-против 23 МБ = паритет" было некорректным: оно опиралось на нашу вчетверо
-большую единицу.
+Comparison is invalid when pooling units differ. Our unit is `TZ_BATCH_MAX`
+(4 MiB); squashfs has a 128 KiB block (1 MiB max). The first comparison "22.8 MiB
+versus 23 MB = parity" was incorrect: it relied on our four-times-larger
+unit.
 
-Для выравнивания добавлен `INVFS_TZ_BATCH_KB` (4..65536).
+To level the playing field, `INVFS_TZ_BATCH_KB` (4..65536) was added.
 
-## Результат при РАВНОЙ гранулярности
+## Result at EQUAL granularity
 
-| единица пулинга | InvariantFS (данные) | squashfs |
+| pooling unit | InvariantFS (data) | squashfs |
 |---|---|---|
-| 128 КиБ | 25.9 МиБ | 23 MB (`-b 128K`, дефолт) |
-| 1 МиБ | 23.8 МиБ | 21 MB (`-b 1M`) |
-| 4 МиБ | 22.8 МиБ | — (у squashfs предел 1 МиБ) |
+| 128 KiB | 25.9 MiB | 23 MB (`-b 128K`, default) |
+| 1 MiB | 23.8 MiB | 21 MB (`-b 1M`) |
+| 4 MiB | 22.8 MiB | — (squashfs limit is 1 MiB) |
 
-При равной гранулярности мы **на 13% хуже**, и разрыв одинаков на обоих
-размерах -- значит причина не в размере блока.
+At equal granularity we are **13% worse**, and the gap is the same at both
+sizes -- so the cause is not the block size.
 
-## Почему: суб-блочные сегменты занимают целый блок
+## Why: sub-block segments occupy a whole block
 
-`INVFS_DEBUG_SEGS=1 invf-stats -v` (гистограмма размеров сегментов и
-округление до блоков):
+`INVFS_DEBUG_SEGS=1 invf-stats -v` (histogram of segment sizes and
+rounding up to blocks):
 
 ```
 [segs] uncompressed: 696 ent(s), logic 3.40 MiB, physical 4.93 MiB,
@@ -43,161 +43,161 @@ InvariantFS: том 1 ГиБ, запись через FUSE, 3 свипа `INVFS_
 [segs]   64-256K  n=89   logic 5.56 MiB  physical 1.91 MiB  saving 3.66 MiB
 ```
 
-Сегмент занимает ЦЕЛЫЕ блоки (`seg_extent`), поэтому 1.8 КиБ данных стоят
-4096 байт: в bucket `<4K` 524 сегмента дают 2.05 МиБ физически при 0.90 МиБ
-данных. То же в сжатом классе: 340 сегментов `<4K` -> 1.33 МиБ.
+A segment occupies WHOLE blocks (`seg_extent`), so 1.8 KiB of data costs
+4096 bytes: in the `<4K` bucket 524 segments yield 2.05 MiB physically for 0.90 MiB
+of data. Same in the compressed class: 340 `<4K` segments -> 1.33 MiB.
 
-Итого на суб-блочных сегментах: **1.14 + 0.76 = 1.90 МиБ (~9% наших данных)**.
+Total for sub-block segments: **1.14 + 0.76 = 1.90 MiB (~9% of our data)**.
 
-## Что с этим делать
+## What to do about it
 
-squashfs этой потери не имеет: его fragments складывают хвосты мелких файлов в
-общие блоки (замер: `-no-fragments` 24 MB против 23 MB по умолчанию).
+squashfs does not have this loss: its fragments pack the tails of small files into
+shared blocks (measurement: `-no-fragments` 24 MB versus 23 MB by default).
 
-Наш аналог -- батчи (уже есть: TEXT -- PPMd, binary -- zstd, `TZ_BATCH_MAX`),
-но мелкие бинарные файлы в них не попадают и пишутся отдельными сегментами.
-Если заворачивать файлы с payload < ~4 КиБ в binary-батч независимо от
-выигрыша сжатия (блочное округление всё равно дороже), экономия ~1.9 МиБ, то
-есть 22.8 -> ~20.9 МиБ против 21 MB у `squashfs -b 1M`: паритет уже при равной
-гранулярности.
+Our analog -- batches (already present: TEXT -- PPMd, binary -- zstd, `TZ_BATCH_MAX`),
+but small binary files do not get into them and are written as separate segments.
+If files with a payload < ~4 KiB were wrapped into a binary batch regardless of
+compression gain (block rounding is more expensive anyway), the saving would be ~1.9 MiB, i.e.
+22.8 -> ~20.9 MiB versus 21 MB for `squashfs -b 1M`: parity already at equal
+granularity.
 
-## Отдельно: контейнерный корпус
+## Separately: the container corpus
 
-Две копии образа 256 МиБ (512 МиБ логически, 64 МБ файлов), zstd-19:
+Two copies of a 256 MiB image (512 MiB logically, 64 MB of files), zstd-19:
 
-| | размер |
+| | size |
 |---|---|
 | squashfs | 23 MB |
-| InvariantFS: сжатые 23.1 + несжимаемые 2.8 | 25.9 МиБ (+13%) |
-| + страницы метаданных в обороте | +1.5 МиБ |
-| + резерв метазоны (64.1 МиБ на 2 ГиБ тома) | -> `used` 91.4 МиБ |
+| InvariantFS: compressed 23.1 + incompressible 2.8 | 25.9 MiB (+13%) |
+| + metadata pages in circulation | +1.5 MiB |
+| + meta-zone reserve (64.1 MiB on a 2 GiB volume) | -> `used` 91.4 MiB |
 
-Листовая раскладка (leaf) кладёт текстовых членов в блоб, где работает
-посегментный zstd вместо PPMd-батча: в замере на каталоге TEXT-батч дал
-12.6 МиБ на 50.3 МиБ текста (4x). Это и есть +13%.
+Leaf layout puts text members into a blob, where per-segment zstd operates
+instead of a PPMd batch: in the directory measurement the TEXT batch produced
+12.6 MiB out of 50.3 MiB of text (4x). That is the +13%.
 
-## Что НЕ является причиной (проверено)
+## What is NOT the cause (verified)
 
-- уровни сжатия: `CPACK_ZSTD_LANE=19`, профиль balanced = 19 (число в
-  `algo=zstd(1)` -- номер алгоритма, а не уровень);
-- дедуп: обе копии делят один рецепт и pba;
-- несжимаемые данные (4.8 МиБ, 0.70x) -- это реальный gzip-payload
-  (657073 -> zstd 657104, 1.00x), а не накладные расходы лейна.
+- compression levels: `CPACK_ZSTD_LANE=19`, balanced profile = 19 (the number in
+  `algo=zstd(1)` -- is the algorithm number, not the level);
+- dedupe: both copies share one recipe and pba;
+- incompressible data (4.8 MiB, 0.70x) -- this is a real gzip payload
+  (657073 -> zstd 657104, 1.00x), not lane overhead.
 
-## ФИКС: суб-блочные payload'ы больше не занимают целый блок
+## FIX: sub-block payloads no longer occupy a whole block
 
-Причина была двойная:
-1. `sweep_dispatch` для файлов < 4096 не имел батч-пути, а структурные лейны
-   (gzip) перехватывали их и при отказе ставили `GENERIC_GUARD` и делали
-   `return 0` -- "свипнуто, готово", так что батч-ветка ниже для них была
-   недостижима;
-2. `vol_tz_flush` вообще выбрасывал члена батча с `bfam == 0`, а
-   `invfs_binary_family` сам требует >= `INVFS_BIN_MIN_SIZE` (4096) -- то есть
-   все суб-блочные payload'ы выкидывались по построению.
+The cause was twofold:
+1. `sweep_dispatch` had no batch path for files < 4096, and structural lanes
+   (gzip) intercepted them and, on refusal, set `GENERIC_GUARD` and did
+   `return 0` -- "swept, done", so the batch branch below for them was
+   unreachable;
+2. `vol_tz_flush` simply discarded a batch member with `bfam == 0`, while
+   `invfs_binary_family` itself requires >= `INVFS_BIN_MIN_SIZE` (4096) -- i.e.
+   all sub-block payloads were discarded by construction.
 
-Сделано: суб-блочный не-текстовый payload уходит в общий ZSTD-батч ДО
-структурных лейнов, а семейство в запечатывании трактуется как выбор BCJ, а не
-как допуск (для payload'ов < блока; всё, что не меньше блока, идёт по-старому).
+Done: a sub-block non-text payload goes into the shared ZSTD batch BEFORE
+structural lanes, and the family at seal time is treated as a BCJ choice, not
+as permission (for payloads < block; everything not smaller than a block follows the old path).
 
-### Замер (тот же корпус 64 МиБ / 2889 файлов, zstd-19)
+### Measurement (same 64 MiB / 2889 files corpus, zstd-19)
 
-| | до | после |
+| | before | after |
 |---|---|---|
-| несжатый класс | 696 сегм., 3.40 логич. -> 4.93 физ. (waste 1.52) | **173 сегм., 2.50 -> 2.88 (waste 0.39)** |
-| сжатый класс | 626 сегм., 11.10 -> 5.35 | **294 сегм., 10.55 -> 4.05** |
-| текст-батч | 12.6 | 13.6 |
-| **данные всего** | **22.88 МиБ** | **20.53 МиБ (-10.3%)** |
+| uncompressed class | 696 segs, 3.40 logical -> 4.93 physical (waste 1.52) | **173 segs, 2.50 -> 2.88 (waste 0.39)** |
+| compressed class | 626 segs, 11.10 -> 5.35 | **294 segs, 10.55 -> 4.05** |
+| text batch | 12.6 | 13.6 |
+| **data total** | **22.88 MiB** | **20.53 MiB (-10.3%)** |
 | unclaimed | 5.9 | 3.7 |
-| сверка содержимого | -- | **2889/2889 файлов бит-в-бит** |
+| content verification | -- | **2889/2889 files bit-for-bit** |
 
-### Сравнение при РАВНОЙ единице пулинга (после фикса)
+### Comparison at EQUAL pooling unit (after fix)
 
-| единица | InvariantFS | squashfs | разрыв |
+| unit | InvariantFS | squashfs | gap |
 |---|---|---|---|
-| 128 КиБ | 23.6 МиБ | 23 MB | +2.6% |
-| 1 МиБ | 21.5 МиБ | 21 MB | +2.4% |
-| 4 МиБ (наш дефолт) | **20.5 МиБ** | -- (макс 1 МиБ) | лучше |
+| 128 KiB | 23.6 MiB | 23 MB | +2.6% |
+| 1 MiB | 21.5 MiB | 21 MB | +2.4% |
+| 4 MiB (our default) | **20.5 MiB** | -- (max 1 MiB) | better |
 
-До фикса разрыв был +13% на обоих размерах.
+Before the fix the gap was +13% at both sizes.
 
-## ОПРОВЕРГНУТО замером: text-члены в PPMd-батч не дают выигрыша
+## DISPROVEN by measurement: text members in a PPMd batch give no gain
 
-Гипотеза: листовая раскладка кладёт текст гостя в блоб, где работает
-посегментный zstd, а не PPMd -- и это объясняет +13% контейнерного корпуса.
+Hypothesis: leaf layout puts guest text into a blob, where per-segment
+zstd operates rather than PPMd -- and this explains the +13% of the container corpus.
 
-Сделали и померили (корпус: 2 копии образа 256 МиБ, 2889 файлов, zstd-19):
-- классификатор листов оставлял text-членов inode'ами (196 из 2889);
-- отложенный цикл больше не пропускался в blob-режиме;
-- батч-лейнам разрешили брать членов-инодов (`vol_name_is_container_member`).
+We did it and measured it (corpus: 2 copies of a 256 MiB image, 2889 files, zstd-19):
+- the leaf classifier left text members as inodes (196 of 2889);
+- the deferred loop was no longer skipped in blob mode;
+- batch lanes were allowed to take inode members (`vol_name_is_container_member`).
 
-Результат:
-
-```
-до  : compressed 23.1 + uncompressed 2.8                 = 25.9 МиБ
-после: compressed 20.4 + text batch 2.6 + uncompressed 2.8 = 25.8 МиБ
-```
-
-Текст-батч РАБОТАЕТ (23.3 МиБ -> 2.6 МиБ), но суммарно это **-0.1 МиБ**, то
-есть ничего, ценой +196 inode-строк. Причина: блоб -- ОДИН поток, сжимаемый
-64-КиБ сегментами, поэтому межфайловая избыточность текста в нём и так
-захватывается; PPMd обгоняет zstd только на разреженном контексте, которого
-внутри образа не остаётся.
-
-Код откатан. Значит +13% контейнерного корпуса имеет другую причину; из
-непроверенного остаётся гранулярность: блоб режется на 64-КиБ сегменты со
-свежим контекстом zstd, а squashfs -- на 128 КиБ / 1 МиБ блоки. Проверять это
-надо замером `INVFS_SEGMENT_*`-порогов (или сравнением с squashfs -b 64K =
-24 MB на том же корпусе), а не рассуждением.
-
-## ПРИЧИНА +13% НАЙДЕНА: округление сегментов до блоков
-
-Гипотеза о гранулярности проверена прямым замером. Диагностика
-`INVFS_DEBUG_SEGS=1` считает по КАЖДОМУ сегменту stored = 8 + csize и
-физические блоки (`seg_extent`).
-
-Корпус: две идентичные копии образа 256 МиБ (64 МБ файлов), zstd-19,
-доставка через `invf-import` (без FUSE), 3 свипа.
+Result:
 
 ```
-compressed   : 2008 сегм., stored 42.26 МиБ -> physical 46.20 МиБ, waste 3.95 МиБ (8.5%)
-uncompressed :  344 сегм., stored  4.98 МиБ -> physical  5.76 МиБ, waste 0.78 МиБ (13.5%)
+before: compressed 23.1 + uncompressed 2.8                 = 25.9 MiB
+after : compressed 20.4 + text batch 2.6 + uncompressed 2.8 = 25.8 MiB
 ```
 
-(сегменты двух копий считаются дважды; уникальные потери ~2.37 МиБ на 25.9 МиБ
-данных = **9%**).
+The text batch WORKS (23.3 MiB -> 2.6 MiB), but overall this is **-0.1 MiB**, i.e.
+nothing, at the cost of +196 inode rows. The reason: a blob is ONE stream, compressed in
+64-KiB segments, so cross-file redundancy of text in it is already
+captured; PPMd beats zstd only on sparse context, of which
+none remains inside the image.
 
-Механизм: сегмент = `[8 Б заголовок]+[compressed payload]`, и это занимает
-ЦЕЛЫЕ блоки. 64-КиБ payload сжимается до ~21 КиБ, +8 Б -> 6 блоков = 24 КиБ,
-то есть ~12% в мусор на каждом сегменте.
+The code was rolled back. So the +13% of the container corpus has another cause; what remains
+unverified is granularity: the blob is cut into 64-KiB segments with
+fresh zstd context, while squashfs -- into 128 KiB / 1 MiB blocks. This must be checked
+by measuring `INVFS_SEGMENT_*` thresholds (or by comparison with squashfs -b 64K =
+24 MB on the same corpus), not by reasoning.
 
-### Кривая по размеру сегмента (сборка с другим INVFS_SEGMENT_SIZE)
+## CAUSE OF +13% FOUND: segment-to-block rounding
 
-| сегмент | наши данные всего | waste (compressed) | бит-точность |
+The granularity hypothesis was verified by direct measurement. The
+`INVFS_DEBUG_SEGS=1` diagnostic counts, for EACH segment, stored = 8 + csize and
+physical blocks (`seg_extent`).
+
+Corpus: two identical copies of a 256 MiB image (64 MB of files), zstd-19,
+delivered via `invf-import` (without FUSE), 3 sweeps.
+
+```
+compressed   : 2008 segs, stored 42.26 MiB -> physical 46.20 MiB, waste 3.95 MiB (8.5%)
+uncompressed :  344 segs, stored  4.98 MiB -> physical  5.76 MiB, waste 0.78 MiB (13.5%)
+```
+
+(segments of the two copies are counted twice; unique loss ~2.37 MiB on 25.9 MiB
+of data = **9%**).
+
+Mechanism: a segment = `[8 B header]+[compressed payload]`, and this occupies
+WHOLE blocks. A 64-KiB payload compresses to ~21 KiB, +8 B -> 6 blocks = 24 KiB,
+i.e. ~12% into garbage on every segment.
+
+### Curve by segment size (build with a different INVFS_SEGMENT_SIZE)
+
+| segment | our data total | waste (compressed) | bit-exactness |
 |---|---|---|---|
-| 64 КиБ (текущий) | **25.9 МиБ** | 8.5% | ок |
-| 256 КиБ | **22.7 МиБ** | 2.5% | ок |
-| 1 МиБ | **20.8 МиБ** | 0.7% | ок |
+| 64 KiB (current) | **25.9 MiB** | 8.5% | ok |
+| 256 KiB | **22.7 MiB** | 2.5% | ok |
+| 1 MiB | **20.8 MiB** | 0.7% | ok |
 | squashfs -b 128K | 23 MB | -- | -- |
 | squashfs -b 1M | 21 MB | -- | -- |
 
-То есть при 1 МиБ сегменте мы ОБГОНЯЕМ лучшую конфигурацию squashfs
-(20.8 против 21 MB), и сжатие у нас не хуже: 18.0 МиБ compressed против
-~18.2 МиБ у squashfs (21 минус 2.8 МиБ несжимаемого gzip-payload).
+That is, with a 1 MiB segment we BEAT the best squashfs configuration
+(20.8 versus 21 MB), and our compression is no worse: 18.0 MiB compressed versus
+~18.2 MiB for squashfs (21 minus 2.8 MiB of incompressible gzip payload).
 
-### Что это значит для политики (решение -- за владельцем формата)
+### What this means for policy (decision -- up to the format owner)
 
-Плюсы крупных сегментов: -20% места на контейнерном корпусе (25.9 -> 20.8).
-Минусы:
-1. **Дедуп**: гранулярность дедупа равна сегменту. Замерено ранее: 4 КиБ дают
-   межобразного дедупа 4.60% против 7.4% на 64 КиБ; 1 МиБ убьёт near-duplicate
-   дедуп почти полностью.
-2. **Чтение**: случайные 4 КиБ внутри большого файла требуют распаковки
-   сегмента -- 64 КиБ сейчас, 1 МиБ тогда (16x).
-3. **Формат**: `INVFS_SEGMENT_SIZE` используется в 144 местах, включая seal
-   (символ = сегмент) и тесты, поэтому это не однострочник, а поле политики в
-   суперблоке (v0.7, формат не заморожен).
+Pros of large segments: -20% space on the container corpus (25.9 -> 20.8).
+Cons:
+1. **Dedupe**: dedupe granularity equals the segment. Measured earlier: 4 KiB gives
+   cross-image dedupe 4.60% versus 7.4% at 64 KiB; 1 MiB will kill near-duplicate
+   dedupe almost entirely.
+2. **Read**: random 4 KiB inside a large file requires decompressing
+   a segment -- 64 KiB now, 1 MiB then (16x).
+3. **Format**: `INVFS_SEGMENT_SIZE` is used in 144 places, including seal
+   (symbol = segment) and tests, so this is not a one-liner but a policy field in
+   the superblock (v0.7, format not frozen).
 
-Вариант, который выглядит лучшим компромиссом: размер сегмента -- СВОЙСТВО ТОМА
-(поле в суперблоке), по умолчанию 64 КиБ для дедуп-ориентированных томов и
-1 МиБ для томов под крупные контейнеры, с явным предупреждением о стоимости
-случайного чтения.
+The option that looks like the best compromise: segment size is a VOLUME PROPERTY
+(a field in the superblock), defaulting to 64 KiB for dedupe-oriented volumes and
+1 MiB for volumes holding large containers, with an explicit warning about the cost
+of random reads.

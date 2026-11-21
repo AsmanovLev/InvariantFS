@@ -1,42 +1,42 @@
-# Зачем этот проект
+# Why this project
 
-> Одна страница. Всё остальное (ADR, WP, бенчмарки) судится против неё.
+> One page. Everything else (ADRs, WPs, benchmarks) is judged against it.
 
-## Боль, из которой проект родился
+## The pain the project was born from
 
-**Личная и конкретная.** Есть небольшая кучка сырых образов, сжатых zstd/xz,
-в сумме **не более нескольких терабайт**. Их надо **уплотнить в один диск на 2 ТБ**
-и дальше жить с ними: находить, читать, монтировать, обновлять, откатывать.
+**Personal and concrete.** There is a small handful of raw images compressed with zstd/xz,
+totaling **no more than a few terabytes**. They need to be **packed onto a single 2 TB disk**
+and then lived with: found, read, mounted, updated, rolled back.
 
-Не «нужна файловая система». Нужно, чтобы эти несколько терабайт **поместились**
-и чтобы при этом **ничего не потерялось тихо**.
+Not “we need a filesystem”. What is needed is for these few terabytes to **fit**
+and for **nothing to be lost silently** in the process.
 
-## Два требования, и второе не менее важное
+## Two requirements, and the second is no less important
 
-1. **Место.** Содержимое образов во многом повторяется (одни и те же системы,
-   пакеты, файлы в разных обёртках), но каждый образ сжат независимо — поэтому
-   блочный дедуп (ZFS/btrfs/duperemove) на них не работает: он видит разные
-   сжатые байты одного и того же. Нужен дедуп **по содержимому сквозь сжатие**,
-   иначе 2 ТБ не хватит.
-2. **Уверенность.** «Риск есть, что где-то что-то пойдёт не так.» Это не недоверие
-   к форматам — это нежелание узнать о потере через год. Значит нужна не надежда,
-   а **проверяемость**: каждый файл можно проверить на бит-точность, любую
-   операцию — доказать, а не предположить.
+1. **Space.** The content of the images largely repeats (the same systems,
+   packages, files in different wrappers), but each image is compressed independently — so
+   block-level dedupe (ZFS/btrfs/duperemove) does not work on them: it sees different
+   compressed bytes of the same thing. What is needed is dedupe **by content through compression**,
+   otherwise 2 TB will not be enough.
+2. **Confidence.** “There is a risk that something somewhere will go wrong.” This is not distrust
+   of the formats — it is not wanting to learn about a loss a year later. So what is needed is not hope,
+   but **verifiability**: every file can be checked for bit-exactness, any
+   operation — proved, not assumed.
 
-Отсюда и инвариант в README: `what you write comes back byte-identical`. Он не
-самоцель, он — способ получить (2) при том, что ради (1) мы позволяем себе
-**преобразовывать** данные на диске (сжимать, декомпозировать, дедуплицировать).
+Hence the invariant in the README: `what you write comes back byte-identical`. It is not
+an end in itself; it is a way to achieve (2) given that for the sake of (1) we allow ourselves to
+**transform** data on disk (compress, decompose, deduplicate).
 
-## Что из этого следует для приоритетов
+## What follows from this for priorities
 
-| первично | вторично |
+| primary | secondary |
 |---|---|
-| сквозь-сжатие: увидеть содержимое `.zst`/`.xz`/qcow2 образа и дедуплицировать его | динамические экстенты, лестница размеров (это про место, но после того как дедуп вообще заработает) |
-| проверяемость: verify/scrub, доказанная обратимость, отсутствие «тихой» порчи | скорость, профили, тюнинг |
-| способность **ответить до начала** «поместится ли» (замер уникального содержимого) | удобства, computed views (ADR-013) |
-| понятность: удалить мёртвые слои и лживые обещания (иначе уверенности нет) | переписывание на другой язык |
+| through-compression: see the content of a `.zst`/`.xz`/qcow2 image and deduplicate it | dynamic extents, size ladder (this is about space, but after dedupe works at all) |
+| verifiability: verify/scrub, proven reversibility, no “silent” corruption | speed, profiles, tuning |
+| the ability to **answer beforehand** “will it fit” (measurement of unique content) | conveniences, computed views (ADR-013) |
+| clarity: remove dead layers and false promises (otherwise there is no confidence) | rewriting in another language |
 
-## Критерий любого решения
+## The criterion for any decision
 
-> Помогает ли это уложить мои образы в 2 ТБ **и** быть уверенным, что ничего не
-> потерялось? Если нет — это вторично, и оно не имеет права усложнять первичное.
+> Does this help fit my images into 2 TB **and** be confident that nothing was
+> lost? If not — it is secondary, and it has no right to complicate the primary.

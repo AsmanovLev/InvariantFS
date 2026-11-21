@@ -1,317 +1,317 @@
-# Концепты InvariantFS
+# InvariantFS Concepts
 
-Документ для того, кто открывает код через полгода (в том числе для себя).
-Описывает **модель**, а не API. Там, где текущий код расходится с моделью, это
-сказано явно: помечено `СЕЙЧАС` и `ЦЕЛЬ`.
-
----
-
-## 1. Устройства и зоны
-
-Сквозное адресное пространство: по смещению видно, какое это устройство.
-
-```
-dev0 = SSD   ┌ metadata zone ──── суперблок, B-дерево, inode-area, delta, битмап
-             ├ RAW zone ───────── горячие данные, сюда пишется всё новое
-             └ tier arena ─────── ускоряющие копии данных, чей канон на dev1
-
-dev1 = HDD   ┌ metadata mirror ── копия метаданных по ТЕМ ЖЕ смещениям (режим A)
-             └ shadow zone ────── канонический архив данных + пулы delta/mbuf
-```
-
-`shadow_zone` — не «запасное место», а **канон** для всего, что уехало свипом.
-После этого HDD перестаёт быть расходным: там лежат единственные копии
-холодных данных.
+A document for whoever opens the code six months from now (including yourself).
+It describes the **model**, not the API. Where the current code diverges from the
+model, this is stated explicitly: marked as `NOW` and `TARGET`.
 
 ---
 
-## 2. Две независимые оси репликации
+## 1. Devices and Zones
 
-Их постоянно путают, поэтому явно:
+A single flat address space: the offset tells you which device it is.
 
-| ось | варианты |
+```
+dev0 = SSD   ┌ metadata zone ──── superblock, B-tree, inode-area, delta, bitmap
+             ├ RAW zone ───────── hot data, all new writes go here
+             └ tier arena ─────── accelerating copies of data whose canon is on dev1
+
+dev1 = HDD   ┌ metadata mirror ── copy of metadata at THE SAME offsets (mode A)
+             └ shadow zone ────── canonical data archive + delta/mbuf pools
+```
+
+`shadow_zone` is not "spare space" but the **canon** for everything moved by sweep.
+After that, the HDD stops being expendable: it holds the only copies
+of cold data.
+
+---
+
+## 2. Two Independent Replication Axes
+
+They are constantly confused, so explicitly:
+
+| axis | options |
 |---|---|
-| **метаданные** | `write-through` (СЕЙЧАС) — идентичная копия каждого flush'а; `checkpoint` (ЦЕЛЬ) — снимок на момент seal/sweep |
-| **данные** | только RAW (СЕЙЧАС, дефолт); дублируются на dev1 (`INVFS_RAW_MIRROR=1`); канон в shadow после sweep |
+| **metadata** | `write-through` (NOW) — identical copy of every flush; `checkpoint` (TARGET) — snapshot at seal/sweep time |
+| **data** | RAW only (NOW, default); duplicated on dev1 (`INVFS_RAW_MIRROR=1`); canon in shadow after sweep |
 
-Оси независимы: можно иметь write-through метаданные и RAW-only данные (это
-сегодняшний дефолт), а можно чекпоинтные метаданные и канон в shadow.
+The axes are independent: you can have write-through metadata and RAW-only data (this
+is today's default), or checkpoint metadata and canon in shadow.
 
-### 2.1 Режим A — write-through (СЕЙЧАС)
+### 2.1 Mode A — write-through (NOW)
 
-Один namespace, две идентичные копии метаданных, каждый flush сертифицируется
-`DEVT.sync_seq`. Нужен ресинк при расхождении. Плюс: любое устройство
-открывается само. Минус: сертификат, ресинк, стоимость ремонта.
+One namespace, two identical copies of metadata, each flush certified by
+`DEVT.sync_seq`. Resync is needed on divergence. Plus: either device
+opens on its own. Minus: certificate, resync, cost of repair.
 
-### 2.2 Режим B — checkpoint (ЦЕЛЬ)
+### 2.2 Mode B — checkpoint (TARGET)
 
-Метаданные тени — снимок на момент последнего seal/sweep. Дельты изменений
-живут в delta-логе на RAW и на тень не уезжают.
+Shadow metadata is a snapshot at the time of the last seal/sweep. Change deltas
+live in the delta log on RAW and are not moved to shadow.
 
-Следствия, которые надо принять вместе с режимом:
+Consequences that must be accepted along with the mode:
 
-- **«RAW один читаем» — не контракт и не может им быть:** база файла на тени,
-  дельта на RAW, восстановить нечего математически.
-- **«Тень одна читаема» — контракт, но означает последнее запечатанное
-  состояние**, а не текущее.
-- **Изменённый засвипленный файл переходный:** нужны оба устройства.
-- **Потеря RAW = потеря хвоста после последнего seal.** Это и есть желаемая
-  семантика потерь.
-- `DEVT.sync_seq` и ресинк не нужны: сертифицировать нечего, потому что
-  равенства не требуется.
+- **"RAW alone is readable" is not a contract and cannot be one:** the file base is on shadow,
+  the delta is on RAW, there is nothing to reconstruct mathematically.
+- **"Shadow alone is readable" is a contract, but means the last sealed
+  state**, not the current one.
+- **A modified swept file is transitional:** both devices are required.
+- **Losing RAW = losing the tail after the last seal.** This is the desired
+  loss semantics.
+- `DEVT.sync_seq` and resync are not needed: there is nothing to certify, because
+  equality is not required.
 
-### 2.3 Граница split
+### 2.3 The split Boundary
 
-Для базового состояния граница проходит **по файлу**: sweep переносит файл
-целиком, поэтому файл либо wholly-RAW, либо wholly-shadow. Частичный перенос
-делает файл переходным (читается только с обоими устройствами) — это
-допустимо, но не должно быть конечным состоянием.
+For the base state, the boundary runs **by file**: sweep moves a file
+whole, so a file is either wholly-RAW or wholly-shadow. A partial move
+makes a file transitional (readable only with both devices) — this is
+acceptable but must not be a terminal state.
 
 ---
 
-## 3. `DEVT` — паспорт парности
+## 3. `DEVT` — pairing passport
 
-188 байт в блоке 0 каждого устройства, смещение `0x2A0`:
+188 bytes in block 0 of each device, offset `0x2A0`:
 
 ```
 magic "DEVT" | version | dev_count | flags
-dev_blocks[2]   размер каждого устройства в блоках
-sync_seq        счётчик поколений (только режим A)
-vol_uuid[16]    чтобы не спутать чужие устройства
-dev1_hint[128]  где искать второе устройство
-crc32c          контрольная сумма
+dev_blocks[2]   size of each device in blocks
+sync_seq        generation counter (mode A only)
+vol_uuid[16]    to avoid confusion with foreign devices
+dev1_hint[128]  where to find the second device
+crc32c          checksum
 ```
 
-Это **не данные и не метаданные ФС**, а служебный паспорт. При открытии том не
-доверяет ни одному устройству: он читает паспорт с обоих и сравнивает
-`sync_seq`. Равны — оба держат одно поколение. Не равны — одно отстало, нужен
-ресинк. `dev_blocks` ловит «подсунули диск неправильного размера», `vol_uuid` —
-«это не парное устройство».
+This is **neither FS data nor FS metadata**, but a service passport. On open, the volume
+trusts neither device: it reads the passport from both and compares
+`sync_seq`. Equal — both hold one generation. Unequal — one is behind, resync
+is needed. `dev_blocks` catches "a disk of the wrong size was slipped in", `vol_uuid` —
+"this is not the paired device".
 
-В режиме B `sync_seq` не используется как сертификат: у тени своё поколение
-снимка, и сравнивать его с RAW бессмысленно.
+In mode B, `sync_seq` is not used as a certificate: shadow has its own snapshot
+generation, and comparing it with RAW is meaningless.
 
-### 3.1 Порядок в режиме A (после правок 2026-11-15)
+### 3.1 Order in Mode A (after the 2026-11-15 edits)
 
 ```
-барьер → публикация (RT30) → sync_seq++ → запись DEVT в КАЖДОЕ устройство
-       → барьер
+barrier → publish (RT30) → sync_seq++ → write DEVT to EACH device
+       → barrier
 ```
 
-Все три части обязательны, и каждая когда-то была сломана:
+All three parts are mandatory, and each has been broken at some point:
 
-- **барьер после записи DEVT** — иначе паспорт живёт в кэше устройства, у HDD
-  нет FUA, и паспорта расходятся навсегда (наблюдалось: 697302 против 697301);
-- **запись в каждое устройство напрямую**, а не через мукс — иначе запись
-  проигрывает ресинку, который пишет ту же страницу через `blkio_pwrite`
-  (наблюдалось: `dev0=697511 dev1=697510` при успешном возврате);
-- **самопроверка после записи** — перечитать оба и напечатать `devt: MISMATCH`.
-  Инвариант, который не проверяют, — это инвариант, о поломке которого никто
-  не знает.
+- **barrier after writing DEVT** — otherwise the passport lives in the device cache, HDD
+  has no FUA, and the passports diverge forever (observed: 697302 versus 697301);
+- **write directly to every device**, not through the mux — otherwise the write
+  loses to the resync that writes the same page via `blkio_pwrite`
+  (observed: `dev0=697511 dev1=697510` with a successful return);
+- **self-check after the write** — reread both and print `devt: MISMATCH`.
+  An invariant that is not checked is an invariant whose breakage nobody
+  knows about.
 
 ---
 
-## 4. Блок 0 — общий, а не «чей-то»
+## 4. Block 0 — shared, not "someone's own"
 
 ```
 0x000 superblock (168)   0x100 RDP0   0x140 RSZ0   0x220 reserved
 0x2A0 DEVT (188)         0x360 CVT0   0x9D0 RT30   0xA00 SPT0
 ```
 
-Несколько независимых писателей, поэтому read-modify-write всего блока — это
-потеря чужих полей. Правило: **правишь своё поле — пиши через мукс и
-пере-сериализуй соседей, которые несёшь с собой** (так `vol_write_rdp0` теперь
-обновляет `DEVT` с пересчётом CRC).
+There are several independent writers, so a read-modify-write of the whole block means
+losing someone else's fields. Rule: **when you edit your own field, write through the mux and
+re-serialize the neighbors you carry along** (this is how `vol_write_rdp0` now
+updates `DEVT` with a CRC recalculation).
 
 ---
 
-## 5. Жизненный цикл данных
+## 5. Data Lifecycle
 
 ```
-новое → RAW (SSD) → sweep: сжать → shadow (канон) → переписать рецепт
-                 → publish → освободить старый блок в RAW
-                 → горячее получает ускоряющую копию в tier arena
-чтение: предпочитаем копию на dev0, падаем на канон на dev1
+new → RAW (SSD) → sweep: compress → shadow (canon) → rewrite the recipe
+                 → publish → free the old block in RAW
+                 → hot data gets an accelerating copy in tier arena
+read: prefer the copy on dev0, fall back to the canon on dev1
 ```
 
-Порядок при переносе — **данные → рецепт → publish → освобождение** — не
-косметика: освобождение раньше публикации оставляет файл читающим из уже
-отданных блоков, а неудачная публикация оставляет новые блоки unreferenced
-garbage. Оба случая дороже, чем отсрочка.
+The order of a move — **data → recipe → publish → free** — is not
+cosmetics: freeing before publishing leaves the file reading from already
+given-away blocks, and a failed publish leaves the new blocks as unreferenced
+garbage. Both cases cost more than the delay.
 
-### 5.1 Выбор жертв для sweep (РЕШЕНО)
+### 5.1 Choosing Sweep Victims (DECIDED)
 
-**Правило.** В shadow данные попадают только двумя путями: **spill** (RAW
-переполнен, `alloc_raw_or_shadow` берёт из shadow) и **sweep** (явный).
-Никакого фонового переноса нет и не планируется.
+**Rule.** Data reaches shadow by only two paths: **spill** (RAW is
+full, `alloc_raw_or_shadow` takes from shadow) and **sweep** (explicit).
+There is no background migration, nor is any planned.
 
-Отсюда: sweep — единственный рычаг освобождения RAW, и он обязан быть
-**выборочным**. Сегодня `vol_collect_sweepables()` собирает ВСЕ живые inode и
-переписывает каждый: на 322k файлов это работа объёмом во весь том ради
-нескольких процентов места. Это и есть то, что надо заменить слоем выбора.
+Hence: sweep is the only lever for freeing RAW, and it must be
+**selective**. Today `vol_collect_sweepables()` collects ALL live inodes and
+rewrites each one: at 322k files that is a whole-volume amount of work for
+a few percent of space. This is what needs to be replaced by a selection layer.
 
-Входы решения (все уже есть в коде, новой инфраструктуры не нужно):
+Decision inputs (all already in the code, no new infrastructure needed):
 
-| вход | откуда | что говорит |
+| input | source | what it says |
 |---|---|---|
-| давление `raw_free / raw_zone_blocks` | есть | надо ли вообще что-то делать |
-| тепло `rheat` с декеем | `vol_heat.c` (HOT=8) | как часто читают |
-| возраст | pba в RAW (append-аллокация) | когда записано — бесплатно |
-| сжатие | прошлый класс/кодек | сколько реально освободится |
+| pressure `raw_free / raw_zone_blocks` | available | whether anything needs doing at all |
+| heat `rheat` with decay | `vol_heat.c` (HOT=8) | how often it is read |
+| age | pba in RAW (append allocation) | when it was written — for free |
+| compression | previous class/codec | how much will actually be freed |
 
-**Функция выбора — выгода по месту, а не по температуре:**
+**The selection function is space gain, not temperature:**
 
 ```
-freed  = блоков_в_RAW − блоков_в_shadow   (разница = эффект сжатия)
+freed  = blocks_in_RAW − blocks_in_shadow   (the difference = compression effect)
 score  = freed × W_ssd − written × W_hdd − heat_penalty
 ```
 
-где `W_ssd > W_hdd` (HDD в ~16 раз больше, блок на нём дешевле), а
-`heat_penalty` растёт с `rheat`. Смысл: несжимаемый холодный файл почти не
-даёт выигрыша (освободил 1 МБ, занял 1 МБ), сжимаемый втрое — даёт.
+where `W_ssd > W_hdd` (HDD is ~16 times larger, a block on it is cheaper), and
+`heat_penalty` grows with `rheat`. The point: an incompressible cold file yields
+almost no gain (freed 1 MB, occupied 1 MB), one that compresses 3x does.
 
-**Порядок прохода:**
+**Pass order:**
 
-1. собрать живые файлы (есть);
-2. отсечь запреты — см. ниже;
-3. оценить score (дёшево: размер из строки inode, `rheat` из таблицы, сжатие
-   по прошлому классу, а не реальным прогоном);
-4. сортировать по убыванию, идти сверху;
-5. **остановка по ватерлинии**: `raw_free` дошёл до `H_high` (≈25 %) — стоп;
-   плюс лимит файлов/байт на проход;
-6. пачками по N файлов с прогрессом, чтобы прерывание было безопасным.
+1. collect live files (already exists);
+2. cut off prohibited ones — see below;
+3. evaluate score (cheaply: size from the inode row, `rheat` from the table, compression
+   from the previous class, not a real run);
+4. sort in descending order, go from the top;
+5. **stop at the watermark**: `raw_free` has reached `H_high` (≈25 %) — stop;
+   plus a per-pass file/byte limit;
+6. in batches of N files with progress, so interruption is safe.
 
-**Цель прохода — освободить RAW до ватерлинии, а не переписать том.**
-Поэтому условие остановки важнее сортировки.
+**The goal of a pass is to free RAW down to the watermark, not to rewrite the volume.**
+Therefore the stopping condition matters more than the sorting.
 
-**Жёсткие запреты (важнее любой политики):**
+**Hard prohibitions (more important than any policy):**
 
-- файл открыт или в хвосте дельты (только что записан);
-- раздел после **seal** (иммутабелен, решения заморожены);
-- файл уже целиком в shadow — освобождать нечего.
+- the file is open or in the delta tail (just written);
+- the section is after **seal** (immutable, decisions are frozen);
+- the file is already entirely in shadow — nothing to free.
 
-**Связь с кэшем post-sweep.** После sweep блок в RAW помечен свободным, но
-остаётся читаемым; аллокатор берёт с **холодного конца** FIFO, поэтому
-свежие копии живут дольше. Это касается **только post-sweep файлов**: у
-spill-файлов копии в RAW нет вообще, а у RAW-only файлов RAW — их дом, а не
-кэш.
+**Relation to the post-sweep cache.** After sweep, a block in RAW is marked free but
+remains readable; the allocator takes from the **cold end** of the FIFO, so
+fresh copies live longer. This applies **only to post-sweep files**: spill
+files have no copy in RAW at all, and for RAW-only files RAW is their home, not a
+cache.
 
-**Метрики, без которых это гадание:** `freed_bytes` против `moved_bytes`
-(окупается ли сжатие), `post-sweep hit rate`, `evicted_then_read_within(T)`.
+**Metrics without which this is guesswork:** `freed_bytes` versus `moved_bytes`
+(whether compression pays off), `post-sweep hit rate`, `evicted_then_read_within(T)`.
 
-### 5.2 Ленивое вытеснение (ЦЕЛЬ)
+### 5.2 Lazy Eviction (TARGET)
 
-Сейчас sweep освобождает RAW-блок сразу, поэтому повторное чтение холодного
-файла идёт с HDD. Цель: оставлять RAW-копию до наступления давления по месту
-(эвикция по мере наполнения). Это не «прогрев кэша заново», а его
-неуничтожение.
+Currently sweep frees a RAW block immediately, so rereading a cold
+file goes to HDD. Goal: keep the RAW copy until space pressure arrives
+(eviction on demand as it fills). This is not "warming the cache again", but
+not destroying it.
 
-Механизм частично есть: tier arena + `\x01tier0` («canonical-on-dev1 +
-acceleration-copies-on-dev0, NEVER a move»). По сути цель — слить `rawm`-индекс
-и tier-арену в одно понятие: «канон на HDD, необязательная копия на SSD».
+The mechanism partly exists: tier arena + `\x01tier0` ("canonical-on-dev1 +
+acceleration-copies-on-dev0, NEVER a move"). Essentially the goal is to merge the `rawm`-index
+and the tier arena into one concept: "canon on HDD, optional copy on SSD".
 
-### 5.3 Политика ВЫСВОБОЖДЕНИЯ (а не кэша)
+### 5.3 FREEING Policy (not a cache policy)
 
-Речь не про то, что держать в RAM (этим занимается ARC), а про дисциплину
-освобождения. После sweep канон сегмента лежит на dev1, а блок в RAW можно
-пометить свободным — **но не переиспользовать сразу**: пока его никто не
-перезаписал, в нём лежит валидная копия, и чтение с SSD остаётся быстрым.
+This is not about what to keep in RAM (that is ARC's job), but about the discipline
+of freeing. After sweep, a segment's canon lies on dev1, and a block in RAW can be
+marked free — **but not reused immediately**: until someone overwrites it,
+it holds a valid copy, and reading from SSD stays fast.
 
-То есть **свободный список сам является кэшем**, и политика нужна для одного
-решения: **кого из него брать под новую запись**.
+So **the free list itself is the cache**, and a policy is needed for one
+decision: **which entry to take from it for a new write**.
 
-Дисциплина, которую предлагаю:
+The discipline I propose:
 
-- **Аллокация с самого «холодного» конца** свободного списка (FIFO по времени
-  освобождения). Тогда недавно освобождённые — то есть самые вероятно горячие —
-  живут в кэше дольше всего. Это CLOCK/second-chance, а не LRU: строгий LRU
-  требует цепочки указателей и даёт случайную запись.
-- **Инвалидация пачками.** Когда аллокатор забирает блок из головы списка,
-  записи таблицы, указывающие на эти блоки, сбрасываются пачкой. Поштучно —
-  накладные расходы на каждый выброс съедают весь выигрыш.
-- **Гистерезис по ватерлиниям:** эвиктим до верхней, останавливаемся на
-  нижней. Иначе «выгнали — прочитали — вернули» и двойная запись.
-- **Две цифры в отчётности, а не одна:** `free` (можно брать сразу) и
-  `free-with-cache` (можно брать, но ценой потери копии). Одна цифра врёт.
+- **Allocate from the coldest end** of the free list (FIFO by time of
+  freeing). Then recently freed — i.e. most likely hot — blocks
+  live in the cache longest. This is CLOCK/second-chance, not LRU: strict LRU
+  requires a pointer chain and produces random writes.
+- **Batch invalidation.** When the allocator takes a block from the head of the list,
+  the table entries pointing to these blocks are dropped in a batch. One by one —
+  the per-eviction overhead eats the whole gain.
+- **Hysteresis on watermarks:** evict down to the upper one, stop at the
+  lower one. Otherwise you get "evicted — read — brought back" and a double write.
+- **Two numbers in reporting, not one:** `free` (can be taken immediately) and
+  `free-with-cache` (can be taken, but at the cost of losing a copy). One number lies.
 
-Безопасность — здесь же лежат все будущие баги:
+Safety is where all future bugs will live:
 
-- кэш **никогда не авторитетен**: канон на dev1 — единственный источник
-  истины, потеря таблицы не должна ломать ничего, кроме скорости;
-- запись таблицы валидна только пока блок не переиспользован, поэтому
-  инвалидация привязана к **событию выдачи блока аллокатором**, а не к
-  per-block эпохам (эпоха на 29M блоков — это десятки мегабайт лишнего
-  состояния);
-- на открытии тома таблицу можно **выбросить целиком** — это кэш.
+- the cache is **never authoritative**: the canon on dev1 is the single source
+  of truth, losing the table must break nothing but speed;
+- a table entry is valid only while the block has not been reused, so
+  invalidation is tied to the **event of the allocator issuing a block**, not to
+  per-block epochs (an epoch over 29M blocks is tens of megabytes of extra
+  state);
+- on volume open, the table can be **discarded entirely** — it is a cache.
 
-Альтернатива, которая не требует ничего этого: **не освобождать вообще**
-(арена + тепло), как `\x01tier0` делает сегодня. Платим местом, но не несём
-никакой логики инвалидации и никакой возможности дважды отдать один блок.
+An alternative that requires none of this: **never free at all**
+(arena + heat), as `\x01tier0` does today. We pay in space, but carry
+no invalidation logic and no possibility of handing out one block twice.
 
-Рекомендация: начинать с арены (безопасно, уже есть), и переходить к
-«свободен-но-читаем» только если место станет реальной проблемой — потому
-что именно в учёте свободного места эта схема и стреляет.
+Recommendation: start with the arena (safe, already there), and move to
+"free-but-readable" only if space becomes a real problem — because it is in
+free-space accounting that this scheme shoots itself.
 
 ---
 
-## 6. Семантика потерь
+## 6. Loss Semantics
 
-Асимметрична, и это неочевидно.
+Asymmetric, and this is not obvious.
 
-| что умерло | режим A (write-through) | режим B (checkpoint) |
+| what died | mode A (write-through) | mode B (checkpoint) |
 |---|---|---|
-| **dev0 (RAW)** | метаданные целы, **всё содержимое файлов потеряно** (по дефолту данные только на RAW). После sweep этих файлов или с `raw_mirror=1` — теряется только хвост | теряется хвост после последнего seal; засвипленное читается с тени |
-| **dev1 (тень)** | ничего не потеряно (это зеркало) — пока sweep ничего туда не перенёс | **теряется архив**: всё, что уехало в shadow, плюс метаданные снимка |
+| **dev0 (RAW)** | metadata intact, **all file contents lost** (by default data is only on RAW). For files already swept, or with `raw_mirror=1` — only the tail is lost | the tail after the last seal is lost; swept data is read from shadow |
+| **dev1 (shadow)** | nothing lost (it is a mirror) — as long as sweep has not migrated anything there | **the archive is lost**: everything moved to shadow, plus the snapshot metadata |
 
-Ключевая мысль: **после первого sweep HDD перестаёт быть расходным**. Интуиция
-«тень можно потерять» верна только до архивации.
-
----
-
-## 7. `lazy_reclaim` — политика, а не оптимизация
-
-`lazy_reclaim=0` освобождает блоки сразу, `1` — откладывает.
-
-Решение: **после seal lazy_reclaim обязателен.** Seal делает раздел
-практически атомарным — ссылки больше не переписываются, значит отложенный
-реклейм не может оставить висячую ссылку, а любой немедленный реклейм меняет
-состояние раздела и нарушает паритет. До seal это выбор пользователя, по
-умолчанию — без lazy.
+Key point: **after the first sweep, HDD stops being expendable**. The intuition
+"shadow can be lost" holds only until archiving.
 
 ---
 
-## 8. Модель стоимости (измеренная база)
+## 7. `lazy_reclaim` — a policy, not an optimization
 
-Стенд: i3-10100, dev0 = SSD 110 ГБ, dev1 = HDD 1.8 ТБ, том 322 888 файлов.
+`lazy_reclaim=0` frees blocks immediately, `1` defers it.
 
-| что | значение | примечание |
+Decision: **after seal, lazy_reclaim is mandatory.** Seal makes the section
+practically atomic — references are no longer rewritten, so deferred
+reclaim cannot leave a dangling reference, while any immediate reclaim changes
+the state of the section and breaks parity. Before seal it is the user's choice, with
+no lazy by default.
+
+---
+
+## 8. Cost Model (measured baseline)
+
+Stand: i3-10100, dev0 = SSD 110 GB, dev1 = HDD 1.8 TB, volume of 322,888 files.
+
+| what | value | note |
 |---|---|---|
-| `vol_open` | 1.5 с | `delta=0.03s`, `pba_ref=1.26s` |
-| `build_file_table` | 21 с | после снятия повторного резолва путей (было 106 с) |
-| монтаж (до FUSE) | ~23 с | обход имён в один поток |
-| загрузка до ssh | ~96 с | **из них ~45 с — таймаут меню GRUB**, ≈15 с BIOS, остальное openrc |
-| fold (bulk) | линейный | 3 021 686 записей за минуты, не часы |
-| ресинк | по занятой части | 21 ГБ занято из 32 ГБ; записано 1 МБ при расхождении в блок |
-| мелкий файл | 12.7 КБ, ~16 мс | стоимость за **первую запись**, не за байты |
-| пустой файл | 0.3 КБ, 1874 файла/с | |
+| `vol_open` | 1.5 s | `delta=0.03s`, `pba_ref=1.26s` |
+| `build_file_table` | 21 s | after removing repeated path resolution (was 106 s) |
+| mount (before FUSE) | ~23 s | single-threaded name traversal |
+| boot to ssh | ~96 s | **of which ~45 s is the GRUB menu timeout**, ≈15 s BIOS, the rest openrc |
+| fold (bulk) | linear | 3,021,686 records in minutes, not hours |
+| resync | by occupied portion | 21 GB used out of 32 GB; 1 MB written per one-block mismatch |
+| small file | 12.7 KB, ~16 ms | cost is for the **first write**, not per byte |
+| empty file | 0.3 KB, 1874 files/s | |
 
-Цифры «загрузка 96 с» без разбивки вводят в заблуждение — 45 из них это GRUB.
-
----
-
-## 9. Политика формата
-
-Формат не заморожен: ломаем молча, без миграционного кода. Магии
-(`BPG3`, `DSG3`, `RT30`, `MET0`, `SPT0`, `PCK0`, `ANC0`, `DEVT`) не
-перенумеровываются: они маркеры на диске, а не версии.
+The figure "boot 96 s" without a breakdown is misleading — 45 of those seconds are GRUB.
 
 ---
 
-## 10. Долг: комментарии, которые врут
+## 9. Format Policy
 
-1. `vol_tier.c` — «`raw_mirror=1`, the default». На самом деле дефолт **0**.
-2. `volume.h` — «canonical data lives on dev1», «no sole copies on dev0, ever».
-   По дефолту неверно: данные живут на dev0, пока их не тронул sweep или
-   зеркало.
-3. «the DEVT bump certifies both devices» — до 2026-11-15 не сертифицировал
-   (не было барьера; запись проигрывала ресинку).
+The format is not frozen: we break it silently, with no migration code. The magics
+(`BPG3`, `DSG3`, `RT30`, `MET0`, `SPT0`, `PCK0`, `ANC0`, `DEVT`) are not
+renumbered: they are on-disk markers, not versions.
+
+---
+
+## 10. Debt: comments that lie
+
+1. `vol_tier.c` — "`raw_mirror=1`, the default". In fact the default is **0**.
+2. `volume.h` — "canonical data lives on dev1", "no sole copies on dev0, ever".
+   By default this is false: data lives on dev0 until sweep or the mirror
+   touches it.
+3. "the DEVT bump certifies both devices" — before 2026-11-15 it did not certify
+   (there was no barrier; the write lost to resync).

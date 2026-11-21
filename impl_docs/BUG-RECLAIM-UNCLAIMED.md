@@ -1,41 +1,41 @@
-# BUG: `unclaimed` блоки не возвращаются (reclaim не освобождает мусор)
+# BUG: `unclaimed` Blocks Are Not Returned (reclaim does not free garbage)
 
-**Статус: ЗАКРЫТ (48404b6).** Найден при разборе сравнения с squashfs.
+**Status: CLOSED (48404b6).** Found while analyzing the comparison with squashfs.
 
-## Итог фикса
+## Fix Outcome
 
-| | до | после |
+| | before | after |
 |---|---|---|
-| unclaimed сразу после записи 2×256 МиБ | 18.5 МиБ | **2.6 МиБ** |
-| unclaimed после 3-6 свипов (плато) | 13.6-25.8 МиБ | **1.4 МиБ** |
-| `used` (с резервом метазоны 64.1) | 119.0 МиБ | **92.3 МиБ** |
-| чтение файлов | ок | бит-в-бит ок |
+| unclaimed right after writing 2×256 MiB | 18.5 MiB | **2.6 MiB** |
+| unclaimed after 3-6 sweeps (plateau) | 13.6-25.8 MiB | **1.4 MiB** |
+| `used` (with the 64.1 meta-zone reserve) | 119.0 MiB | **92.3 MiB** |
+| file reads | ok | bit-for-bit ok |
 
-Причин было ДВЕ, обе в `src/core/vol_delta.c`:
+There were TWO causes, both in `src/core/vol_delta.c`:
 
-1. **`dl_retire_collect`** отбрасывал запись отставки, если строку обновили
-   ещё раз (правило требовало `s->seq == e->seq`, то есть точного совпадения
-   с моментом постановки). Запись ставится ПОСЛЕ коммита, поэтому любое
-   последующее обновление строки (например закрытие/fsync) её обнуляло --
-   при этом старые сегменты уже мертвы. Измерено: 2 записи по 4096 pba
-   поставлены, drain собрал 0. Теперь `s->seq >= e->seq`; откат
-   (`s->seq < e->seq`, fence rewound) по-прежнему подавляет освобождение.
-2. **`dl_retire_free_list`** под `lazy_reclaim=1` (по умолчанию) пропускал
-   перестройку pba_ref-карты, хотя lazy означает "карта не ведётся
-   инкрементально" (все `-1` в unlink/записи под ним пропускаются). В итоге
-   гейт `pba_ref_count() == 0` отказывал ровно в тех блоках, которые запись
-   просила вернуть: `freed 0 blk`. Теперь карта перестраивается всегда, когда
-   она нужна для решения об освобождении (консервативное направление:
-   счётчики из живого набора).
+1. **`dl_retire_collect`** discarded a retirement record if the row had been updated
+   again (the rule required `s->seq == e->seq`, i.e. an exact match
+   with the moment it was queued). A record is queued AFTER commit, so any
+   subsequent row update (e.g. close/fsync) cleared it --
+   even though the old segments are already dead. Measured: 2 records of 4096 pba
+   were queued, drain collected 0. Now `s->seq >= e->seq`; rollback
+   (`s->seq < e->seq`, fence rewound) still suppresses freeing.
+2. **`dl_retire_free_list`** under `lazy_reclaim=1` (the default) skipped
+   rebuilding the pba_ref map, although lazy means "the map is not maintained
+   incrementally" (all `-1`s in unlink/write under it are skipped). As a result,
+   the `pba_ref_count() == 0` gate refused exactly the blocks that the record
+   asked to return: `freed 0 blk`. Now the map is rebuilt whenever
+   it is needed for a freeing decision (the conservative direction:
+   counts from the live set).
 
-Диагностика, оставленная в коде (env-gated): `INVFS_DEBUG_RETIRE=1`
-(push/drain/freed по очереди отставок) и `INVFS_DEBUG_UNCLAIMED=1`
-(прогоны блоков-сирот с первыми байтами -- показала два класса: сегменты по
-64 КиБ с заголовком и одиночные страницы `BPG3` с шагом 3).
+Diagnostics left in the code (env-gated): `INVFS_DEBUG_RETIRE=1`
+(push/drain/freed per retirement queue) and `INVFS_DEBUG_UNCLAIMED=1`
+(scans of orphan blocks with their first bytes -- revealed two classes: segments of
+64 KiB with a header and single `BPG3` pages with a stride of 3).
 
-## Симптом
+## Symptom
 
-`invf-stats -v` печатает строку, которая не меняется ни от свипа к свипу, ни от
+`invf-stats -v` prints a line that does not change either from sweep to sweep or from
 `--realize`:
 
 ```
@@ -45,14 +45,14 @@
     unclaimed: 25.8 MiB (allocated, no live reference)
 ```
 
-`unclaimed` = «аллоцировано, живых ссылок нет». Прогнано **6 свипов подряд и
-`--realize`** — цифра стоит на месте (25.8 МиБ). Файлов в томе 356, читаются
-бит-в-бит, `invf-verify` говорит CLEAN.
+`unclaimed` = "allocated, no live references". **6 consecutive sweeps and
+`--realize` were run** — the figure stays put (25.8 MiB). There are 356 files in the volume, they read
+bit-for-bit, and `invf-verify` says CLEAN.
 
-## Как воспроизвести
+## How to Reproduce
 
 ```
-# корпус: образ ext4 256 МиБ с ~66 МБ реальных файлов, две идентичные копии
+# corpus: a 256 MiB ext4 image with ~66 MB of real files, two identical copies
 mkfs.ext4 -q -F -d src base.img && cp base.img c1.img && cp base.img c2.img
 
 invf-mkfs v.img 2
@@ -64,102 +64,102 @@ invf-sweep v.img --realize
 invf-stats -v -n v.img | grep -E "SHADOW|unclaimed"
 ```
 
-## Состав `used` (чтобы не повторять ошибку в чтении)
+## Composition of `used` (to avoid repeating the reading mistake)
 
 ```
-used 119.0 MiB = SHADOW 23.4 (живое содержимое) + RAW 3.9
-               + unclaimed 25.8 (ЭТОТ БАГ)
-               + meta 64.1 (РАЗМЕР метазоны, задан mkfs; это резерв, не данные)
+used 119.0 MiB = SHADOW 23.4 (live content) + RAW 3.9
+               + unclaimed 25.8 (THIS BUG)
+               + meta 64.1 (META-ZONE SIZE, set by mkfs; this is a reserve, not data)
 ```
 
-**`meta` в `used` входит целиком, поэтому сравнивать `used` напрямую с
-архивом нельзя** — на этом уже была допущена ошибка «в 4 раза хуже squashfs».
+**`meta` is included in `used` in full, so `used` cannot be compared directly with
+the archive** — this is how the "4 times worse than squashfs" mistake was already made.
 
-Сравнение по живому содержимому (zstd-19 у обоих, 512 МиБ логически):
+Comparison by live content (zstd-19 for both, 512 MiB logically):
 
-| | размер |
+| | size |
 |---|---|
-| squashfs | 24 МБ |
-| InvariantFS живое содержимое (SHADOW used) | **23.4 МиБ** (паритет) |
-| InvariantFS с багом (`unclaimed`) | 54.9 МиБ (2.3x хуже) |
+| squashfs | 24 MB |
+| InvariantFS live content (SHADOW used) | **23.4 MiB** (parity) |
+| InvariantFS with the bug (`unclaimed`) | 54.9 MiB (2.3x worse) |
 
-То есть **баг — это и есть весь проигрыш по месту**; дедуп (обе копии делят
-один рецепт и pba) и сжатие (27.28x) работают.
+So **the bug is the entire space loss**; dedupe (both copies share
+one recipe and pba) and compression (27.28x) work.
 
-## Где искать
+## Where to Look
 
-1. `src/core/vol_reclaim.c` — комментарий в `volume.h` (WP-M15) прямо говорит
-   «Currently a stub; M15 fills it». Если reclaim всё ещё заглушка, `unclaimed`
-   и не может уменьшаться.
-2. `src/core/vol_spt0.c` — вторая половина той же болезни уже поймана раньше:
-   при одном неподтверждённом сегменте захват отказывается освобождать **весь**
-   пиннинг («1 of 9927 segments … this capture does NOT reclaim»), и каждый свип
-   добавляет новый (62 743 блока = 245 МиБ). Проверить, не тот же ли флаг
-   блокирует освобождение тут.
-3. `vol_dedupe.c` (merge освобождает блоки) и `vol_cpack.c`
-   (`cpack_release_superseded`) — не теряются ли их освобождения.
+1. `src/core/vol_reclaim.c` — the comment in `volume.h` (WP-M15) says outright
+   "Currently a stub; M15 fills it". If reclaim is still a stub, `unclaimed`
+   cannot decrease.
+2. `src/core/vol_spt0.c` — the second half of the same disease was caught earlier:
+   with a single unconfirmed segment, capture refuses to free **the whole**
+   pinning ("1 of 9927 segments … this capture does NOT reclaim"), and each sweep
+   adds a new one (62,743 blocks = 245 MiB). Check whether the same flag
+   is blocking freeing here.
+3. `vol_dedupe.c` (merge frees blocks) and `vol_cpack.c`
+   (`cpack_release_superseded`) — check whether their frees are being lost.
 
-## Что считать успехом
+## Success Criteria
 
-После фикса: `unclaimed` → 0 после двух свипов на чистом томе, и `used` минус
-`meta` ≈ SHADOW used (на этом корпусе ≈ 27 МиБ против 24 МБ squashfs).
+After the fix: `unclaimed` → 0 after two sweeps on a clean volume, and `used` minus
+`meta` ≈ SHADOW used (≈ 27 MiB on this corpus versus 24 MB for squashfs).
 
 ---
 
-# BUG 2: освобождённые блоки не зануляются и не punch-hole'ятся
+# BUG 2: Freed Blocks Are Not Zeroed or punch-hole'd
 
-**Симптом:** `cp --sparse=always v.img sparse.img` даёт **306 МБ**, тогда как
-ФС считает занятыми ~55 МиБ. Причина: освобождённые блоки сохраняют старые
-байты, поэтому разрежённая копия их сохраняет.
+**Symptom:** `cp --sparse=always v.img sparse.img` yields **306 MB**, while
+the FS counts ~55 MiB as occupied. Cause: freed blocks retain old
+bytes, so the sparse copy keeps them.
 
-**Последствие:** том никогда не отдаёт место хосту — на разрежённой или
-сжимаемой ФС (и при конвертации в sparse) мы продолжаем платить за мусор.
-На реальном блочном устройстве это не видно (блоки просто свободны), но при
-хранении тома файлом — видно.
+**Consequence:** the volume never returns space to the host — on a sparse or
+compressed filesystem (and when converting to sparse) we keep paying for garbage.
+On a real block device this is invisible (blocks are simply free), but when
+the volume is stored as a file, it is visible.
 
-**СДЕЛАНО.** `vol_punch_holes()` (volume.c) пробивает дыры в свободных
-прогонах дата-региона, но только ПОСЛЕ того, как битмап с освобождениями стал
-durable (в `vol_close`: сначала flush битмапа, потом CLEAN, потом punch) --
-раньше нельзя: крэш «оживит» рецепт, а байты будут нулями. Прогоны меньше
-1 МиБ пропускаются; на блочных устройствах вызов просто не поддержан
-(EOPNOTSUPP); двух-девайсные тома пока пропускаются (нужен fd владеющего
-устройства и учёт shadow-сплита). `INVFS_PUNCH_HOLE=0` -- выключить.
+**DONE.** `vol_punch_holes()` (volume.c) punches holes in free runs of the data region, but only AFTER
+the bitmap with the frees becomes
+durable (in `vol_close`: first flush the bitmap, then CLEAN, then punch) --
+not earlier: a crash would "revive" the recipe while the bytes would be zeros. Runs under
+1 MiB are skipped; on block devices the call is simply unsupported
+(EOPNOTSUPP); dual-device volumes are skipped for now (needs the fd of the owning
+device and accounting for the shadow split). `INVFS_PUNCH_HOLE=0` -- disable.
 
-Замер (корпус 64 МиБ / 2889 файлов, том 2 ГиБ, после 3 свипов):
+Measurement (corpus 64 MiB / 2889 files, volume 2 GiB, after 3 sweeps):
 
-| | до | после |
+| | before | after |
 |---|---|---|
-| занято хостом (`du`) | -- | 52 MB |
-| копия `--sparse=always` | **306 MB** | **52 MB** |
-| живые данные (`used` минус резерв) | ~28 | ~24 МиБ |
-| сверка | -- | verify OK, 200/200 файлов бит-в-бит |
+| occupied on host (`du`) | -- | 52 MB |
+| `--sparse=always` copy | **306 MB** | **52 MB** |
+| live data (`used` minus the reserve) | ~28 | ~24 MiB |
+| check | -- | verify OK, 200/200 files bit-for-bit |
 
 ---
 
-# Справочно: что проверено и НЕ является причиной
+# Reference: What Was Checked and Is NOT the Cause
 
-- **Сжатие не ломает дедуп.** Сжатие посегментное с чистым контекстом
+- **Compression does not break dedupe.** Compression is per-segment with a clean context
   (`ZSTD_compress(cbuf+8, cbound, plain, enc_len, level)`, vol_write.c:480),
-  поэтому одинаковый 64-КиБ plaintext даёт одинаковые сохранённые байты.
-- **Дедуп работает**: в этом корпусе обе копии образа делят один рецепт
-  (blake3) и один pba. Потолок 73.8% на 4 копиях, 1.88x на near-duplicate.
-- **TEXT-зона в листовой раскладке не используется** (члены идут в блоб,
-  блоб сжимается посегментно); батчинг остаётся для обычных мелких файлов.
-- **fold свип не делает**: `vol_fold_request()` вызывается только из FUSE при
-  монтировании (src/cli/fuse_fs.c:4655) и из тестов, хотя комментарий в
-  `volume.h:742` утверждает «This is what WP-M18's sweep calls». На этот баг не
-  влияет (дельта была 1068 записей), но расхождение стоит исправить.
-- **`meta 64.1 MiB` в `used`** — размер зарезервированной метазоны, а не данные.
+  so identical 64-KiB plaintext yields identical stored bytes.
+- **Dedupe works**: on this corpus both copies of the image share one recipe
+  (blake3) and one pba. Ceiling 73.8% on 4 copies, 1.88x on a near-duplicate.
+- **The TEXT zone is not used in the leaf layout** (members go into the blob,
+  the blob is compressed per segment); batching remains for ordinary small files.
+- **sweep does not call fold**: `vol_fold_request()` is called only from FUSE at
+  mount time (src/cli/fuse_fs.c:4655) and from tests, although the comment in
+  `volume.h:742` claims "This is what WP-M18's sweep calls". It does not
+  affect this bug (the delta was 1068 records), but the discrepancy is worth fixing.
+- **`meta 64.1 MiB` in `used`** is the size of the reserved meta-zone, not data.
 
 ---
 
-# Ярлыки `RAW`/`SHADOW` в `invf-stats -v` читались как зоны (исправлено)
+# The `RAW`/`SHADOW` Labels in `invf-stats -v` Were Read as Zones (fixed)
 
-**Симптом недоразумения:** после свипа вывод говорит `RAW: used 12.8 MiB`,
-из чего естественно следует "свип не досжал, RAW не опустел".
+**Symptom of the confusion:** after a sweep, the output says `RAW: used 12.8 MiB`,
+from which it naturally follows that "the sweep did not compress enough, RAW did not empty".
 
-**Замер по адресам на том же томе** (диагностика `INVFS_DEBUG_UNCLAIMED=1`,
-а теперь и постоянная строка `by address` в `invf-stats`):
+**Measurement by address on the same volume** (the `INVFS_DEBUG_UNCLAIMED=1` diagnostic,
+and now also the permanent `by address` line in `invf-stats`):
 
 ```
 zones            : meta 80.1 MiB | raw 153185 blk | shadow 612742 blk
@@ -167,17 +167,17 @@ by address       : raw-region 0.0 MiB | shadow-region 114.7 MiB occupied
 content classes  : uncompressed 12.8 MiB (0.98x) | compressed 97.8 MiB (13.29x)
 ```
 
-**RAW-зона действительно пуста: 0 блоков.** Эти 12.8 МиБ -- КЛАСС содержимого:
-сегменты, сохранённые БЕЗ сжатия, потому что оно не выигрывает. Они физически
-лежат в shadow-регионе, как и всё остальное.
+**The RAW zone is indeed empty: 0 blocks.** These 12.8 MiB are a CONTENT CLASS:
+segments stored WITHOUT compression because it does not pay off. They physically
+lie in the shadow region, like everything else.
 
-Кто это: члены контейнера, оставшиеся отдельными inode (`!mbr<idx>-<san>`),
-с отметкой `GENERIC_GUARD{algo=gzr(9)}` -- GZR пробовал и отказался, а
-посегментное сжатие мерило выигрыш и не нашло его. Проверено на трёх членах:
-это gzip-файлы (`1f 8b 08`), 516 580 -> zstd 516 605 (1.00x), 443 053 -> 385 408
-(1.15x), 657 073 -> 657 104 (1.00x). То есть решение "хранить как есть"
-верное; на 1.15x-члене потеря ~63 КБ, и её видно в дампе (у него часть
-сегментов сжата, часть нет -- решение посегментное).
+Who they are: container members left as separate inodes (`!mbr<idx>-<san>`),
+marked `GENERIC_GUARD{algo=gzr(9)}` -- GZR tried and gave up, and
+per-segment compression measured the gain and found none. Checked on three members:
+these are gzip files (`1f 8b 08`), 516 580 -> zstd 516 605 (1.00x), 443 053 -> 385 408
+(1.15x), 657 073 -> 657 104 (1.00x). So the decision to "store as is"
+is correct; on the 1.15x member the loss is ~63 KB, and it is visible in the dump (some
+of its segments are compressed, some are not -- the decision is per-segment).
 
-`used = meta(размер зоны) + занятые блоки данных`: 80.1 + 114.7 = 194.8 MiB.
-Для корпуса "две копии образа 256 МиБ": 64.1 + 28.2 = 92.3 MiB.
+`used = meta(zone size) + occupied data blocks`: 80.1 + 114.7 = 194.8 MiB.
+For the "two copies of a 256 MiB image" corpus: 64.1 + 28.2 = 92.3 MiB.

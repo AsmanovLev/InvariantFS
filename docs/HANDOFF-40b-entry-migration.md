@@ -1,106 +1,106 @@
-# HANDOFF — снос 32-байтного wire-формата AST (переход на 40 B)
+# HANDOFF — removal of the 32-byte AST wire format (migration to 40 B)
 
-Сессия длинная; это checkpoint, чтобы следующий агент стартовал с чистого
-контекста и не переоткрывал уже найденное.
+The session is long; this is a checkpoint so the next agent can start with a
+clean context and not re-discover what has already been found.
 
-## Состояние git / CI
+## git / CI state
 
-- remote: `origin git@github.com:AsmanovLev/InvariantFS.git`, ветка `main`.
-- Уже ЗАПУШЕНО (3 коммита зачистки):
-  - `7029f6f` format: единый гейт + зачистка маркеров версий
-  - `019743a` chore: убраны упоминания v3 из прозы и имён
-  - `b33663e` chore: переименованы *_v3 реализации в *_impl
-- В рабочем дереве (НЕ коммитить): `tools/test-png.sh` (сломанный симлинк,
-  git mode 120000 → файл), `src/codecs/ChangeLog.md` (CRLF-шум autocrlf).
-- Окружение сборки: WSL2 + Void Linux, gcc 14.2.1, make, `ctags` (universal-ctags
-  6.2.1, установлен). `make -j12` собирает `all`; тест-бинарники НЕ входят в
-  `all` — их собирать явно: `make bin/invf-v2_open_test bin/invf-entry_v3_test`
-  или `make test-bins`.
+- remote: `origin git@github.com:AsmanovLev/InvariantFS.git`, branch `main`.
+- Already PUSHED (3 cleanup commits):
+  - `7029f6f` format: unified gate + cleanup of version markers
+  - `019743a` chore: removed v3 mentions from prose and names
+  - `b33663e` chore: renamed *_v3 implementations to *_impl
+- In the working tree (DO NOT commit): `tools/test-png.sh` (broken symlink,
+  git mode 120000 → file), `src/codecs/ChangeLog.md` (autocrlf CRLF noise).
+- Build environment: WSL2 + Void Linux, gcc 14.2.1, make, `ctags` (universal-ctags
+  6.2.1, installed). `make -j12` builds `all`; test binaries are NOT part of
+  `all` — build them explicitly: `make bin/invf-v2_open_test bin/invf-entry_v3_test`
+  or `make test-bins`.
 
-## Что уже сделано и не трогать
+## Already done — do not touch
 
-- Единый гейт формата: `src/core/vol_format.{h,c}` — `invfs_format_accept(sb,
-  path, why, why_sz)` возвращает 0 / `-12` (нет VOLF_META) / `-13` (generation
-  mismatch) / `-14`. Все 6 открывателей (vol_open primary+degraded, verify,
-  resize, vnode) идут через него.
-- `INVFS_FORMAT_VERSION = 1` (было 0); `VOLF_META2`/`VOLF_ASTV2` retire (значения
-  0x02/0x08 не переиспользовать); декоративный `INVFS_VERSION` удалён.
-- Проза: `metadata-v3/Meta-v3` → `metadata store`; идентификаторы `*_v3` →
-  `*_impl` (реализации), обёртки/диспетчеры без суффикса остались public API.
+- Unified format gate: `src/core/vol_format.{h,c}` — `invfs_format_accept(sb,
+  path, why, why_sz)` returns 0 / `-12` (no VOLF_META) / `-13` (generation
+  mismatch) / `-14`. All 6 openers (vol_open primary+degraded, verify,
+  resize, vnode) go through it.
+- `INVFS_FORMAT_VERSION = 1` (was 0); `VOLF_META2`/`VOLF_ASTV2` retired (do not
+  reuse the values 0x02/0x08); the decorative `INVFS_VERSION` was removed.
+- Prose: `metadata-v3/Meta-v3` → `metadata store`; `*_v3` identifiers →
+  `*_impl` (implementations), unsuffixed wrappers/dispatchers remain public API.
 
-## Осталось: ВАРИАНТ C — снос 32 B wire-формата (задача этого handoff)
+## Remaining: OPTION C — remove the 32 B wire format (the task of this handoff)
 
-Цель: сделать 40-байтный recipe entry единственным, удалить v1/v2 (32 B),
-переименовать `*_v3` → базовое. Это **формат-breaking** (текущие v3-тома пишут
-32 B — перестанут читаться), пользователь согласен (переустановка).
+Goal: make the 40-byte recipe entry the only one, remove v1/v2 (32 B),
+rename `*_v3` → base. This is **format-breaking** (current v3 volumes write
+32 B — they will stop being readable), the user has agreed (reinstall).
 
-### Ключевые факты (уже выяснено, не переоткрывать)
+### Key facts (already established, do not re-investigate)
 
-1. `invfs_ast_block_entry` (32 B) — **текущий дефолт**, НЕ мёртвый. Поля:
+1. `invfs_ast_block_entry` (32 B) — **the current default**, NOT dead. Fields:
    `file_offset, length, zone:2, algo:6, block_id:24, block_offset, pba`.
-2. `invfs_ast_block_entry_v3` (40 B) — новый stride, поля:
+2. `invfs_ast_block_entry_v3` (40 B) — the new stride, fields:
    `file_offset, length, zone:6, algo:10, block_id:32, rsv:16, block_offset,
-   crc32c, pba`. Включается только `INVFS_RECIPE_FORCE_V3=1` (тест-форс).
-3. Выбор формата в `src/core/vol_ast.c:67-93`:
+   crc32c, pba`. Enabled only by `INVFS_RECIPE_FORCE_V3=1` (test force).
+3. Format selection in `src/core/vol_ast.c:67-93`:
    ```c
    const char *f3 = getenv("INVFS_RECIPE_FORCE_V3");
    ...
    hlen = f3 ? invfs_ast_hdr_write_v3(...) : invfs_ast_hdr_write(...);
    ```
-4. Заголовки: `invfs_ast_recipe_header_v1` (16 B, ver 1),
+4. Headers: `invfs_ast_recipe_header_v1` (16 B, ver 1),
    `invfs_ast_recipe_header_v2` (24 B, ver 2), `invfs_ast_recipe_header`
-   (24 B, ver 3). v2 и v3 **одинаковы по layout**, разница только `version`.
-5. Версии/длины: `INVFS_AST_VERSION_V1=1, V2=2, V3=3`;
+   (24 B, ver 3). v2 and v3 are **identical in layout**; only `version` differs.
+5. Versions/lengths: `INVFS_AST_VERSION_V1=1, V2=2, V3=3`;
    `INVFS_AST_HDR_V1_LEN=16, INVFS_AST_HDR_V2_LEN=24, INVFS_AST_HDR_LEN=24`
-   (HDR_LEN уже переименовано из бывшего V3_LEN).
-6. `invfs_ast_entry_stride(version)`: V1/V2→32, V3→40, иначе 0.
-7. 40 B on-disk собирается **арифметически** через
-   `invfs_ast_entry_pack/unpack/verify` (invarifs.h ~1680-1760), НЕ memcpy
-   (стабильность bitfield layout). `unpack` принимает `invfs_ast_block_entry*`
-   (сейчас 32 B in-memory) и **отказывает** `zone>3 || algo>63 ||
-   block_id>0xFFFFFF` — эти узкие проверки надо снять при расширении.
-8. `invfs_ast_block_entry` (32 B) упоминается ~163 раза (in-memory тип по всему
-   vol_write/vol_read/vol_dedupe/vol_records/...).
-9. `invfs_ast_hdr_parse` (invarifs.h:1233) — единый читатель, уже умеет все три
-   версии (V1→16 B, V2→24 B, V3→24 B). V2 и V3 проверяют одинаковые cap'ы
-   (`MAX_FILE_SIZE`, `MAX_SEGMENTS_V2`). При сносе v1/v2 остаётся одна ветка
-   (version==3), а `hdr_len` всегда `INVFS_AST_HDR_LEN`.
+   (HDR_LEN has already been renamed from the former V3_LEN).
+6. `invfs_ast_entry_stride(version)`: V1/V2→32, V3→40, otherwise 0.
+7. The 40 B on-disk form is assembled **arithmetically** via
+   `invfs_ast_entry_pack/unpack/verify` (invarifs.h ~1680-1760), NOT memcpy
+   (bitfield layout stability). `unpack` takes `invfs_ast_block_entry*`
+   (currently 32 B in-memory) and **rejects** `zone>3 || algo>63 ||
+   block_id>0xFFFFFF` — these narrow checks must be removed when widening.
+8. `invfs_ast_block_entry` (32 B) is mentioned ~163 times (the in-memory type
+   throughout vol_write/vol_read/vol_dedupe/vol_records/...).
+9. `invfs_ast_hdr_parse` (invarifs.h:1233) — the unified reader, already handles
+   all three versions (V1→16 B, V2→24 B, V3→24 B). V2 and V3 check the same caps
+   (`MAX_FILE_SIZE`, `MAX_SEGMENTS_V2`). With v1/v2 removed, one branch remains
+   (version==3), and `hdr_len` is always `INVFS_AST_HDR_LEN`.
 
-### План (одним заходом)
+### Plan (in one pass)
 
-1. In-memory struct: тело `invfs_ast_block_entry_v3` (40 B) переименовать в
-   `invfs_ast_block_entry`; старый 32 B struct удалить. Проверить, что все 163
-   места компилируются (поля `zone/algo/block_id` стали шире — имена те же).
-2. `invfs_ast_entry_unpack`: убрать проверки `zone>3/algo>63/block_id>0xFFFFFF`
-   (теперь in-memory широкий).
-3. `invfs_ast_hdr_write_v3` → `invfs_ast_hdr_write`; старую v1/v2 версию
-   удалить. В `vol_ast.c` убрать `getenv(FORCE_V3)` и ветку, всегда 40 B.
-4. `invfs_ast_entry_stride` → всегда 40 (убрать диспатч), либо убрать функцию.
-5. Чтение в `vol_ast.c` (~164, ~262, ~268): убрать диспатч по
-   `hdr->version` / `version == INVFS_AST_VERSION_V3` — всегда 40 B.
-6. Удалить: `invfs_ast_recipe_header_v1/v2`, `INVFS_AST_VERSION_V1/V2`,
-   `INVFS_AST_HDR_V1_LEN/V2_LEN`, `MAX_SEGMENTS` (0xFFFF, v1-граница u16),
+1. In-memory struct: rename the body of `invfs_ast_block_entry_v3` (40 B) to
+   `invfs_ast_block_entry`; delete the old 32 B struct. Verify that all 163
+   sites compile (the `zone/algo/block_id` fields became wider — names unchanged).
+2. `invfs_ast_entry_unpack`: remove the checks `zone>3/algo>63/block_id>0xFFFFFF`
+   (in-memory is now wide).
+3. `invfs_ast_hdr_write_v3` → `invfs_ast_hdr_write`; delete the old v1/v2
+   version. In `vol_ast.c` remove `getenv(FORCE_V3)` and the branch, always 40 B.
+4. `invfs_ast_entry_stride` → always 40 (remove dispatch), or remove the function.
+5. Reads in `vol_ast.c` (~164, ~262, ~268): remove dispatch on
+   `hdr->version` / `version == INVFS_AST_VERSION_V3` — always 40 B.
+6. Delete: `invfs_ast_recipe_header_v1/v2`, `INVFS_AST_VERSION_V1/V2`,
+   `INVFS_AST_HDR_V1_LEN/V2_LEN`, `MAX_SEGMENTS` (0xFFFF, v1 u16 boundary),
    `INVFS_RECIPE_FORCE_V3`.
-7. `INVFS_AST_VERSION_V3` → `INVFS_AST_VERSION` (значение 3 остаётся).
+7. `INVFS_AST_VERSION_V3` → `INVFS_AST_VERSION` (value 3 stays).
 
-### ВАЖНО: `MAX_SEGMENTS_V2` НЕ удалять (правка к ранней версии заметок)
+### IMPORTANT: do NOT delete `MAX_SEGMENTS_V2` (correction to an earlier version of the notes)
 
-`MAX_SEGMENTS_V2 = (1u << 24)` (invarifs.h:1162) — это **текущий действующий
-cap** на число записей рецепта, а не legacy. Используется в ~24 местах:
+`MAX_SEGMENTS_V2 = (1u << 24)` (invarifs.h:1162) — this is the **currently active
+cap** on the number of recipe entries, not a legacy one. Used in ~24 places:
 `vol_write.c` (834, 913, 1058), `vol_ast.c` (83, 98, 102, 180, 190),
 `fuse_fs.c:2442`, `recipe_tree_test.c:3`, `invarifs.h` (137, 1153, 1159, 1231,
-1270, 1291, 1307, 1351, 1584) — включая `INVFS_RECIPE_BLOB_MAX`.
-Суффикс `_V2` исторический (block_id стал 24-битным ещё в v2).
-Действие: **переименовать** в `MAX_RECIPE_ENTRIES` (или `MAX_SEGMENTS_BLOCKID`),
-НЕ удалять. А удалять надо `MAX_SEGMENTS` (0xFFFF) — он остался только в
-2 местах (invarifs.h:1161 определение и :1596, где уже сомнительно используется
-вместе с 40 B stride).
-8. Обновить `src/cli/entry_v3_test.c` (и `tools/test-entry-v3.sh`): убрать
-   FORCE_V3/32B-ноги, оставить 40 B; переименовать файл `entry_v3_test.c` →
-   `entry_test.c` (Makefile `CLI_MAINS` + `tools/test-entry-v3.sh`) — можно
-   отложить переименование файла, если оно тянет лишний git mv.
+1270, 1291, 1307, 1351, 1584) — including `INVFS_RECIPE_BLOB_MAX`.
+The `_V2` suffix is historical (block_id became 24-bit back in v2).
+Action: **rename** to `MAX_RECIPE_ENTRIES` (or `MAX_SEGMENTS_BLOCKID`),
+do NOT delete. What should be deleted is `MAX_SEGMENTS` (0xFFFF) — it remains
+only in 2 places (invarifs.h:1161 definition and :1596, where it is already
+questionable to use together with the 40 B stride).
+8. Update `src/cli/entry_v3_test.c` (and `tools/test-entry-v3.sh`): remove the
+   FORCE_V3/32B legs, keep 40 B; rename the file `entry_v3_test.c` →
+   `entry_test.c` (Makefile `CLI_MAINS` + `tools/test-entry-v3.sh`) — the file
+   rename can be postponed if it drags in an extra git mv.
 
-### Проверка после захода
+### Verification after the pass
 
 ```
 make -j12
@@ -110,20 +110,20 @@ bash tools/test-meta-dirent.sh
 ./bin/invf-v2_open_test
 ./bin/invf-entry_v3_test
 ```
-Ожидание: всё зелёное; `invf-mkfs` + `invf-cp` пишут 40 B recipe.
+Expected: everything green; `invf-mkfs` + `invf-cp` write a 40 B recipe.
 
-### Смежное, НЕ в этой задаче
+### Related, NOT part of this task
 
-- `TZV3` (магия 0x33565a54 в batch_owner_test.c) — on-disk магия, не трогать.
-- Roadmap: пункт «Metadata Sharding & Partitioning (XFS-style AG & dcache
-  hierarchy, v0.8 target)» **удалён из `README.md`** — фича выходит в v0.7,
-  так что в отдалённом roadmap ей не место. Формулировка про AG осталась в
-  `impl_docs/design-meta.md` §9 и §14 (там она точная).
-- Граница для v0.7 (чтобы не переоткрывать спор `design-meta.md:187`):
-  шардируем **RAW/delta append-арены (AG)** и **FUSE-зеркало имён + локи**
-  (per-directory бакеты вместо плоского `g_entries` и `sync_parents_locked`),
-  а **on-disk namespace НЕ партиционируем** — иначе rename/link/fold
-  становятся кросс-доменными.
-- Стенд Gentoo `192.168.0.2`: rsync портеджа застрял (~58/184 категорий,
-  invf-fuse выжимает 1 ядро). НЕ трогать — будет переустановка на новую
-  архитектуру. SSH: `ssh -i ~/.ssh/id_ed25519_invfs root@192.168.0.2`.
+- `TZV3` (magic 0x33565a54 in batch_owner_test.c) — on-disk magic, do not touch.
+- Roadmap: the item “Metadata Sharding & Partitioning (XFS-style AG & dcache
+  hierarchy, v0.8 target)” **has been removed from `README.md`** — the feature
+  is shipping in v0.7, so it has no place in the distant roadmap. The AG
+  wording remains in `impl_docs/design-meta.md` §9 and §14 (where it is accurate).
+- Scope boundary for v0.7 (so as not to reopen the `design-meta.md:187`
+  debate): shard the **RAW/delta append arenas (AG)** and the **FUSE mirror of
+  names + locks** (per-directory buckets instead of the flat `g_entries` and
+  `sync_parents_locked`), but do **NOT partition the on-disk namespace** —
+  otherwise rename/link/fold become cross-domain.
+- Gentoo stand `192.168.0.2`: the Portage rsync is stuck (~58/184 categories,
+  invf-fuse is squeezing 1 core). DO NOT touch — there will be a reinstall on
+  the new architecture. SSH: `ssh -i ~/.ssh/id_ed25519_invfs root@192.168.0.2`.
