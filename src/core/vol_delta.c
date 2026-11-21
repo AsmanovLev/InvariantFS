@@ -999,7 +999,15 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
     size_t i, j, k;
     int need_map = 0;
     for (i = 0; i < n; i++) {
-        if (list[i].pbas && list[i].npbas) {
+        /* WP-IO-LOCK: a RECIPE-form entry frees through the same counts as a
+         * pba-form one (vol_free_recipe_blocks -> pba_ref_count per unique
+         * pba), so it needs the same exact map. It used to get one only
+         * because the sweep rebuilt the map before every file's publish; the
+         * last file's rebuild was always one publish stale, which is the
+         * trailing leak BUG-RECLAIM-UNCLAIMED measured at 2.6/1.4 MiB under
+         * lazy_reclaim=0. Counting them here rebuilds ONCE for the batch,
+         * where the live set already excludes everything being retired. */
+        if ((list[i].pbas && list[i].npbas) || list[i].has_recipe) {
             need_map = 1;
             break;
         }

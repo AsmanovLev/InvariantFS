@@ -1525,8 +1525,19 @@ static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
             return -1;
         }
         memcpy(new_ents, ents, n_ents * sizeof(*new_ents));
-        if (!v->lazy_reclaim)
-            pba_ref_ensure(v);
+        /* WP-IO-LOCK: this used to call pba_ref_ensure(v) once per file under
+         * lazy_reclaim=0. Every file's publish invalidates the map, so that
+         * was a full namespace walk (plus one recipe load per live inode) PER
+         * SWEPT FILE -- O(N^2) on the stand's configuration, measured at
+         * 16 ms for 2,000 files and 1.26 s on the 66k-record stand volume.
+         *
+         * It is not needed here: the pass does not free through the map. The
+         * superseded segments are RETIRED (WP612) and the drain makes the
+         * free decision, so the map only has to be exact AT THE DRAIN -- and
+         * dl_retire_free_list now rebuilds it there, once per drain, for
+         * recipe-form entries too. A failed publish's rollback frees its own
+         * never-published blocks with vol_free_blocks, which does not consult
+         * the map at all. */
 
         /* Parallel worker pool context: process in bounded chunks (e.g. 128 segments = 8 MiB)
          * to strictly bound memory regardless of file size (handles 32GB files on 8GB RAM). */
