@@ -2704,7 +2704,9 @@ static void invf_sweep_worker(int full_pass)
      * collect comes back complete, and returns 0 only then. The re-walks it
      * costs are bounded by log2(files/seed) and are lost against the
      * per-file usleep(500) further down this same loop. */
-    complete = (vol_collect_sweepables_grow(g_vol, &ids, &cap, &n, &found) == 0);
+    complete = (vol_collect_sweepables_grow_named(g_vol, &ids, &cap, &n, &found,
+                                                 full_pass ? &sweep_names
+                                                           : NULL) == 0);
     if (!complete) {
         /* WP135: -1 has two causes now and they need different words.
          * found > n is the buffer-full case (the growth ran out of memory);
@@ -2795,13 +2797,13 @@ static void invf_sweep_worker(int full_pass)
             complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
     if (full_pass) {
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
-        /* WP-NAME-SNAPSHOT: the candidate names for the whole pass, from ONE
-         * walk. The loop below resolves each candidate against this map
-         * (verified per candidate by vol_sweep_name_of_hint) instead of
-         * paying one full namespace walk per file. The walk stopping here
-         * is not a failure of the pass: the map stays NULL and every
-         * candidate falls back to the fresh reverse walk. */
-        (void)vol_name_index_build(g_vol, &sweep_names);
+        /* WP-NAME-SNAPSHOT: the candidate names came back from the collect
+         * walk above (vol_collect_sweepables_grow_named), so the pass pays
+         * ONE namespace walk, not a collect walk plus a second one for the
+         * names. The loop below re-proves each name against the live tree
+         * (vol_sweep_name_of_hint); a NULL map -- allocation failure, or a
+         * build that was not requested -- falls back to the fresh reverse
+         * walk per candidate. */
     }
     for (i = 0; i < n; i++) {
         int rc;

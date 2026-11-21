@@ -5554,6 +5554,24 @@ const char *vol_name_index_get(const vol_name_index *ni, uint64_t id)
     return nidx_get(ni, id);
 }
 
+/* Builder-side insert, for a collector that already holds the name (the
+ * sweep's collect callback is handed it by vol_iter_live_inodes, whose own
+ * map came from the same walk). Returns 1 stored, 0 on OOM. NULL leaves the
+ * id unmapped, which is the documented "no dirent" answer. */
+int vol_name_index_put(vol_name_index *ni, uint64_t id, const char *name)
+{
+    if (!ni || !name)
+        return 0;
+    return nidx_put(ni, id, name);
+}
+
+/* The snapshot's builder-side allocator: an opaque type in volume.h, so the
+ * sweep's collect (vol_sweep.c) needs this to fill one as it walks. */
+vol_name_index *vol_name_index_new(void)
+{
+    return (vol_name_index *)calloc(1, sizeof(vol_name_index));
+}
+
 void vol_name_index_free(vol_name_index *ni)
 {
     if (!ni)

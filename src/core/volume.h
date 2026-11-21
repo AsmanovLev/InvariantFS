@@ -577,6 +577,14 @@ int vol_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
  * snapshot is immutable once built and may be read from any thread. */
 int  vol_name_index_build(invfs_volume *v, vol_name_index **out);
 const char *vol_name_index_get(const vol_name_index *ni, uint64_t id);
+/* Builder-side insert: a collector that already holds the name (the sweep's
+ * collect callback) fills the snapshot as it walks, so a pass pays ONE walk
+ * instead of a collect walk plus a second one just for the names. Returns
+ * 1 stored, 0 on OOM. The hint verification at use time is unchanged. */
+int  vol_name_index_put(vol_name_index *ni, uint64_t id, const char *name);
+/* Allocate/free an EMPTY snapshot for a collector that fills it with
+ * vol_name_index_put as it walks (free() of a half-built one is safe). */
+vol_name_index *vol_name_index_new(void);
 void vol_name_index_free(vol_name_index *ni);
 
 /* ---- WP118: nlink vs dirent fan-in accounting --------------------------
@@ -917,6 +925,23 @@ size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
                                  size_t *found_out, int *rc_out);
 int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
                                 size_t *n_out, size_t *found_out);
+
+/* The same growing collect, also returning the id -> path names it was
+ * handed by the walk (WP-NAME-SNAPSHOT). The collect callback already
+ * receives a name per inode -- vol_iter_live_inodes builds that map during
+ * the same walk -- so filling the snapshot here costs no extra namespace
+ * walk. That is the point: a sweep pass that built the snapshot separately
+ * paid TWO whole walks before its first file.
+ *
+ * *names_io is a fresh snapshot on success and NULL when the caller passed
+ * NULL, when the index could not be allocated, or on the -1 return. Only
+ * accepted ids are mapped (the list and the map always agree). The names
+ * remain HINTS: vol_sweep_name_of_hint re-proves each one against the live
+ * tree before it is used. */
+int vol_collect_sweepables_grow_named(invfs_volume *v, uint64_t **ids_io,
+                                     size_t *cap_io, size_t *n_out,
+                                     size_t *found_out,
+                                     vol_name_index **names_io);
 
 /* ---- WP4b: incremental ranged-write sessions ----
  * Streaming write path: begin a session for `name` (truncate != 0 drops

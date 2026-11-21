@@ -286,6 +286,44 @@ int main(int argc, char **argv)
         vol_name_index_free(snap);
     }
 
+    /* --- 5d. the names come back WITH the collect ---------------------
+     *
+     * The pass used to build the id -> path map in a SECOND whole walk after
+     * the collect. The collect callback is already handed the name by
+     * vol_iter_live_inodes (whose own map came from the same walk), so the
+     * growing collect can fill the snapshot as it goes. What must hold: the
+     * map and the id list agree, every mapped name still resolves to its id,
+     * and it answers what the reverse walk answers. */
+    {
+        uint64_t *ids2 = NULL;
+        size_t cap2 = 0, n2 = 0, f2 = 0;
+        vol_name_index *snap = NULL;
+        int rc2 = vol_collect_sweepables_grow_named(v, &ids2, &cap2, &n2, &f2,
+                                                    &snap);
+        size_t k2, named = 0, agrees = 0;
+
+        ok(rc2 == 0 && n2 == NFILES && snap != NULL,
+           "5d.  the growing collect also returns the id -> path map "
+           "(rc=%d, %zu ids, map=%s)", rc2, n2, snap ? "built" : "NULL");
+        for (k2 = 0; k2 < n2; k2++) {
+            const char *h = vol_name_index_get(snap, ids2[k2]);
+            char want[256];
+            if (!h)
+                continue;
+            named++;
+            if (vol_find(v, h) == ids2[k2] &&
+                vol_sweep_name_of(v, ids2[k2], want, sizeof want) == 1 &&
+                strcmp(want, h) == 0)
+                agrees++;
+        }
+        ok(named == n2 && agrees == n2,
+           "5d-1. every collected id is mapped, still resolves to itself, "
+           "and matches the reverse walk (%zu named, %zu agree of %zu)",
+           named, agrees, n2);
+        vol_name_index_free(snap);
+        free(ids2);
+    }
+
     /* --- 6. bit-exactness THROUGH the sweep -------------------------- */
     for (i = 0; i < n; i++) {
         uint8_t *back = NULL;

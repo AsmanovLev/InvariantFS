@@ -2318,7 +2318,15 @@ typedef struct {
 /* WP-M21b: collector callback for the  live-set iterator. Internal
  * (\x01) rows and nameless rows are not sweep targets; the iterator has
  * already dropped deleted rows and de-duplicated nlink-shared inodes. */
-struct sweep_ids { uint64_t *ids; size_t max, n; size_t found; int full; };
+struct sweep_ids {
+    uint64_t *ids;
+    size_t max, n;
+    size_t found;
+    int full;
+    /* WP-NAME-SNAPSHOT: optional; filled with the id -> path the walk hands
+     * us, so a pass that needs the names pays no second walk. */
+    vol_name_index *names;
+};
 
 static int collect_sweepables_cb(invfs_volume *v, uint64_t id,
                                     const char *name, void *ctx)
@@ -2345,6 +2353,10 @@ static int collect_sweepables_cb(invfs_volume *v, uint64_t id,
         return 1;
     }
     c->ids[c->n++] = id;
+    /* Only ACCEPTED ids are mapped: the list and the snapshot always agree,
+     * so a truncated pass leaves no name for an id it did not store. */
+    if (c->names)
+        (void)vol_name_index_put(c->names, id, name);
     return 0;
 }
 
@@ -2355,13 +2367,15 @@ static int collect_sweepables_cb(invfs_volume *v, uint64_t id,
  * count and callers legitimately want the count they got even on a short
  * walk -- what they must not do is mistake it for the whole set, and only
  * they can decide what a short list is worth. */
-size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
-                                 size_t *found_out, int *rc_out)
+static size_t collect_sweepables_ex_impl(invfs_volume *v, uint64_t *ids,
+                                        size_t max, size_t *found_out,
+                                        int *rc_out, vol_name_index *names)
 {
     struct sweep_ids vc;
     int rc;
 
     vc.ids = ids; vc.max = max; vc.n = 0; vc.found = 0; vc.full = 0;
+    vc.names = names;
     /* WP135: this status was discarded, and the discard is the sharpest of
      * the five. vol_iter_live_inodes returns -1 when the base scan
      * fails, and the two things that follow from that were both silent:
@@ -2390,20 +2404,30 @@ size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
     return vc.n;
 }
 
+size_t vol_collect_sweepables_ex(invfs_volume *v, uint64_t *ids, size_t max,
+                                 size_t *found_out, int *rc_out)
+{
+    return collect_sweepables_ex_impl(v, ids, max, found_out, rc_out, NULL);
+}
+
 size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max)
 {
     return vol_collect_sweepables_ex(v, ids, max, NULL, NULL);
 }
 
-int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_io,
-                                size_t *n_out, size_t *found_out)
+int vol_collect_sweepables_grow_named(invfs_volume *v, uint64_t **ids_io,
+                                     size_t *cap_io, size_t *n_out,
+                                     size_t *found_out,
+                                     vol_name_index **names_io)
 {
     uint64_t *ids;
     size_t cap, n = 0, found = 0;
     vol_walk_t w;
+    vol_name_index *names = NULL;
     int rc = 0;
 
     if (!v || !ids_io || !cap_io || !n_out || !found_out) return -1;
+    if (names_io) *names_io = NULL;
     ids = *ids_io; cap = *cap_io;
 
     if (cap == 0) {
@@ -2413,7 +2437,14 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
     }
     vol_walk_init(&w, v, "vol_collect_sweepables");
     for (;;) {
-        n = vol_collect_sweepables_ex(v, ids, cap, &found, &rc);
+        /* One snapshot per pass, thrown away and rebuilt when the buffer
+         * doubles: only the pass whose ids are returned may supply names. */
+        vol_name_index *pass = names_io ? vol_name_index_new() : NULL;
+        n = collect_sweepables_ex_impl(v, ids, cap, &found, &rc, pass);
+        if (names_io) {
+            vol_name_index_free(names);
+            names = pass;
+        }
         /* rc, NOT the receipt's "complete". The two are not the same
          * question and conflating them is a bug this loop had once: on a
          * seed of one slot, found > n is the EXPECTED state of the first
@@ -2446,11 +2477,20 @@ int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io, size_t *cap_
     *ids_io = ids; *cap_io = cap;
     *n_out = n; *found_out = found;
     vol_walk_result(&w, rc, n, found);
+    if (names_io) *names_io = names;
     /* WP135: -1 for a walk that did not finish, exactly as it already
      * returned -1 for a list it could not grow. Both are "this is a strict
      * subset of a set we cannot enumerate", and the caller has to say so
      * either way. Return 0 only for a list that IS the live set. */
     return vol_walk_commit(&w);
+}
+
+int vol_collect_sweepables_grow(invfs_volume *v, uint64_t **ids_io,
+                                size_t *cap_io, size_t *n_out,
+                                size_t *found_out)
+{
+    return vol_collect_sweepables_grow_named(v, ids_io, cap_io, n_out,
+                                             found_out, NULL);
 }
 
 
