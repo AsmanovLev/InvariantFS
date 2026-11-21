@@ -495,8 +495,13 @@ int main(int argc, char **argv)
         /* The rebuild is now interval-bounded, so a lookup cannot force it
          * every time it runs. Move the clock past the window to assert the
          * other half of the contract: a degraded table DOES heal, it just
-         * does not pay an O(N) walk per operation to do it. */
-        g_last_rebuild_sec = 0;
+         * does not pay an O(N) walk per operation to do it.
+         *
+         * `0` was wrong: fuse_now_sec() is monotonic since boot, so
+         * `now - 0 >= 60` is false on a machine up for less than a minute
+         * and this leg went red on a fresh VM for a reason that had nothing
+         * to do with the table. Set it a full interval behind NOW. */
+        g_last_rebuild_sec = fuse_now_sec() - TABLE_REBUILD_MIN_INTERVAL - 1.0;
         se = snapshot_entry("b/x", NULL, NULL, NULL);
         ok(se == 1,
            "3j. b/x resolves (rc=%d) -- which it already did above, without "
