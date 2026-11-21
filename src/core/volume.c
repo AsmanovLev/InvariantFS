@@ -30,6 +30,7 @@
 
 #include <time.h>
 #include "perf_counters.h"
+#include "vol_fault.h"   /* WP-IO-LOCK: pba_ref_rebuild test seam */
 
 static inline double vol_now_sec(void)
 {
@@ -3280,6 +3281,17 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      * pba_ref_ensure) -- and a caller that forgets to invalidate can only
      * cost a walk, never a free on a stale count. */
     if (v->pba_ref_on && !v->pba_ref_stale) return 0;
+    /* Test-only seam (src/core/vol_fault.h): stands in for a rebuild that
+     * cannot be performed. It drops the map exactly the way a walk that
+     * stopped does, so a caller which needs a rebuild lands in the map's own
+     * "unknown: never free" state -- and a caller which must NOT need one is
+     * unaffected. pbaref_test's replay leg arms it to prove the pba-form
+     * drain frees without a rebuild. */
+    if (invfs_vol_fault("pba_ref_rebuild")) {
+        pba_ref_free(v);
+        v->pba_ref_stale = 1;
+        return -1;
+    }
     /* WP-IO-LOCK: a REBUILD is a whole strict walk plus one recipe load per
      * live inode, and it lands inside whatever lock the caller holds -- for
      * the FUSE daemon that is g_io_lock, on the write path, via the retire
@@ -3339,6 +3351,15 @@ static int pba_ref_ensure_locked(invfs_volume *v)
     }
     v->pba_ref_stale = 0;
     return 0;
+}
+
+/* The door for a test in another translation unit to re-arm this TU's fault
+ * state (the seam above). Same shape as invfs_vol_btree_fault_reload: the
+ * arming state is a per-TU static, so unsetenv+setenv from the test is not a
+ * change the pointer compare can see. Inert unless a test calls it. */
+void invfs_vol_volume_fault_reload(void)
+{
+    invfs_vol_fault_reload();
 }
 
 int pba_ref_ensure(invfs_volume *v)

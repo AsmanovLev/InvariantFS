@@ -42,6 +42,7 @@
  * sees no change, the countdown stays spent, and the leg goes green
  * measuring the healthy path. */
 extern void invfs_vol_btree_fault_reload(void);
+extern void invfs_vol_volume_fault_reload(void);   /* WP-IO-LOCK seam */
 
 #define MAXPB 64
 
@@ -914,6 +915,68 @@ int main(int argc, char **argv)
         run_session(!strcmp(phase, "red"), 1);
     } else if (!strcmp(phase, "all") || !strcmp(phase, "allnosweep")) {
         run_session(!strcmp(phase, "all"), 0);
+    } else if (!strcmp(phase, "replay")) {
+        /* WP-IO-LOCK: a PBA-FORM drain must free WITHOUT a rebuild.
+         *
+         * The commit has already applied +1 for the new recipe and validated
+         * the map, so the only stale counts are the retired old pbas -- which
+         * is exactly what the retire entry carries. The rebuild seam is armed
+         * to fail: a drain that takes it anyway loses the map, the free gate
+         * answers "unknown: never free", and the retired block stays
+         * allocated. `freed` is the oracle. */
+        size_t file_sz = 8 * SEGMENT_SIZE;
+        uint8_t *a = mk_file(1), *b = mk_file(2);
+        uint64_t old[MAXPB], pba0 = 0;
+        int nold = 0;
+        invfs_volume *v;
+
+        mkfs_fresh();
+        v = open_vol();                 /* lazy_reclaim=0: the map is built here */
+        ok(vol_write_bulk(v, "file_a.bin", a, file_sz, NULL) != 0,
+           "replay: wrote file_a.bin");
+        ok(recipe_pbas(v, "file_a.bin", old, MAXPB, &nold) == 0 && nold > 0,
+           "replay: file_a.bin names its segments");
+        if (nold > 0) pba0 = old[0];
+        ok(vol_write_bulk(v, "file_a.bin", b, file_sz, NULL) != 0,
+           "replay: full rewrite drops every old segment (one pba-form retire)");
+        ok(pba0 != 0 && extent_allocated(v, pba0, NULL) > 0,
+           "replay: the retired block is still allocated BEFORE the drain");
+        printf("  [replay] before drain: ready=%d pba0=%llu count=%u bit=%d\n",
+               vol_pba_is_ready(v), (unsigned long long)pba0,
+               pba_ref_count(v, pba0),
+               (v->bitmap[pba0 >> 3] >> (pba0 & 7)) & 1);
+
+        setenv("INVFS_FAULT", "pba_ref_rebuild:1", 1);
+        invfs_vol_volume_fault_reload();
+        /* vol_sync, not vol_flush: the flush barriers metadata, the DELTA
+         * DRAIN (which owns the retire list) runs in the sync tail. */
+        ok(vol_sync(v) == 0, "replay: vol_sync fences the delta and drains");
+        unsetenv("INVFS_FAULT");
+        invfs_vol_volume_fault_reload();
+
+        ok(pba0 != 0 && extent_allocated(v, pba0, NULL) == 0,
+           "replay: the drain freed the retired block WITHOUT a rebuild");
+        printf("  [replay] after drain:  ready=%d pba0=%llu count=%u bit=%d\n",
+               vol_pba_is_ready(v), (unsigned long long)pba0,
+               pba_ref_count(v, pba0),
+               (v->bitmap[pba0 >> 3] >> (pba0 & 7)) & 1);
+        oracle(v, "file_a.bin", b, file_sz,
+               "replay: file_a.bin byte-exact after the drain");
+
+        /* CONTROL: the seam really does bite. Drop the map and rebuild with
+         * the same arming -- it must fail and leave the map unknown. Without
+         * this, the leg above could be green because the seam never fired. */
+        pba_ref_reset(v);
+        setenv("INVFS_FAULT", "pba_ref_rebuild:1", 1);
+        invfs_vol_volume_fault_reload();
+        ok(pba_ref_ensure(v) == -1 && !vol_pba_is_ready(v),
+           "replay control: the armed seam fails a rebuild and leaves the map "
+           "unknown (never free)");
+        unsetenv("INVFS_FAULT");
+        invfs_vol_volume_fault_reload();
+
+        vol_flush(v); vol_close(v);
+        free(a); free(b);
     } else if (!strcmp(phase, "setup")) {
         size_t file_sz = 8 * SEGMENT_SIZE;
         invfs_dedupe_stats ds;

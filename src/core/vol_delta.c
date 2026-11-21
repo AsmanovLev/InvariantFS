@@ -997,7 +997,7 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
                                 size_t n)
 {
     size_t i, j, k;
-    int need_map = 0;
+    int need_map = 0, all_pba = 1;
     for (i = 0; i < n; i++) {
         /* WP-IO-LOCK: a RECIPE-form entry frees through the same counts as a
          * pba-form one (vol_free_recipe_blocks -> pba_ref_count per unique
@@ -1007,12 +1007,20 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
          * trailing leak BUG-RECLAIM-UNCLAIMED measured at 2.6/1.4 MiB under
          * lazy_reclaim=0. Counting them here rebuilds ONCE for the batch,
          * where the live set already excludes everything being retired. */
-        if ((list[i].pbas && list[i].npbas) || list[i].has_recipe) {
+        if (list[i].has_recipe) {
             need_map = 1;
+            all_pba = 0;          /* a recipe needs loading: rebuild */
             break;
         }
+        if (list[i].pbas && list[i].npbas)
+            need_map = 1;
+        else
+            all_pba = 0;
     }
-    if (need_map) {
+    if (need_map && !(all_pba && vol_pba_is_ready(v))) {
+        if (getenv("INVFS_DEBUG_RETIRE"))
+            fprintf(stderr, "[retire] path=REBUILD need_map=%d all_pba=%d ready=%d\n",
+                    need_map, all_pba, vol_pba_is_ready(v));
         /* lazy_reclaim means "the map is NOT maintained incrementally", not
          * "it can be trusted without a rebuild": every -1 in the unlink and
          * write paths is skipped under it (vol_dirs.c, vol_sweep.c:1500), so
@@ -1034,6 +1042,41 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
          * which is what it is for. */
         pba_ref_reset(v);
         pba_ref_ensure(v);
+    } else if (need_map) {
+        /* WP-IO-LOCK: replay the retire instead of rebuilding. Every entry
+         * here is PBA-FORM (the commit/remap/dedupe/migrate shape: the exact
+         * superseded set, one entry per old AST block entry, TEXT recorded as
+         * 0 -- see vol_write.c's old_pbas), and the map is READY, which is
+         * what makes this provable rather than hopeful:
+         *
+         *   - the commit applied +1 for every segment the NEW recipe names
+         *     and then pba_ref_validate(v) cleared the stale mark;
+         *   - ready therefore means nothing published behind the map since
+         *     then, and the map's counts for these old pbas came from the
+         *     build that last saw them live (a rebuild always counts the
+         *     current live set, and any build that happened after a supersede
+         *     would have consumed these entries in its own batch --
+         *     dl_retire_collect takes ALL live entries at once);
+         *   - so one -1 per old occurrence (the build counts per entry, not
+         *     per unique block) restores exactness, and the free loop below
+         *     reads the true remaining count.
+         *
+         * Anything recipe-form, a map that is absent, or a map marked stale
+         * takes the rebuild above -- the same answer, one walk for the whole
+         * batch rather than one per swept file. */
+        for (i = 0; i < n; i++) {
+            delta_retire_ent *e = &list[i];
+            if (!e->pbas)
+                continue;
+            for (j = 0; j < e->npbas; j++)
+                if (e->pbas[j]) {
+                    if (getenv("INVFS_DEBUG_RETIRE"))
+                        fprintf(stderr, "[retire] path=REPLAY -1 pba=%llu (count before %u)\n",
+                                (unsigned long long)e->pbas[j],
+                                pba_ref_count(v, e->pbas[j]));
+                    pba_ref_modify(v, e->pbas[j], -1);
+                }
+        }
     }
     for (i = 0; i < n; i++) {
         delta_retire_ent *e = &list[i];

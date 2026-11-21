@@ -86,6 +86,9 @@ void invfs_vol_btree_fault_reload(void);
  * costs; a third would want the state hoisted into a tiny shared TU. */
 void invfs_vol_dirs_fault_reload(void);
 
+/* WP-IO-LOCK: the same door for src/core/volume.c (the pba_ref_rebuild site). */
+void invfs_vol_volume_fault_reload(void);
+
 /* P0-2: the same door for src/core/vol_textzone.c (registry load seam). */
 void invfs_vol_textzone_fault_reload(void);
 

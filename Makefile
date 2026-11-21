@@ -1319,6 +1319,11 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check plugin-so
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp rednosweep
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp all
 	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp allnosweep
+# WP-IO-LOCK: a PBA-FORM drain must free from the retire entry's own -1s,
+# without a map rebuild. The phase arms the rebuild to fail, syncs, and
+# requires the retired block to be free; the control proves the arming
+# bites when a rebuild IS required.
+	$(TESTENV) $(TESTISO) $(OUT)/invf-pbaref_test /tmp replay
 # WP wp/pbaref-skipped-row-is-not-exact: pba_ref_ensure SKIPPED an inode
 # row it could not read, discarded the walk's status, and set
 # pba_ref_stale = 0 -- the "this map is exact" flag -- on a map built
