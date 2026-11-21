@@ -8,6 +8,11 @@
 
 typedef struct invfs_volume invfs_volume;
 
+/* WP-NAME-SNAPSHOT: opaque one-walk id -> path snapshot (see the full
+ * declaration and API further down, beside vol_name_of). Forward-declared
+ * here because the sweep API above needs to name it in a parameter. */
+typedef struct vol_name_index vol_name_index;
+
 void invfs_sweep_ui_set(int active);
 int invfs_sweep_ui_active(void);
 
@@ -236,6 +241,14 @@ int  vol_sweep_pending(invfs_volume *v);
    this to bound its g_io_lock hold to one file's sweep per hold; see
    the full vol_sweep_pending_cap() commentary in src/core/vol_sweep.c. */
 int  vol_sweep_pending_cap(invfs_volume *v, size_t cap);
+/* Same chunk primitive with a name SNAPSHOT for the whole drain run: the
+ * FUSE worker builds one vol_name_index before its chunk loop and passes
+ * it here so the drain stops paying one reverse walk per entry. A NULL
+ * snapshot is vol_sweep_pending_cap exactly (and what it calls). The
+ * snapshot's names are hints, verified per entry by
+ * vol_sweep_name_of_hint, so a rename during the drain still resolves. */
+int  vol_sweep_pending_cap_ex(invfs_volume *v, size_t cap,
+                              const vol_name_index *names);
 void vol_sweep_pending_finish(invfs_volume *v);
 typedef void (*invfs_sweep_file_progress_fn)(void *user, const char *name,
                                             uint64_t done, uint64_t total);
@@ -248,6 +261,14 @@ int  vol_sweep_one_ex(invfs_volume *v, uint64_t inode_id, const char *name,
  * base page, an OOM). The third answer is not "gone" and a caller that
  * tests the result for truthiness will read it as found. */
 int  vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap);
+/* WP-NAME-SNAPSHOT: vol_sweep_name_of with a snapshot HINT. A non-empty
+ * hint is used only after vol_find(hint) == id proves it still names this
+ * inode; otherwise (stale on a rename, or no snapshot) this falls back to
+ * the fresh reverse walk -- same answer, same cost as before the snapshot,
+ * for the one candidate that needs it. Same return contract as
+ * vol_sweep_name_of: 1 = found, 0 = gone, -1 = the walk STOPPED. */
+int  vol_sweep_name_of_hint(invfs_volume *v, uint64_t id, const char *hint,
+                            char *nm, size_t cap);
 int  vol_stat(invfs_volume *v, const char *name, uint64_t *size_out);
 /* inode id + size + ctime in one O(1) index lookup */
 int  vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
@@ -537,6 +558,26 @@ int vol_name_of(invfs_volume *v, uint64_t inode_id,
  * found, -1 error (too deep/cyclic/buffer too small). */
 int vol_path_of(invfs_volume *v, uint64_t inode_id, char *buf,
                    size_t cap);
+
+/* ---- WP-NAME-SNAPSHOT: one-walk id -> path map --------------------------
+ * Resolving a name for a candidate id costs vol_name_of() one whole reverse
+ * walk of the dirent tree, so a driver that has to resolve K candidates
+ * paid K walks. This builds the same answer for EVERY inode in ONE walk and
+ * answers lookups from memory; the sweep drivers use it to stop paying the
+ * per-candidate walk. The stored value is the full mount-relative path of
+ * one dirent naming the inode ("" if the path does not fit, absent if no
+ * dirent names it; first name wins on a hardlink), i.e. exactly what
+ * vol_name_of() would have said at the moment of the walk.
+ *
+ * A snapshot is a POINT-IN-TIME answer and can go stale on a rename, so it
+ * is a HINT: callers must prove the name still resolves to the id before
+ * acting on it (vol_sweep_name_of_hint does that). Build fails closed:
+ * returns -1 and leaves *out NULL when the walk could not finish, which is
+ * the callers' cue to fall back to the per-inode reverse walk. The
+ * snapshot is immutable once built and may be read from any thread. */
+int  vol_name_index_build(invfs_volume *v, vol_name_index **out);
+const char *vol_name_index_get(const vol_name_index *ni, uint64_t id);
+void vol_name_index_free(vol_name_index *ni);
 
 /* ---- WP118: nlink vs dirent fan-in accounting --------------------------
  * For every live inode, the number of NAMES that resolve to it (its

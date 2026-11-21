@@ -5235,6 +5235,14 @@ int vol_name_of(invfs_volume *v, uint64_t inode_id,
      * into NULL, which iter_live_inodes documents as the ordinary "no
      * dirent reference" case. A short walk is -1, which is what this
      * function's own contract already promised. */
+    /* Test-only seam (src/core/vol_fault.h): stands in for the reverse walk
+     * failing. It is what lets a test prove that a caller answered from a
+     * vol_name_index snapshot -- and therefore paid no walk for this inode
+     * -- instead of merely checking that the answer was right. The injected
+     * failure is the same -1 the walk below produces on an unreadable row. */
+    if (invfs_vol_fault("name_of_walk"))
+        return -1;
+
     /* WP135: the STRICT walk. "This inode has no name" and "the tree
      * could not be read" are different answers and only one of them is 0.
      * The lenient walk cannot express the difference: it steps over the
@@ -5340,14 +5348,19 @@ typedef struct {
     uint32_t off;          /* name offset in pool, +1; 0 = empty slot */
 } nidx_slot;
 
-typedef struct {
+/* WP-NAME-SNAPSHOT: named at file scope (not an anonymous typedef) so the
+ * public entry points below can hand an immutable snapshot to callers in
+ * other translation units as an opaque `vol_name_index *`. The sweep's
+ * per-candidate reverse walk paid this map's cost K times; a caller that
+ * builds it once pays it once and answers every candidate from it. */
+struct vol_name_index {
     nidx_slot *tab;
     size_t cap;            /* power of two, load factor <= 0.5 */
     size_t n;
     char *pool;            /* NUL-separated names */
     size_t pool_n, pool_cap;
     int oom;
-} name_index;
+};
 
 typedef struct {
     invfs_volume *v;
@@ -5357,7 +5370,7 @@ typedef struct {
     size_t visited_cap;
     size_t visited_n;
     int oom;
-    name_index nidx;    /* WP117: built once, before the base scan */
+    vol_name_index nidx;    /* WP117: built once, before the base scan */
     int nidx_ok;
     char namebuf[INVFS_MAX_NAME + 1];   /* fallback path only */
 } iter_ctx;
@@ -5370,7 +5383,7 @@ static size_t nidx_hash(uint64_t id)
     return (size_t)id;
 }
 
-static void nidx_free(name_index *ni)
+static void nidx_free(vol_name_index *ni)
 {
     if (!ni)
         return;
@@ -5381,7 +5394,7 @@ static void nidx_free(name_index *ni)
     ni->cap = ni->n = ni->pool_n = ni->pool_cap = 0;
 }
 
-static int nidx_grow(name_index *ni)
+static int nidx_grow(vol_name_index *ni)
 {
     size_t nc = ni->cap ? ni->cap * 2 : 1024, i;
     nidx_slot *nt = (nidx_slot *)calloc(nc, sizeof *nt);
@@ -5404,7 +5417,7 @@ static int nidx_grow(name_index *ni)
 
 /* Record id -> `leaf`. Returns 1 on success (an id already present
  * keeps its first name), 0 on OOM. */
-static int nidx_put(name_index *ni, uint64_t id, const char *leaf)
+static int nidx_put(vol_name_index *ni, uint64_t id, const char *leaf)
 {
     size_t h, nl;
 
@@ -5445,7 +5458,7 @@ static int nidx_put(name_index *ni, uint64_t id, const char *leaf)
 }
 
 /* The dirent path for an inode, or NULL if no dirent names it. */
-static const char *nidx_get(const name_index *ni, uint64_t id)
+static const char *nidx_get(const vol_name_index *ni, uint64_t id)
 {
     size_t h;
 
@@ -5468,7 +5481,7 @@ static const char *nidx_get(const name_index *ni, uint64_t id)
 static int nidx_build_cb(void *ctx_, const char *path, uint64_t ino,
                             uint32_t type, uint64_t size, int64_t mtime)
 {
-    name_index *ni = (name_index *)ctx_;
+    vol_name_index *ni = (vol_name_index *)ctx_;
 
     (void)type; (void)size; (void)mtime;
     if (!ni || !path)
@@ -5481,7 +5494,7 @@ static int nidx_build_cb(void *ctx_, const char *path, uint64_t ino,
 
 /* One vol_walk() for the whole iteration. 0 = map ready, -1 = could
  * not build it (the caller then falls back to the per-inode walk). */
-static int nidx_build(invfs_volume *v, name_index *ni)
+static int nidx_build(invfs_volume *v, vol_name_index *ni)
 {
     int rc;
 
@@ -5492,6 +5505,61 @@ static int nidx_build(invfs_volume *v, name_index *ni)
         return -1;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* WP-NAME-SNAPSHOT: the public form of the WP117 map                  */
+/* ------------------------------------------------------------------ */
+/* A caller that has to resolve MANY inode ids (the sweep driver has one
+ * per candidate) builds this once and asks it, instead of paying
+ * vol_name_of()'s whole-tree walk per candidate. What the map stores is
+ * exactly what vol_name_of() would answer for the inode at the moment of
+ * the walk: the full mount-relative path of one dirent naming it, "" when
+ * the path does not fit the walk's buffer, and no entry when no dirent
+ * names it. First name wins on a hardlink, the same rule vol_name_of()
+ * documents.
+ *
+ * The snapshot goes STALE: a rename after the walk leaves the old name in
+ * it. Callers must therefore treat an answer as a HINT (see
+ * vol_sweep_name_of_hint, which proves the name still resolves to the id
+ * before using it) rather than as ground truth. Building it fails closed:
+ * if the walk stops, *out stays NULL and the caller falls back to the
+ * per-inode reverse walk it used before this existed. */
+int vol_name_index_build(invfs_volume *v, vol_name_index **out)
+{
+    vol_name_index *ni;
+
+    if (!out)
+        return -1;
+    *out = NULL;
+    if (!v)
+        return -1;
+    ni = (vol_name_index *)calloc(1, sizeof *ni);
+    if (!ni)
+        return -1;
+    if (nidx_build(v, ni) != 0) {
+        nidx_free(ni);
+        free(ni);
+        return -1;
+    }
+    *out = ni;
+    return 0;
+}
+
+/* The snapshot's answer for `id`, or NULL when no dirent named it. A NULL
+ * snapshot answers NULL: a caller that could not build one gets the
+ * fallback path, never a silent "no name". */
+const char *vol_name_index_get(const vol_name_index *ni, uint64_t id)
+{
+    return nidx_get(ni, id);
+}
+
+void vol_name_index_free(vol_name_index *ni)
+{
+    if (!ni)
+        return;
+    nidx_free(ni);
+    free(ni);
 }
 
 /* The one place the iterator resolves a name. Returns NULL when the

@@ -697,6 +697,55 @@ int main(int argc, char **argv)
            "cannot read only the DONE line and miss it");
     }
 
+    /* =================================================================
+     * WP-NAME-SNAPSHOT -- the pass resolves candidate names from ONE walk.
+     *
+     * Resolving a candidate's name used to cost a whole reverse namespace
+     * walk (vol_name_of), paid per candidate: on a large volume that is the
+     * background pass turning O(files) walks into a stall under g_io_lock.
+     * The pass now builds one id -> path snapshot before its loop and uses
+     * each answer only after vol_find proves it still names the id.
+     *
+     * `name_of_walk:1` fails the FIRST reverse walk of the pass. With the
+     * snapshot in place that walk is never reached, so every candidate is
+     * still resolved and the DONE line says failed=0. Before the fix the
+     * first candidate's lookup returned -1 and was counted as a FAILURE, so
+     * this leg is red on the old code and green on the new one -- and the
+     * control below (sweep_collect_test 5c-4) proves the same arming really
+     * does reach the walk when there is no hint.
+     * ================================================================= */
+    {
+        const char *anchor, *done, *eol;
+        char line[512];
+        size_t len;
+
+        g_shutdown = 0;
+        cap_start();
+        arm_btree("name_of_walk:1");
+        invf_sweep_worker(1);
+        disarm();
+        cap_stop_and_get(log, sizeof log);
+        printf("        --- watermark pass, the first reverse name lookup armed "
+               "to fail ---\n%s"
+               "        --------------------------------------------------"
+               "------\n", log);
+
+        anchor = strstr(log, "watermark pass started");
+        done = anchor ? strstr(anchor, "[sweep] DONE") : NULL;
+        eol = done ? strchr(done, '\n') : NULL;
+        len = eol ? (size_t)(eol - done) + 1 : (done ? strlen(done) : 0);
+        if (len >= sizeof line) len = sizeof line - 1;
+        if (len) { memcpy(line, done, len); line[len] = 0; }
+        else line[0] = 0;
+
+        ok(done != NULL,
+           "1m. the pass completes and prints its own DONE line");
+        ok(line[0] && strstr(line, "failed=0") != NULL,
+           "1n. and resolved every candidate WITHOUT a reverse walk -- the "
+           "first vol_name_of() was armed to fail and was never reached: %s",
+           line[0] ? line : "(no DONE line)");
+    }
+
     g_vol = NULL;
     vol_close(v);
 

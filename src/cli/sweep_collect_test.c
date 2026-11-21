@@ -66,6 +66,7 @@
 #include <unistd.h>
 
 #include "volume_internal.h"
+#include "vol_fault.h"   /* WP-NAME-SNAPSHOT: the name_of_walk seam */
 
 #define NFILES 64
 #define FILESZ 137          /* not a multiple of the segment size: a recipe
@@ -85,6 +86,21 @@ static void ok(int cond, const char *fmt, ...)
     va_end(ap);
     checks++;
     if (!cond) failures++;
+}
+
+/* WP-NAME-SNAPSHOT: arm/disarm the reverse-walk seam that owns vol_name_of.
+ * The fault state is per translation unit, so the reload door is what makes
+ * an arming from THIS file reach the code in vol_btree.c. */
+static void arm_btree_name_walk(void)
+{
+    setenv("INVFS_FAULT", "name_of_walk:1", 1);
+    invfs_vol_btree_fault_reload();
+}
+
+static void disarm_name_walk(void)
+{
+    unsetenv("INVFS_FAULT");
+    invfs_vol_btree_fault_reload();
 }
 
 /* the source bytes for file i, and the same bytes back out of the volume */
@@ -209,6 +225,66 @@ int main(int argc, char **argv)
     ok(resolvable,
        "5b. every collected id still resolves to a name: none of the %zu is "
        "a tombstone or an internal row", n);
+
+    /* --- 5c. WP-NAME-SNAPSHOT: one walk, many answers ----------------
+     *
+     * The sweep used to resolve a candidate's name by walking the WHOLE
+     * namespace (vol_name_of), once per candidate. The snapshot answers all
+     * of them from one walk; the hint is only used once vol_find proves it
+     * still names the same inode.
+     *
+     * The armed seam is `name_of_walk`, which fails the FIRST reverse walk.
+     * That makes the two directions checkable in the same block:
+     *   - with a verified hint the walking code is never reached, so the
+     *     answer arrives DESPITE the armed failure (5c-3);
+     *   - with no hint the same armed failure IS reached and turns into -1
+     *     (5c-4), which is the control: it proves 5c-3 measured the absence
+     *     of the walk rather than the seam failing to arm.
+     * A snapshot taken before a rename is stale; 5c-6 proves the stale hint
+     * falls back and returns the LIVE name (a wrong name here would make the
+     * sweep mint siblings beside a name the volume no longer has). */
+    {
+        vol_name_index *snap = NULL;
+        const char *hint;
+        char nm[256];
+        uint64_t id = 0;
+
+        rc = vol_name_index_build(v, &snap);
+        ok(rc == 0 && snap != NULL,
+           "5c.  a name snapshot builds (%s)",
+           rc == 0 && snap ? "one walk" : "FAILED");
+        ok(vol_path_lookup(v, "f007.bin", &id) == 1,
+           "5c-1. fixture: f007.bin resolves to an id");
+        hint = vol_name_index_get(snap, id);
+        ok(hint && strcmp(hint, "f007.bin") == 0,
+           "5c-2. and the snapshot maps that id back to its full path (%s)",
+           hint ? hint : "(null)");
+
+        arm_btree_name_walk();
+        rc = vol_sweep_name_of_hint(v, id, hint, nm, sizeof nm);
+        disarm_name_walk();
+        ok(rc == 1 && strcmp(nm, "f007.bin") == 0,
+           "5c-3. a verified hint answers WITH the reverse walk armed to fail "
+           "(rc=%d name=%s) -- the walk was not paid", rc, nm);
+
+        arm_btree_name_walk();
+        rc = vol_sweep_name_of_hint(v, id, NULL, nm, sizeof nm);
+        disarm_name_walk();
+        ok(rc == -1,
+           "5c-4. CONTROL: with no hint the same armed failure DOES reach the "
+           "reverse walk and is reported as -1 (rc=%d)", rc);
+
+        ok(vol_rename(v, "f007.bin", "f007-renamed.bin") == 0,
+           "5c-5. fixture: the file is renamed AFTER the snapshot");
+        rc = vol_sweep_name_of_hint(v, id, hint, nm, sizeof nm);
+        ok(rc == 1 && strcmp(nm, "f007-renamed.bin") == 0,
+           "5c-6. the STALE hint falls back to the live walk and returns the "
+           "NEW name (rc=%d name=%s)", rc, nm);
+        ok(vol_rename(v, "f007-renamed.bin", "f007.bin") == 0,
+           "5c-7. and the fixture is restored for the sweep leg below");
+
+        vol_name_index_free(snap);
+    }
 
     /* --- 6. bit-exactness THROUGH the sweep -------------------------- */
     for (i = 0; i < n; i++) {

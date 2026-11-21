@@ -2045,6 +2045,36 @@ int vol_sweep_name_of(invfs_volume *v, uint64_t id, char *nm, size_t cap)
     return (rc > 0) ? 1 : 0;
 }
 
+/* WP-NAME-SNAPSHOT: vol_sweep_name_of for a driver that resolves MANY ids.
+ * `hint` is the snapshot's answer for this id (may be NULL when the caller
+ * could not build one, or when no dirent named the inode at build time).
+ *
+ * A hint is used only after `vol_find(hint) == id` proves the name still
+ * resolves to this inode. The check is a componentwise point lookup in the
+ * dirent tree (delta + base B+tree), not a walk, so it costs a fraction of
+ * the reverse walk it replaces. It is NOT optional: the snapshot is a
+ * point-in-time answer, and vol_sweep_one feeds the name to class policy
+ * and to the sibling names it MINTS (`name!jxl`, `name!nbli`, `name!recipe`
+ * -- see sweep_dispatch). Sweeping a renamed file under its old name would
+ * create files beside a name the volume no longer has. A failed check falls
+ * back to the fresh reverse walk, i.e. the pre-snapshot cost, for exactly
+ * the candidates that need it. */
+int vol_sweep_name_of_hint(invfs_volume *v, uint64_t id, const char *hint,
+                           char *nm, size_t cap)
+{
+    size_t hn;
+
+    if (!v || !nm || cap == 0) return 0;
+    if (hint && hint[0]) {
+        hn = strlen(hint);
+        if (hn < cap && vol_find(v, hint) == id) {
+            memcpy(nm, hint, hn + 1);
+            return 1;
+        }
+    }
+    return vol_sweep_name_of(v, id, nm, cap);
+}
+
 
 /* End-of-run work for a pending drain: promotion, tier migration, the
    partial text-batch seal, and the fold/reclaim scheduling
@@ -2093,16 +2123,21 @@ void vol_sweep_pending_finish(invfs_volume *v)
    belongs to the CALLER around the chunk loop, not here: a decay pass
    per drain RUN, a tail when the list empties. vol_sweep_pending below
    is exactly that caller, undrained, for tests and offline paths. */
-int vol_sweep_pending_cap(invfs_volume *v, size_t cap)
+int vol_sweep_pending_cap_ex(invfs_volume *v, size_t cap,
+                             const vol_name_index *names)
 {
     size_t n = v->n_pending;
     size_t seen = 0;
     int done = 0;
     while (n > 0 && (cap == 0 || seen < cap)) {
         uint64_t id = v->pending[0];
-        /* find the current name for this inode (may have been deleted) */
+        /* find the current name for this inode (may have been deleted);
+         * WP-NAME-SNAPSHOT: prefer the run's snapshot, verified */
         char nm[256];
-        int found = vol_sweep_name_of(v, id, nm, sizeof nm);
+        int found = vol_sweep_name_of_hint(v, id,
+                                           names ? vol_name_index_get(names, id)
+                                                 : NULL,
+                                           nm, sizeof nm);
         vol_unmark_pending(v, id);
         seen++;
         /* WP135: == 1, not "non-zero". vol_sweep_name_of propagates the -1
@@ -2116,6 +2151,14 @@ int vol_sweep_pending_cap(invfs_volume *v, size_t cap)
         n = v->n_pending;   /* re-read (list may shrink) */
     }
     return done;
+}
+
+/* The no-snapshot form: every entry pays its own reverse walk, exactly as
+ * before the snapshot existed. Kept as the default entry point for callers
+ * with no run to amortise a map over (vol_sweep_pending, tests). */
+int vol_sweep_pending_cap(invfs_volume *v, size_t cap)
+{
+    return vol_sweep_pending_cap_ex(v, cap, NULL);
 }
 
 /* drain the pending list (daemon background): process each pending inode

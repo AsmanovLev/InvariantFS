@@ -2641,20 +2641,33 @@ static void invf_sweep_worker(int full_pass)
     size_t cap = 0, n = 0, found = 0, i;
     long swept = 0, skipped = 0, failed = 0;
     int complete;
+    /* WP-NAME-SNAPSHOT: the pass's id -> path map, built once below and
+     * freed at the end. NULL when the walk could not finish, in which case
+     * every candidate falls back to the per-inode reverse walk it used
+     * before this existed. */
+    vol_name_index *sweep_names = NULL;
     const char *tag = full_pass ? "watermark" : "manual";
     CD_SET(full_pass ? "fuse-watermark" : "fuse-manual");
 
     pthread_mutex_lock(&g_io_lock);
     if (!g_vol) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     if (vol_pending_count(g_vol) > 0) {
+        /* WP-NAME-SNAPSHOT: one walk for the whole drain run. The drain is
+         * chunked (one entry per lock hold), so without this each entry's
+         * name lookup was its own walk of the entire namespace -- inside
+         * g_io_lock, on the daemon's tick. The map is a hint: every entry
+         * is re-proved against the live tree before its name is used. */
+        vol_name_index *pend_names = NULL;
+        (void)vol_name_index_build(g_vol, &pend_names);
         vol_heat_sweep_begin(g_vol);
         while (g_vol && !g_shutdown && vol_pending_count(g_vol) > 0) {
-            vol_sweep_pending_cap(g_vol, 1);
+            vol_sweep_pending_cap_ex(g_vol, 1, pend_names);
             pthread_mutex_unlock(&g_io_lock);
             usleep(500);
             pthread_mutex_lock(&g_io_lock);
         }
         if (g_vol) vol_sweep_pending_finish(g_vol);
+        vol_name_index_free(pend_names);
         if (!g_vol || g_shutdown) { pthread_mutex_unlock(&g_io_lock); free(ids); return; }
     }
     /* F9-worker: no capture here. An earlier shape armed the window (K=1
@@ -2780,8 +2793,16 @@ static void invf_sweep_worker(int full_pass)
     }
     fprintf(stderr, "[sweep] %s pass started: %zu files%s\n", tag, n,
             complete ? "" : " (PARTIAL -- see INCOMPLETE above)");
-    if (full_pass)
+    if (full_pass) {
         vol_heat_sweep_begin(g_vol);   /* one decay pass per sweep run */
+        /* WP-NAME-SNAPSHOT: the candidate names for the whole pass, from ONE
+         * walk. The loop below resolves each candidate against this map
+         * (verified per candidate by vol_sweep_name_of_hint) instead of
+         * paying one full namespace walk per file. The walk stopping here
+         * is not a failure of the pass: the map stays NULL and every
+         * candidate falls back to the fresh reverse walk. */
+        (void)vol_name_index_build(g_vol, &sweep_names);
+    }
     for (i = 0; i < n; i++) {
         int rc;
         if (g_shutdown || !g_vol) break;
@@ -2796,7 +2817,14 @@ static void invf_sweep_worker(int full_pass)
              * would have handed that -1 to vol_sweep_one together with an
              * empty name, and "skipped" would have told the operator the
              * file was deleted between collect and sweep. It was not. */
-            int nrc = vol_sweep_name_of(g_vol, ids[i], nm, sizeof nm);
+            /* WP-NAME-SNAPSHOT: the collect-time name is a hint, used only
+             * once it still resolves to this id (see the helper); a rename
+             * during the pass falls back to the fresh reverse walk. */
+            int nrc = vol_sweep_name_of_hint(g_vol, ids[i],
+                                             sweep_names
+                                                 ? vol_name_index_get(sweep_names, ids[i])
+                                                 : NULL,
+                                             nm, sizeof nm);
             if (nrc == 1) {
                 rc = vol_sweep_one(g_vol, ids[i], nm);
                 /* one rc: 0 = nothing to do, >0 = swept/deferred, <0 = err */
@@ -2849,6 +2877,7 @@ static void invf_sweep_worker(int full_pass)
             "failed=%ld%s\n",
             found, n, swept, skipped, failed,
             (complete && found == n) ? "" : " INCOMPLETE");
+    vol_name_index_free(sweep_names);
     free(ids);
 }
 
