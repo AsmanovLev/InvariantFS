@@ -2126,6 +2126,7 @@ int vol_delta_range(invfs_volume *v,
          * therefore be cleared whenever the tail contributes anything. */
         if (sv->tn) {
             size_t t;
+            int tail_emitted = 0;
             for (t = 0; t < sv->tn; t++) {
                 const delta_slot *ts;
                 if ((size_t)sv->t[t].slot >= di->cap)
@@ -2138,7 +2139,10 @@ int vol_delta_range(invfs_volume *v,
                 if (hilen && vol_key_cmp(ts->key, ts->klen, hi, hilen) >= 0)
                     continue;
                 DI_EMIT(ts->key, ts->klen, ts);
+                tail_emitted = 1;
             }
+            if (tail_emitted)
+                presorted = 0;
         }
     } else {
         for (i = 0; i < di->cap; i++) {

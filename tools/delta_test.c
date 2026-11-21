@@ -477,6 +477,73 @@ static void test_index_equals_scan(invfs_volume *v)
     ok(count == 2, "index and scan agree on key count");
 }
 
+/* vol_delta_range() emits the sorted view's prefix and then the unsorted tail
+ * of keys logged since that view was built. The tail is appended after the
+ * prefix, so the result is only sorted when the tail contributed nothing --
+ * otherwise the caller must qsort. Regression: with the view holding "r10"
+ * and "r30", inserting "r20" (one key, below DI_TAIL_MERGE_MIN) came back as
+ * r10, r30, r20 because `presorted` stayed set. */
+#define RANGE_ORDER_MAX 32
+
+typedef struct {
+    char keys[RANGE_ORDER_MAX][32];
+    size_t n;
+    int in_order;
+} range_order;
+
+static int range_order_cb(void *ctx, const uint8_t *key, uint16_t klen,
+                          const delta_ref *ref)
+{
+    range_order *ro = (range_order *)ctx;
+    size_t cp = klen < sizeof ro->keys[0] - 1 ? klen : sizeof ro->keys[0] - 1;
+    (void)ref;
+    if (ro->n >= RANGE_ORDER_MAX)
+        return 0;
+    memcpy(ro->keys[ro->n], key, cp);
+    ro->keys[ro->n][cp] = '\0';
+    if (ro->n > 0 && strcmp(ro->keys[ro->n - 1], ro->keys[ro->n]) >= 0)
+        ro->in_order = 0;
+    ro->n++;
+    return 0;
+}
+
+static void test_range_order(invfs_volume *v)
+{
+    range_order ro;
+    size_t i;
+    int seen10 = 0, seen20 = 0, seen30 = 0;
+
+    printf("range order: sorted prefix + unsorted tail\n");
+    ok(vol_delta_append(v, (const uint8_t *)"r10", 3,
+                        (const uint8_t *)"a", 1, 0) == 0, "append r10");
+    ok(vol_delta_append(v, (const uint8_t *)"r30", 3,
+                        (const uint8_t *)"c", 1, 0) == 0, "append r30");
+
+    /* First query folds both keys into the sorted view (full rebuild if this
+     * is a different index instance). */
+    memset(&ro, 0, sizeof ro);
+    ro.in_order = 1;
+    ok(vol_delta_range(v, NULL, 0, NULL, 0, range_order_cb, &ro) == 0,
+       "range after r10/r30");
+    ok(ro.in_order == 1, "r10/r30 query is ordered");
+
+    /* One key between two prefix keys: it lands in the tail, not the prefix. */
+    ok(vol_delta_append(v, (const uint8_t *)"r20", 3,
+                        (const uint8_t *)"b", 1, 0) == 0, "append r20");
+    memset(&ro, 0, sizeof ro);
+    ro.in_order = 1;
+    ok(vol_delta_range(v, NULL, 0, NULL, 0, range_order_cb, &ro) == 0,
+       "range after r20");
+    for (i = 0; i < ro.n; i++) {
+        if (strcmp(ro.keys[i], "r10") == 0) seen10 = 1;
+        if (strcmp(ro.keys[i], "r20") == 0) seen20 = 1;
+        if (strcmp(ro.keys[i], "r30") == 0) seen30 = 1;
+    }
+    ok(ro.n == (size_t)vol_delta_count(v), "range emits every live key");
+    ok(seen10 && seen20 && seen30, "tail key is emitted exactly once");
+    ok(ro.in_order == 1, "prefix+tail result is sorted");
+}
+
 /* The bitmap is NOT made durable before a delta record, and there is no test
  * that pretends otherwise: a record is barriered at append
  * (vol_delta.c:571) while the bitmap is only written at vol_flush
@@ -903,6 +970,7 @@ static void run_unit(const char *dir)
                         (const uint8_t *)"seven!!", 7, 0) == 0, "append bravo");
     test_replay_remount(v, img);
     test_index_equals_scan(v);
+    test_range_order(v);
 
     vol_delta_close(v);
     fake_vol_close(v);
