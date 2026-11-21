@@ -41,6 +41,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>   /* getpid(), used by invfs_perf_dump */
 
 /* Declared here because the SIGUSR1 install macro below names it before
@@ -75,6 +76,25 @@ enum {
     PERF_FSYNC_CALLS,        /* fsync(2) -- THE one that matters            */
     PERF_FSYNC_ERR,
     PERF_FSYNC_DEFERRED,   /* flushes skipped by the commit policy */
+    /* ---- WP-IO-LOCK: what the background writers ask of g_io_lock ------ */
+    /* The sweep's per-candidate name lookup was one whole reverse walk each
+     * until it was answered from a snapshot; NAME_OF_CALLS is the proof that
+     * the fallback is not being taken in production (the fast path resolves
+     * every candidate without one). */
+    PERF_NAME_OF_CALLS,      /* reverse name walks (vol_name_of)            */
+    PERF_NAME_SNAPSHOTS,     /* id -> path snapshots built                  */
+    /* A recipe publish stales the reference map; the next free gate used to
+     * rebuild it in place (a full walk) inside the caller's g_io_lock. These
+     * three are the measurement that decides the fix: how often a publish
+     * does it, and how long one rebuild costs. */
+    PERF_RECIPE_PUBS,        /* row publishes with a recipe_addr change     */
+    PERF_PBAREF_REBUILDS,    /* full reference-map rebuilds                 */
+    PERF_PBAREF_REBUILD_NS,  /* time spent walking for them                 */
+    /* The sweep's own hold: time inside vol_sweep_one per candidate, and the
+     * worst single file (the hold the foreground pays). */
+    PERF_SWEEP_FILE_CALLS,
+    PERF_SWEEP_FILE_NS,
+    PERF_SWEEP_FILE_MAX_NS,
     PERF_MAX
 };
 
@@ -88,6 +108,30 @@ void invfs_perf_dump(const char *why);
 #define INVFS_PERF_ADD(idx, n)                                            \
     __atomic_fetch_add(&invfs_perf_counters[(idx)], (uint64_t)(n),        \
                        __ATOMIC_RELAXED)
+
+/* High-water mark. Same relaxed ordering; the compare-exchange loop keeps the
+ * largest value ever offered, so "worst single hold" needs no lock. */
+#define INVFS_PERF_MAX(idx, n)                                            \
+    do {                                                                  \
+        uint64_t _pn = (uint64_t)(n);                                     \
+        uint64_t _pc = __atomic_load_n(&invfs_perf_counters[(idx)],        \
+                                       __ATOMIC_RELAXED);                 \
+        while (_pn > _pc &&                                               \
+               !__atomic_compare_exchange_n(&invfs_perf_counters[(idx)],   \
+                                            &_pc, _pn, 0,                  \
+                                            __ATOMIC_RELAXED,              \
+                                            __ATOMIC_RELAXED)) { }        \
+    } while (0)
+
+/* Monotonic nanoseconds, for the duration counters. Compiles to 0 when the
+ * build has no counters -- and every consumer multiplies it away. */
+static inline uint64_t invfs_perf_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+#define INVFS_PERF_NOW_NS() invfs_perf_now_ns()
 
 /* atexit, not just the signal: a tool that runs to completion and exits is the
  * common case, and asking for SIGUSR1 to catch a process that has already
@@ -118,7 +162,12 @@ void invfs_perf_dump_atexit(void);
 
 #else /* !PERF_PROFILING -- the shipped default */
 
-#define INVFS_PERF_ADD(idx, n) ((void)0)
+/* The arguments are still EVALUATED (and folded away), so a call site can time
+ * a span and pass the result in without a set-but-unused warning in the
+ * shipped build. Nothing they name has a side effect. */
+#define INVFS_PERF_ADD(idx, n) ((void)(n))
+#define INVFS_PERF_MAX(idx, n) ((void)(n))
+#define INVFS_PERF_NOW_NS() ((uint64_t)0)
 #define INVFS_PERF_ENABLE_WHEN_REQUESTED() ((void)0)
 
 #endif /* PERF_PROFILING */

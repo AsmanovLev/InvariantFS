@@ -24,6 +24,11 @@ static const char *const names[PERF_MAX] = {
     "vmux reads",           "vmux read bytes",
     "fsync calls",          "fsync errors",
     "fsync deferred",
+    "name_of reverse walks", "name snapshots",
+    "recipe publishes",     "pba_ref rebuilds",
+    "pba_ref rebuild ns",
+    "sweep files",          "sweep file ns",
+    "sweep file max ns",
 };
 
 /* Ratios are the point of this file. The raw counts are only interesting next
@@ -89,6 +94,29 @@ void invfs_perf_dump(const char *why)
         }
         if (w) fprintf(out, "  avg bytes per vol_write             : %.1f\n",
                        (double)pw / (double)w);
+    }
+    /* WP-IO-LOCK: the three numbers the background-writer fix is judged on.
+     * rebuilds-per-publish is the shape (one rebuild per publish is the
+     * pre-fix cost), rebuild ms is the hold it put inside g_io_lock, and the
+     * name_of count is the fast-path proof (it should stay at 0 on a sweep). */
+    {
+        uint64_t pubs = invfs_perf_counters[PERF_RECIPE_PUBS];
+        uint64_t rb   = invfs_perf_counters[PERF_PBAREF_REBUILDS];
+        uint64_t rbns = invfs_perf_counters[PERF_PBAREF_REBUILD_NS];
+        uint64_t swc  = invfs_perf_counters[PERF_SWEEP_FILE_CALLS];
+        uint64_t sw   = invfs_perf_counters[PERF_SWEEP_FILE_NS];
+        uint64_t swn  = invfs_perf_counters[PERF_SWEEP_FILE_MAX_NS];
+        if (pubs || rb)
+            fprintf(out, "  pba_ref rebuilds per publish      : %.4f\n",
+                    (double)rb / (double)(pubs ? pubs : 1));
+        if (rb)
+            fprintf(out, "  avg pba_ref rebuild               : %.2f ms\n",
+                    (double)rbns / (double)rb / 1e6);
+        if (swc)
+            fprintf(out, "  sweep file avg / max              : %.2f / "
+                         "%.2f ms\n",
+                    (double)sw / (double)swc / 1e6,
+                    (double)swn / 1e6);
     }
     fflush(out);
 }

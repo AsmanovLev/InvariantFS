@@ -84,6 +84,7 @@
  */
 
 #include "volume_internal.h"
+#include "perf_counters.h"   /* WP-IO-LOCK: publish/name-lookup counters */
 #include "vol_fault.h"
 #include "vol_btree.h"
 #include "vol_metabuf.h"
@@ -4226,12 +4227,14 @@ int vol_inode_delta_put(invfs_volume *v, uint64_t inode_id,
     {
         static const uint8_t zero_addr[INVFS_RECIPE_ADDR_LEN] = {0};
         invfs_inode old;
-        if (vol_inode_get(v, inode_id, &old) != 1)
+        if (vol_inode_get(v, inode_id, &old) != 1) {
+            INVFS_PERF_ADD(PERF_RECIPE_PUBS, 1);   /* a row born with content */
             pba_ref_invalidate(v);
-        else if (memcmp(old.recipe_addr, in->recipe_addr,
-                        INVFS_RECIPE_ADDR_LEN) != 0)
+        } else if (memcmp(old.recipe_addr, in->recipe_addr,
+                        INVFS_RECIPE_ADDR_LEN) != 0) {
+            INVFS_PERF_ADD(PERF_RECIPE_PUBS, 1);
             pba_ref_invalidate(v);
-        else if (memcmp(in->recipe_addr, zero_addr,
+        } else if (memcmp(in->recipe_addr, zero_addr,
                         INVFS_RECIPE_ADDR_LEN) == 0)
             ; /* nothing to count either way */
     }
@@ -5219,6 +5222,11 @@ int vol_name_of(invfs_volume *v, uint64_t inode_id,
     if (parent_out)
         *parent_out = 0;
 
+    /* WP-IO-LOCK: one whole reverse walk. The sweep answers its candidates
+     * from a snapshot and should keep this at 0 over a pass -- the number is
+     * the fast-path proof, not a curiosity. */
+    INVFS_PERF_ADD(PERF_NAME_OF_CALLS, 1);
+
     if (vol_inode_get(v, inode_id, &in) != 1)
         return 0;
 
@@ -5542,6 +5550,7 @@ int vol_name_index_build(invfs_volume *v, vol_name_index **out)
         free(ni);
         return -1;
     }
+    INVFS_PERF_ADD(PERF_NAME_SNAPSHOTS, 1);
     *out = ni;
     return 0;
 }

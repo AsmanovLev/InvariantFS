@@ -5,6 +5,7 @@
 #include "volume_internal.h"
 #include "vol_storage.h"   /* WP651 slice 1: storage-domain accessors */
 #include "vol_delta.h"   /* WP612 retire API */
+#include "perf_counters.h"   /* WP-IO-LOCK: name-snapshot counters */
 
 
 int sweep_enospc(invfs_volume *v, uint64_t need_bytes)
@@ -2440,6 +2441,8 @@ int vol_collect_sweepables_grow_named(invfs_volume *v, uint64_t **ids_io,
         /* One snapshot per pass, thrown away and rebuilt when the buffer
          * doubles: only the pass whose ids are returned may supply names. */
         vol_name_index *pass = names_io ? vol_name_index_new() : NULL;
+        if (pass)
+            INVFS_PERF_ADD(PERF_NAME_SNAPSHOTS, 1);
         n = collect_sweepables_ex_impl(v, ids, cap, &found, &rc, pass);
         if (names_io) {
             vol_name_index_free(names);

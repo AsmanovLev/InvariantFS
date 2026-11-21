@@ -3280,6 +3280,13 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      * pba_ref_ensure) -- and a caller that forgets to invalidate can only
      * cost a walk, never a free on a stale count. */
     if (v->pba_ref_on && !v->pba_ref_stale) return 0;
+    /* WP-IO-LOCK: a REBUILD is a whole strict walk plus one recipe load per
+     * live inode, and it lands inside whatever lock the caller holds -- for
+     * the FUSE daemon that is g_io_lock, on the write path, via the retire
+     * drain. These two counters are the measurement that decides moving it
+     * off that path: rebuilds per publish, and the milliseconds each one
+     * costs. */
+    INVFS_PERF_ADD(PERF_PBAREF_REBUILDS, 1);
     pba_ref_free(v);
     v->pba_ref_mask = 1023;
     v->pba_ref = (pba_ref_ent *)calloc(v->pba_ref_mask + 1,
@@ -3320,10 +3327,15 @@ static int pba_ref_ensure_locked(invfs_volume *v)
      * not be read may well be readable a moment later (that is the whole
      * shape of a fold racing a read), and a permanent failure costs a walk
      * per attempt on a volume that is already damaged. */
-    if (vol_walk_strict(v, pba_ref_walk_cb, &c) != 0) {
-        pba_ref_free(v);
-        v->pba_ref_stale = 1;
-        return -1;
+    {
+        uint64_t pt0 = INVFS_PERF_NOW_NS();
+        int wrc = vol_walk_strict(v, pba_ref_walk_cb, &c);
+        INVFS_PERF_ADD(PERF_PBAREF_REBUILD_NS, INVFS_PERF_NOW_NS() - pt0);
+        if (wrc != 0) {
+            pba_ref_free(v);
+            v->pba_ref_stale = 1;
+            return -1;
+        }
     }
     v->pba_ref_stale = 0;
     return 0;

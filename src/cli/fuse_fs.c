@@ -30,6 +30,7 @@
 #include "vol_plugin_inproc.h" /* WP625: -o allow_inprocess_plugins + stats */
 #include "vol_spt0.h"
 #include "vol_walk.h"   /* WP135: a walk's status is not optional */
+#include "perf_counters.h"   /* WP-IO-LOCK: per-file hold counters */
 #include "tmpstore.h"
 
 static inline double fuse_now_sec(void)
@@ -2828,7 +2829,15 @@ static void invf_sweep_worker(int full_pass)
                                                  : NULL,
                                              nm, sizeof nm);
             if (nrc == 1) {
+                /* WP-IO-LOCK: the span this thread holds g_io_lock for. The
+                 * counters compile out; the call is the shipped one. */
+                uint64_t st0 = INVFS_PERF_NOW_NS();
+                uint64_t sd;
                 rc = vol_sweep_one(g_vol, ids[i], nm);
+                sd = INVFS_PERF_NOW_NS() - st0;
+                INVFS_PERF_ADD(PERF_SWEEP_FILE_CALLS, 1);
+                INVFS_PERF_ADD(PERF_SWEEP_FILE_NS, sd);
+                INVFS_PERF_MAX(PERF_SWEEP_FILE_MAX_NS, sd);
                 /* one rc: 0 = nothing to do, >0 = swept/deferred, <0 = err */
                 if (rc > 0)       { swept++;   }
                 else if (rc == 0) { skipped++; }
@@ -2839,8 +2848,14 @@ static void invf_sweep_worker(int full_pass)
                 failed++;   /* the namespace could not be read for this inode */
             }
         } else {
+            uint64_t st0 = INVFS_PERF_NOW_NS();
+            uint64_t sd;
             rc = vol_sweep_file(g_vol, ids[i]);
-            if (rc == 0)      { swept++;   }
+            sd = INVFS_PERF_NOW_NS() - st0;
+            INVFS_PERF_ADD(PERF_SWEEP_FILE_CALLS, 1);
+            INVFS_PERF_ADD(PERF_SWEEP_FILE_NS, sd);
+            INVFS_PERF_MAX(PERF_SWEEP_FILE_MAX_NS, sd);
+            if (rc == 0)      { swept++; }
             else if (rc == 1) { skipped++; }
             else              { failed++; }
         }
