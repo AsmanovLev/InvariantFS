@@ -7,3 +7,30 @@
 PKGBUILD text eol=lf
 template text eol=lf
 Makefile text eol=lf
+
+# GitHub's language stats (and therefore any code-size badge) count vendored
+# sources as the project's own unless told otherwise. Measured before this
+# line existed: C = 10 431 746 B, roughly double what the project itself has
+# (~149 k lines of C, of which the vendored tree below is ~121 k). The four
+# trees are third-party verbatim; the codec files are vendored upstream with
+# an adapter or a provenance marker around them.
+src/zstd-1.5.6/**             linguist-vendored
+src/zlib/**                   linguist-vendored
+src/vendor7z/**               linguist-vendored
+src/legacy/**                 linguist-vendored
+src/codecs/miniz.c            linguist-vendored
+src/codecs/miniz.h            linguist-vendored
+src/codecs/lz4.c              linguist-vendored
+src/codecs/lz4.h              linguist-vendored
+src/codecs/ppmd8.c            linguist-vendored
+src/codecs/ppmd8enc.c         linguist-vendored
+src/codecs/ppmd8dec.c         linguist-vendored
+src/codecs/Ppmd.h             linguist-vendored
+src/codecs/Ppmd8.h            linguist-vendored
+src/codecs/blake3.c           linguist-vendored
+src/codecs/blake3.h           linguist-vendored
+src/codecs/blake3_dispatch.c  linguist-vendored
+src/codecs/blake3_impl.h      linguist-vendored
+src/codecs/blake3_portable.c  linguist-vendored
+src/codecs/ed25519.c          linguist-vendored
+src/codecs/ed25519.h          linguist-vendored
