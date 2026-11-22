@@ -2727,9 +2727,20 @@ static int wstats_cb(invfs_volume *v, uint64_t inode_id,
                 }
             } else {
                 uint64_t plen = 0;
+                uint64_t claimed_before = out->raw_used_bytes;
                 out->logic_raw_bytes += ents[i].length;
                 wstats_claim(v, c->claimed, ents[i].pba,
                              &out->raw_used_bytes);
+                /* Verbatim = no codec was applied at all. The physical share
+                 * is whatever this entry just added to the class total: a
+                 * block shared with another live recipe is already claimed and
+                 * must not be counted twice, and a block stored by LZ4/ZSTD is
+                 * not garbage even when it sits in the RAW class. */
+                if (ents[i].algo == INVFS_ALGO_NONE) {
+                    out->verbatim_used_bytes +=
+                        out->raw_used_bytes - claimed_before;
+                    out->verbatim_logic_bytes += ents[i].length;
+                }
                 if (getenv("INVFS_DEBUG_SEGS") &&
                     seg_extent(v, ents[i].pba, NULL, &plen) == 0) {
                     uint8_t sh[8];

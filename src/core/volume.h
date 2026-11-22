@@ -994,6 +994,17 @@ typedef struct {
                                     * awaiting fsck, crash debris) */
     uint64_t logic_raw_bytes, logic_shadow_bytes;
     uint64_t logic_text_bytes;   /* zone==TEXT (PPMd batch members), WP10 */
+    /* "data garbage": bytes stored VERBATIM because no codec won
+     * (algo == INVFS_ALGO_NONE on a data entry). Two reasons this is worth a
+     * column of its own rather than being folded into the classes: it is the
+     * only number an operator can ACT on (the stored size equals the logical
+     * size, so a repack, a stronger codec or dropping the file returns the
+     * whole amount), and it is invisible in the class breakdown -- an
+     * uncompressed image of zeros shows as "uncompressed 64 MiB, 14.7x" and
+     * looks healthy while every byte of it is verbatim. Physical counts each
+     * block once, same rule as the other classes. */
+    uint64_t verbatim_used_bytes;   /* physical, verbatim class */
+    uint64_t verbatim_logic_bytes;  /* logical bytes of those entries */
 } invfs_volume_stats;
 int vol_compute_stats(invfs_volume *v, invfs_volume_stats *out);
 uint64_t vol_zone_used_bytes(invfs_volume *v, uint64_t start_blk, uint64_t end_blk);
