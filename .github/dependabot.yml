@@ -1,0 +1,45 @@
+# Dependabot: GitHub Actions only, grouped, weekly.
+#
+# WHAT IT CAN SEE HERE, and why the file is this short. There are no package
+# manifests in this repo at all. The codecs (zstd, zlib, miniz, lz4, ppmd8,
+# blake3, ed25519, 7z) are VENDORED SOURCES under src/ and tools/, and
+# Dependabot does not track vendored code, however it is named. Packaging is
+# PKGBUILD / deb / rpm spec / ebuild / Nix, for which it has no ecosystem
+# either. So `github-actions` is the entire useful surface -- and it is a real
+# one: the workflows pin `checkout` at BOTH v7 (17 places) and v4 (8 places),
+# and `upload-artifact@v4` already runs under a Node 20 deprecation warning in
+# every e2e job. That is the kind of drift this catches for free.
+#
+# WHY NO AUTO-MERGE, and why the PR limit is small. The gate on this project is
+# "every codec is proven reversible before it is trusted", and its own record
+# says a green CI is not the same thing as a correct tree (see the 2026-11-19
+# note in impl_docs/OPEN-ISSUES.md: for three days CI reported failures while
+# testing nothing). A dependency bump therefore gets read and merged by a
+# person, not by a rule. Grouped + weekly + limit 3 keeps that to at most one
+# PR a week instead of one per action.
+#
+# DELIBERATELY NOT ENABLED:
+#   gitsubmodule -- tools/busybox-src tracks busybox master, so every poll is a
+#     moving target and a bump is a change to a test tool rather than a
+#     dependency fix. Bump it by hand, when there is a reason to.
+#   version updates for the packaging ecosystems -- none exist.
+#
+# The Actions changes this will propose are commits Dependabot authors itself;
+# they do not touch main until a human merges the PR.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "Etc/UTC"
+    open-pull-requests-limit: 3
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci(actions)"
+      include: "scope"
+    labels: ["dependencies", "ci"]
