@@ -95,6 +95,7 @@
 #include "vol_delta.h"
 #include "vol_metabuf.h"
 #include "vol_reclaim.h"
+#include "perf_counters.h"   /* fold hold, see PERF_FOLD_* in perf_counters.h */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -334,11 +335,23 @@ void fold_reclaim_hook(invfs_volume *v, invfs_blkptr old_root,
      * rather than damaged. Skipping only the diff and running the collector
      * would be worse -- the collector frees exactly the generations the
      * diff declined to, one generation behind. */
-    if (vol_reclaim_drain(v) != 0) {
-        fprintf(stderr, "fold: reclaim SKIPPED -- a base-tree reader "
-                        "outlived the drain, so this generation is left "
-                        "allocated rather than freed under it\n");
-        return;
+    /* The drain is where a fold waits for in-flight base-tree readers, and it
+     * is the only part of a fold whose duration is not a function of our own
+     * data: one reader in a long vol_dirent_scan sets it. Timed separately so
+     * "the fold hung I/O" can be attributed to the fold or to that wait. */
+    {
+        uint64_t t0 = INVFS_PERF_NOW_NS();
+        int drc = vol_reclaim_drain(v);
+        uint64_t d = INVFS_PERF_NOW_NS() - t0;
+
+        INVFS_PERF_ADD(PERF_FOLD_RECLAIM_WAIT_NS, d);
+        INVFS_PERF_MAX(PERF_FOLD_RECLAIM_WAIT_MAX_NS, d);
+        if (drc != 0) {
+            fprintf(stderr, "fold: reclaim SKIPPED -- a base-tree reader "
+                            "outlived the drain, so this generation is left "
+                            "allocated rather than freed under it\n");
+            return;
+        }
     }
     /* WP121: the fold has just published new_root, so the OTHER RT30 slot
      * still names old_root -- that is WP86's damage tolerance, and
@@ -591,7 +604,26 @@ static int fold_bulk_complete(invfs_volume *v, fold_list *l,
     return failed_reset ? -1 : 0;
 }
 
+/* The measured wrapper. The fold body below is unchanged; this exists so the
+ * fold's duration and its worst case are OBSERVABLE wherever a fold is called
+ * from -- vol_close, the FUSE drain, fsck, the tests -- instead of only at the
+ * one call site somebody remembered to instrument. On the FUSE path the caller
+ * holds g_io_lock across it, so this number is the foreground's worst wait. */
+static int vol_fold_impl(invfs_volume *v);
+
 int vol_fold(invfs_volume *v)
+{
+    uint64_t t0 = INVFS_PERF_NOW_NS();
+    int rc = vol_fold_impl(v);
+    uint64_t d = INVFS_PERF_NOW_NS() - t0;
+
+    INVFS_PERF_ADD(PERF_FOLD_CALLS, 1);
+    INVFS_PERF_ADD(PERF_FOLD_NS, d);
+    INVFS_PERF_MAX(PERF_FOLD_MAX_NS, d);
+    return rc;
+}
+
+static int vol_fold_impl(invfs_volume *v)
 {
     fold_list list;
     invfs_blkptr old_root, root, nr;

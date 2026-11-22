@@ -29,6 +29,9 @@ static const char *const names[PERF_MAX] = {
     "pba_ref rebuild ns",
     "sweep files",          "sweep file ns",
     "sweep file max ns",
+    "fold calls",           "fold ns",
+    "fold max ns",          "fold reclaim wait ns",
+    "fold reclaim wait max ns",
 };
 
 /* Ratios are the point of this file. The raw counts are only interesting next

@@ -95,6 +95,20 @@ enum {
     PERF_SWEEP_FILE_CALLS,
     PERF_SWEEP_FILE_NS,
     PERF_SWEEP_FILE_MAX_NS,
+    /* Fold. The open question is not how long a fold takes in isolation --
+     * that is measurable with a stopwatch -- but whether it can hold the
+     * foreground, and for how long. FOLD_NS is the whole fold (collect, sort,
+     * COW apply, verify of the resulting tree, publish, reset);
+     * FOLD_RECLAIM_WAIT_NS is the part inside fold_reclaim_hook that waits for
+     * in-flight base-tree readers to drain (vol_reclaim_drain), which is the
+     * piece that can be arbitrarily long and is invisible from outside. On the
+     * FUSE path vol_sweep_pending_finish() runs both under g_io_lock, so these
+     * two numbers ARE the hold every other FUSE request pays. */
+    PERF_FOLD_CALLS,          /* vol_fold() entries                      */
+    PERF_FOLD_NS,             /* time inside vol_fold()                  */
+    PERF_FOLD_MAX_NS,         /* worst single fold                       */
+    PERF_FOLD_RECLAIM_WAIT_NS,     /* waiting for readers to drain       */
+    PERF_FOLD_RECLAIM_WAIT_MAX_NS, /* worst such wait                    */
     PERF_MAX
 };
 
