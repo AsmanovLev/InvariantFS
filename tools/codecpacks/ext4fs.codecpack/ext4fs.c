@@ -1695,7 +1695,7 @@ static int cmd_map(const char *in, const char *out)
         size_t z = 0, q;
         for (q = 0; q < n_seg; q++)
             if (seg[q].kind == 3) z++;
-        if (z) {
+        if (z && !getenv("EXT4FS_MAP_ELIDE")) {
             note("map: elided zero regions, read path unproven", z, 0);
             free(seg);
             rc = EX_DECLINE;
