@@ -217,30 +217,48 @@ The cost: **21,356 inodes for one image** (4–12 KiB of metadata each) and
 
 ### Space after decomposition does not add up: one corrupted segment
 
-> **STATUS 2026-11-22: NOT REPRODUCIBLE with the pack in this tree.** Measured
-> end to end on `tools/codecpacks/ext4fs.codecpack`, volumes `invf-mkfs 1024`:
+> **STATUS 2026-11-22: the space-growth item still cannot be judged, because the
+> decomposition never runs at all with the pack in this tree -- and an earlier
+> version of this block claimed the opposite. RETRACTED AND REPLACED.**
 >
-> | source image | sweep | decomposed | container reads back |
-> |---|---|---|---|
-> | 128 MiB ext4 | ok | yes | **bit-exact** |
-> | 512 MiB | ok | yes | **bit-exact** |
-> | 1 GiB | ok | yes | **bit-exact** |
-> | 2 GiB | ok | yes | **bit-exact** |
-> | 4 GiB | ok | yes | **bit-exact** |
-> | 8 GiB | **declined, cleanly** (see below) | no | read-back OOM, not a data defect |
+> What is actually measured (verbose pack debug on, `tools/codecpacks/ext4fs`,
+> volume from `invf-mkfs`, one `invf-sweep`):
 >
-> And on a 256 MiB ext4 with ~2 000 files, **31 consecutive sweeps**: `used`
-> settles at 16 493.7 MiB and `unclaimed` at 33.4 MiB from the third sweep on and
-> never moves again, every `[spt0] save point:` line reports `0 already damaged`,
-> and the container is bit-exact after the 31st. The old 714 → 1209 → 1447 →
-> 1451 MiB growth does not happen. The `!mbrblob` leaf layout (2026-11-16) is the
-> likely reason; what is NOT proven is that the old case is impossible -- it
-> needed a 2.27 GiB recipe, which the store now refuses outright (next section).
+> ```
+> 64 MiB ext4 + 2 real files:
+>   size guard refused, decomposition declined (the decomposition is not a gain):
+>   66751572 fixed + 303104 content + 3840 member-cost (3 members)
+>   = 67058516 B vs 67108864 B original
+> 2 GiB: fixed 2 146 759 698   vs 2 147 483 648 original  -> declined
+> 8 GiB: fixed 8 587 637 779   vs 8 589 934 592 original  -> declined
+> member rows in the namespace afterwards: 0
+> ```
 >
-> What remains genuinely open from the text below: images with ~21 000 members
-> were not re-measured (the 175 ms/member pack cost is a pack property), and
-> `invf-cat` of a file past ~4 GiB is OOM-killed on this box -- there is no
-> streaming extract path, which matters for restoring a large image.
+> `fixed` is, by the comment in `src/core/vol_cpack.c:3010`, "the recipe + the
+> member table + the map, which ride verbatim" -- and it is essentially the WHOLE
+> partition at every size. That is the item exactly as written below: the ext4fs
+> plan enumerates all unallocated blocks verbatim, because a rebuild must
+> reproduce the image bit-for-bit and free blocks may hold garbage. A plan like
+> that can never be "a gain", so the lane declines before it builds anything.
+>
+> Why the earlier version of this block said "decomposed: yes": the check counted
+> `grep -E 'ext4fs|rawdisk|-> [0-9]+ file'`, which matched the PACK'S OWN FILES
+> (`.invariantfs/codecpacks/ext4fs*`) as they were swept, and the `159.40x` it
+> quoted was the generic zstd lane recompressing the whole image as one stream
+> (a nearly-empty ext4 is mostly zeros). Both were plausible numbers measuring
+> the wrong thing. The zero member rows are what settles it.
+>
+> Consequences, so nobody re-derives them:
+> 1. nothing below about space-after-decomposition can be reproduced until the
+>    pack emits a SPARSE recipe (ranges + what to fill with, item 2 of the fix
+>    list) -- that is `registry`, not this repo;
+> 2. the recipe-extension machinery (chunked blobs above 3 800 B, the CHLD tree,
+>    the 64 MiB cap) is irrelevant to this limit: the size guard runs BEFORE the
+>    recipe is built, on the projected cost of the plan;
+> 3. `invf-cat` of a file past ~4 GiB is OOM-killed on this box (no streaming
+>    extract path) -- measured while trying to read the container back.
+>
+> The text below is kept as the record of the original 2.9 GiB observation.
 ### disables reclaim
 
 Measured on a 2.9-GiB Debian partition (`ext4fs`, leaf layout, **with compression**):
@@ -319,12 +337,15 @@ space growth on repeated sweeps.
 > The store refuses (`vol_recipe_store`, `vol_btree.c:4341`) and the builder
 > refuses (`vol_ast.c:107`); a leg pins the store side
 > (`src/cli/recipe_tree_test.c`, group 7) and `large_file_test` pins the builder.
-> At the OTHER end the lane declines before it wastes the work: an 8 GiB ext4
-> with the in-tree pack gives
+> At the OTHER end the lane declines before it wastes the work -- but read the
+> previous section before treating that as a size limit: measured on 64 MiB,
+> 2 GiB and 8 GiB, the in-tree pack's plan is `fixed` (verbatim) for essentially
+> the whole partition, so the size guard declines the decomposition at EVERY
+> size, not only at 8 GiB:
 > `size guard refused, decomposition declined (the decomposition is not a gain):
-> 8 587 845 139 B vs 8 589 934 592 B original`, sweep rc=0, container untouched
-> and bit-exact. So the boundary that remains is a CAPABILITY boundary (how
-> large an image the pack's recipe covers), not a correctness one.
+> 66751572 fixed + ... = 67058516 B vs 67108864 B original`. Sweep rc=0, the
+> container is untouched and bit-exact. So what remains is a CAPABILITY gap in
+> the pack (a sparse recipe, `registry`), not a correctness defect here.
 
 Reproduced on a clean volume (6 GiB) with a single file `p1.img` (Debian
 partition 2.87 GiB), leaf layout, `--no-compress` NOT used:
