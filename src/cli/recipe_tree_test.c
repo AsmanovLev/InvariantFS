@@ -19,6 +19,10 @@
  *      the space silently allocated
  *   5. a truncated CHLD section is malformed, not "no children"
  *   6. nesting past INVFS_AST_CHILD_DEPTH_MAX is refused, not followed
+ *   7. a recipe one byte past INVFS_RECIPE_STREAM_MAX is refused by the
+ *      store before anything is allocated, and the volume still works after
+ *      (the guard behind "CRITICAL: container recipe larger than
+ *      INVFS_RECIPE_STREAM_MAX")
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -283,6 +287,37 @@ int main(int argc, char **argv)
            "a two-level tree is refused, not followed (depth guard)");
         ok(v->free_blocks == f0,
            "and the refused free left the pool untouched");
+    }
+
+    /* 7: the recipe stream cap -- `vol_recipe_store` is the LAST gate before a
+     * recipe becomes reachable, so a refusal here is the difference between
+     * "the sweep failed and rolled back, the file is intact" and a 2.27 GiB
+     * recipe written by a lane that reported success (measured data loss,
+     * OPEN-ISSUES "CRITICAL: container recipe larger than
+     * INVFS_RECIPE_STREAM_MAX"). This pins the guard where it lives, so the
+     * claim stays checkable when the lane is taught to refuse earlier.
+     *
+     * The control is not "the same call with a smaller size" -- on a 40 MiB
+     * volume an in-cap blob also fails, for space, and the two answers would
+     * be indistinguishable. What the control has to show is that the refusal
+     * is not a BREAK: the same volume still stores an ordinary recipe right
+     * after it. */
+    {
+        uint64_t f0 = v->free_blocks;
+        uint8_t *huge = (uint8_t *)calloc(1, INVFS_RECIPE_STREAM_MAX + 1);
+        uint8_t haddr[INVFS_RECIPE_ADDR_LEN];
+        ok(huge != NULL, "allocated a blob one byte past the recipe cap");
+        if (huge) {
+            ok(vol_recipe_store(v, huge, INVFS_RECIPE_STREAM_MAX + 1,
+                                haddr) == -1,
+               "a recipe one byte past INVFS_RECIPE_STREAM_MAX is refused");
+            ok(v->free_blocks == f0,
+               "the refused recipe allocated nothing");
+            free(huge);
+        }
+        ok(vol_recipe_store(v, cblob, cblen, haddr) == 0,
+           "and the volume still stores an ordinary recipe (dedup no-op), so "
+           "the refusal is a guard and not a break");
     }
 
     vol_ast_recipe_parsed_free(&chdr, cents);
