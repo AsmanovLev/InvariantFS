@@ -2,8 +2,23 @@
 
 **Code snapshot:** commit **`f0f9924`** (2026-11-19 09:13 +0700), branch `main`.
 The tree was copied from this state; `git diff f0f9924..HEAD -- src tools`
-is empty, so the map describes exactly it. If the code has moved on — the map must
-be regenerated or read with the diff taken into account.
+was empty AT THE TIME OF THE SNAPSHOT, so the map described exactly it.
+
+**DRIFT (checked at `8e6ea9c`, 2026-11-22 05:39):** that diff is now 15 files,
+838 insertions, 45 deletions. Line numbers below are still in snapshot
+coordinates and must not be trusted as-is. Parts KNOWN superseded:
+
+- `§177` (sweep pending path) — candidates no longer resolve their name with a
+  reverse walk per file (`vol_sweep_name_of`); one id→path snapshot is built per
+  run and used as a verified hint. See `OPEN-ISSUES.md` §1a rows 11–12.
+- the `pba_ref_ensure` call in the sweep's remap path — removed; the drain
+  rebuilds once per pass, and pba-form retire entries are replayed instead of
+  rebuilt. See `OPEN-ISSUES.md` §1a rows 14–15.
+- `src/core/vol_delta.c` (`vol_delta_range` ordering), `src/core/volume.h`
+  (name-index API), `src/cli/fuse_fs.c` (sweep driver), and the new
+  `PERF=1` counters (`src/core/perf_counters.{c,h}`) are not in this map at all.
+
+Regeneration means redoing the blind run (see Method), not editing this file.
 
 **Method.** Tree `/var/tmp/blind/tree` — only `src/`, `tools/*.c|h`, `Makefile`:
 - **all comments stripped** (`/* */`, `//`), 338 files;

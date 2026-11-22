@@ -1,8 +1,12 @@
 # Open Issues and Measured Problems
 
-> **Active bug with detailed analysis: `impl_docs/BUG-RECLAIM-UNCLAIMED.md`**
-> (`unclaimed` blocks are not reclaimed — this is the entire space deficit
-> against squashfs: 54.9 MiB vs 24 MB, with live content of 23.4 MiB).
+> **Former headline bug, now CLOSED (`48404b6`): `impl_docs/BUG-RECLAIM-UNCLAIMED.md`.**
+> `unclaimed` blocks were not returned: 18.5 → 2.6 MiB right after a write and
+> 25.8 → 1.4 MiB at the sweep plateau, with reads still bit-exact. Reclaim was
+> NOT the remaining gap against squashfs — that one was block rounding of
+> sub-block segments and is fixed too (`impl_docs/BENCH-VS-SQUASHFS.md`, §FIX):
+> 22.88 → 20.53 MiB of data on the same corpus, i.e. +2.4% at an equal pooling
+> unit (21.5 vs 21 MiB) instead of +13%.
 
 **This is not a release plan.** The contents of v0.7 are not known in advance —
 many changes are expected, and there is no point in writing down "what will be
@@ -35,6 +39,22 @@ migration code (see `CONCEPTS.md` §9).
 
 Verified on the stand: two consecutive boots without `dev1 is stale`, `sync_seq`
 equal, no `MISMATCH`, boot 96 s (45 of them the GRUB timeout), mount ~23 s.
+
+### 1a. 2026-11-21/22: the sweep stopped being quadratic (also in v0.7)
+
+| # | commit | summary |
+|---|---|---|
+| 10 | `61c628a` | `vol_delta_range()` returned `10, 30, 20` after appending `20` to a sorted view whose tail contributed keys — `presorted` stayed set, and `vol_dirent_scan()` merges that range into the base as ONE ordered stream. Fixed + regression in `tools/delta_test.c` |
+| 11 | `82c9f61` | sweep resolved each candidate's name with `vol_name_of()` — a whole reverse walk of the dirent tree per file. One id→path snapshot per run, used as a HINT: it is taken only after `vol_find` proves the name still names the same inode, so a rename falls back to the live walk. 7.06 ms → 0.001 ms per candidate, 9.94 ms build per pass |
+| 12 | `029b5c9` | the snapshot is filled by the collect walk itself instead of a second namespace walk (collect 7.42 ms, collect+named 7.34, collect+walk 14.89) |
+| 13 | `5fcf8dc` | `PERF=1` counters: reverse name walks, snapshots, recipe publishes, `pba_ref` rebuilds and their time, worst per-file hold under `g_io_lock` |
+| 14 | `fd22355` | `pba_ref_ensure` was called before every swept file's remap; each publish invalidates the map, so that was one namespace walk plus one recipe load per live inode per file — O(N²), 16 ms at 2 000 files and 1.26 s on the 66k-record stand volume, all inside `g_io_lock`. The drain now rebuilds once, for recipe-form entries too, which also closes a trailing leak (the last file's rebuild was always one publish stale) |
+| 15 | `8e6ea9c` | a pba-form retire entry already carries the superseded set, so the drain replays one −1 per old occurrence instead of resetting and walking. `pba_ref_rebuild` fault seam + the `replay` phase of `pbaref_test` prove it: with the rebuild armed to fail, the retired block is free and the file byte-exact |
+
+Green at `8e6ea9c` (re-run, not quoted): `sweep_collect` 23/23,
+`walk_status_fuse` 36/36 (the armed `vol_name_of` seam is never reached),
+`pbaref_test replay` 8/8, `delta_test` 183/183, `no_ckp0_surface_test` PASS,
+`dedupe_test` 16/16.
 
 ---
 
@@ -748,21 +768,22 @@ leaving the process alive.
 
 ### Still red
 
-- **unit shard 4: `no_ckp0_surface_test`** (PRE-EXISTING, bisection on `74cab2b`
-  confirmed). `invf-rollback` rejects a just-placed save point with the text
-  "the delta log ... gone (a fold reset it)", although fold did NOT run
-  (`fold: not triggered (2 records, 0 MiB)` in the same log) and the capture
-  succeeded (`base_root=62299 delta_end=737`, 52 blocks pinned). Fix together with partial
-  reclaim -- both tasks are in `spt0_pin_take`/restore checking. Analysis:
-  `WP-SPT0-PARTIAL-RECLAIM.md`.
+- ~~**unit shard 4: `no_ckp0_surface_test`**~~ — **GREEN since `89d76da`**
+  (`invf-fsck` folded the volume under a live save point). Diagnosis kept for
+  the record: `invf-rollback` rejected a just-placed save point with "the delta
+  log ... gone (a fold reset it)", although fold did NOT run
+  (`fold: not triggered (2 records, 0 MiB)`) and the capture succeeded
+  (`base_root=62299 delta_end=737`, 52 blocks pinned). Re-verified green at
+  `8e6ea9c` — this row is stale, not a finding.
 - **e2e suite 2: `test-dedupe.sh`** — `FAIL: free blocks did not stabilize in 6
   sweeps`. Measurement (from the log): 120672 → 120622 → 120618 → 120607 →
   120586 → 120586, delta 17/50/4/11/21/0. Free blocks decrease MONOTONICALLY,
   i.e. each sweep allocates metadata (a new save point ~9 blocks + delta
   records) rather than releasing it. Our reclaim-drain does the opposite --
-  it releases, so it is not the cause; but this has NOT been bisected. Related
-  to the pre-existing unit failure `dedupe_test`
-  ("free blocks increased after deduplication"). Next step: bisection on
+  it releases, so it is not the cause; but this has NOT been bisected. The
+  unit-side companion `dedupe_test` ("free blocks increased after
+  deduplication") is GREEN at `8e6ea9c` (16/16), so whatever this suite
+  demands differs from what the unit leg checks. Next step: bisection on
   `74cab2b` + decide what the suite is entitled to demand (stabilization of
   counts with generational save points is unattainable by construction, or the
   sweep is obliged to release the previous pin).
@@ -881,10 +902,24 @@ fixing the test instead of the cause is forbidden by the task rules. Both may
 be useful separately -- check them and, if needed, apply consciously, not as a
 "green test".
 
-**The SIGSEGV in `test-resize` remains open.** Suspect from the blind map:
-`vol_reclaim.c` frees metadata pages; the pin guard is only in `volume.c`
-(and the deliberate bypass `v->retain_release=1` is not a defect). A minimal
-repro is needed: resize + reclaim + a pinned page.
+**`test-resize`: the SIGSEGV no longer reproduces; the suite is red for a
+different reason.** Re-run at `8e6ea9c` in WSL:
+
+- `INVFS_LAZY_RECLAIM=0 bash tools/run-e2e.sh tools/test-resize.sh` →
+  **`RESIZE E2E: PASS`**, all legs, including `killed mid-apply: fsck open
+  rolled forward to 1G, bit-exact`;
+- with the default (`lazy_reclaim=1`, `src/core/volume.c:1960`) the suite dies
+  at `[A5] shrink 640M -> 300M with data in the way`: `invarifs: big.bin: write
+  session failed (rc=-2, ENOSPC)`, free blocks 102034 → 3730.
+
+So the crash is gone and what is left is the §3.5 policy question, not a crash:
+`make test` forces `INVFS_LAZY_RECLAIM=0` through `TESTENV` (`Makefile:156`),
+while `tools/run-e2e.sh` and the suites export nothing, so the e2e tier runs on
+a default that does not return space on delete. Part of "29/58" is that
+asymmetry. The SIGSEGV itself has no owning commit in `src/cli/resize.c` — it
+was fixed indirectly; if it is ever seen again, the blind-map suspect
+(`vol_reclaim.c` frees metadata pages, the pin guard lives only in `volume.c`,
+`v->retain_release=1` is a deliberate bypass) still stands.
 
 ## Agent C (`touched[]`): the fix is correct, but the test does NOT prove the defect -- rejected
 
