@@ -1,5 +1,7 @@
 # InvariantFS
 
+[![engine-ci](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml/badge.svg?branch=main&event=push)](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml) [![release](https://img.shields.io/github/v/release/AsmanovLev/InvariantFS)](https://github.com/AsmanovLev/InvariantFS/releases) [![license](https://img.shields.io/github/license/AsmanovLev/InvariantFS)](LICENSE) [![C](https://img.shields.io/badge/dynamic/json?url=https://api.github.com/repos/AsmanovLev/InvariantFS/languages&query=%24.C&label=C&suffix=%20B&color=blue)](https://github.com/AsmanovLev/InvariantFS)
+
 A content-addressed filesystem built around one guarantee:
 
 > what you write comes back byte-identical.
@@ -11,8 +13,10 @@ deduplication, codec selection and partial reads fall out naturally.
 
 FUSE-based, single-host, content-addressed. Written in C11.
 
-**Status: testing.** CI is green across engine, e2e and soak tiers,
-releases are published (`v0.6.x`, tarball + deb + Arch + rpm, sha256 +
+**Status: testing.** The engine, e2e and soak tiers run in CI, and the badge at
+the top is the only status claim this file makes: it is read from the last
+`main` push at the moment you look at it, so it cannot keep claiming green on a
+day when nothing runs. Releases are published (`v0.6.x`, tarball + deb + Arch + rpm, sha256 +
 bootstrap installer), and the pack registry is live. The on-disk format
 is metadata store and metadata store only (a pre-v0.5 volume will not open; there is
 no conversion path). Durability contract: acknowledged writes are durable
