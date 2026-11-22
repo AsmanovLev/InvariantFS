@@ -3858,7 +3858,19 @@ void vol_punch_holes(invfs_volume *v)
     b = v->sb.raw_zone_start;
     end = v->sb.total_blocks;
     while (b < end) {
-        if (!(v->bitmap[b >> 3] & (1u << (b & 7)))) {
+        /* The anchor block is the device's LAST block and lies inside the
+         * shadow zone's range, so a clear bit reads as "free" here for the
+         * same reason it does in alloc_blocks (volume.c:2521). A punch is
+         * WORSE than handing the block out: it does not give it to a file, it
+         * ZEROES the volume's only other copy of the root descriptor. Measured
+         * on a volume whose anchor bit had been cleared (what a bitmap rebuild
+         * does to it): one `invf-anchor_test build` zeroed the block through
+         * this path, and test-meta-anchor.sh leg 10 -- which exists to demand
+         * that the exclusion be structural -- reported ANCHOR_STATE=absent with
+         * an all-zero block. anchor_block_protected is that structural test;
+         * the run simply stops one block short. */
+        if (!(v->bitmap[b >> 3] & (1u << (b & 7))) &&
+            !anchor_block_protected(v, b)) {
             run++;
             b++;
             continue;
