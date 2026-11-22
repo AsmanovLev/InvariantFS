@@ -212,6 +212,27 @@ Consequences, and they are binding:
 - **New docs go in `docs/`** (architecture, ADRs, guides, benchmarks), not
   next to the source and not in `impl_docs/` except the generated
   symbol indexes and the live trackers (`AUDIT.md`, `INCIDENTS.md`).
+- **English only: code comments, documentation, commit messages.** Every
+  comment in `src/`, every file under `docs/` and `impl_docs/`, every root
+  `*.md`, and every commit message is written in English. The one deliberate
+  exception is the Russian localization of the man pages under
+  `packaging/man/ru/` — that one exists to be Russian and must not be
+  "fixed".
+  This is a rule and not a matter of taste for the same reason the whole
+  section is about pointers into the tree: a claim that exists in one
+  language only cannot be checked by half the reviewers, half the sessions
+  (`grep`, the hygiene gate and every agent work by substring), and it is
+  re-read twice by everyone who does read both. Half-translated files are
+  worse than either language, because the reader cannot tell which half is
+  authoritative.
+  Status, so nobody is surprised by the diff on a file they open: this is
+  NOT done yet. `274961d` translated the `impl_docs/` trackers, `WHY.md`,
+  `Benchmark.md` and the `docs/HANDOFF-*` notes; at that commit ~77 markdown
+  files (most of `docs/adr/` and the older architecture notes) and ~156
+  sources still carried Russian prose. The rule binds NEW and EDITED text;
+  the backlog is migrated as files are touched during real work, not in one
+  big-bang translation commit that would touch every line of the tree and
+  make `git log -p -- <path>` useless for a month.
 - **Codec/container-packs shall be in "registry" folder (see repo root).**
 - Windows and NFS support are parked: document them as parked, do not
   maintain recipes for them.
