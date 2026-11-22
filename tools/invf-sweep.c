@@ -2109,8 +2109,10 @@ int main(int argc, char **argv)
      * both retired; --compact is now a recognised-but-removed flag (we
      * accept "invf-sweep --compact foo.img" as a synonym for a normal
      * sweep of foo.img). WP116 corrected the rationale: the fold is NOT
-     * unconditional inside this run -- nothing here calls
-     * vol_fold_request; only the FUSE drain (vol_sweep_pending) does. */
+     * unconditional inside this run -- nothing in THIS file calls
+     * vol_fold_request. Two other places do reach it: the FUSE drain
+     * (vol_sweep_pending_finish) and vol_close(), so an offline sweep still
+     * compacts the delta when it closes the volume at exit. */
 
     /* WP23 --extract-packs: a standalone, read-only, engine-side mode for
      * the sweepboot maintenance boot (tools/sweepboot-init.sh). No sweep,

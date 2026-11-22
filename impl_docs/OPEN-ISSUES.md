@@ -316,10 +316,23 @@ payload in memory, plus `invf-cat` of the same container asks for 8.8 GiB
 
 ### What to fix (in order)
 
+> **Status at `8e6ea9c` — the DATA-LOSS half is guarded, the honest-message half
+> is not.** `vol_recipe_store()` refuses `blen > INVFS_RECIPE_STREAM_MAX`
+> before it touches anything (`src/core/vol_btree.c:4341`), and the builder
+> refuses the same way (`vol_ast.c:107`). Since the store is the last gate
+> before a recipe becomes reachable, an over-cap recipe can no longer be
+> PUBLISHED: the sweep's publish fails and its rollback keeps the file. A leg
+> pinning exactly that is in `src/cli/recipe_tree_test.c` (group 7). What is
+> genuinely still missing is item 1 below: the LANE does not refuse early, so
+> the failure arrives at publish time with the store's wording instead of
+> "recipe too large for this volume format; refusing to decompose" before
+> hours of decomposition, and the sweep's publish-failure rollback has no leg
+> of its own (`INVFS_FAULT=recipe_store:1` is the seam; nothing arms it).
+
 1. **The lane must refuse** if the pack recipe does not fit into
    `INVFS_RECIPE_STREAM_MAX` -- with a clear message ("recipe too large for
-   this volume format; refusing to decompose"). Right now it accepts and
-   breaks.
+   this volume format; refusing to decompose"). Right now the store refuses
+   late and rolls back instead of the lane refusing up front.
 2. **The ext4fs recipe must be sparse**: it includes ALL unallocated blocks
    of the partition (2.27 GiB, of which 86.5% are zeros and the rest garbage),
    because
@@ -663,9 +676,19 @@ visible 4x loss is the change journal, which by policy accumulates up to 262,144
 records and only then gets folded.
 
 Tasks (by importance):
-1. fold policy: fold the delta by size, not only by record count; provide a
-   fold on volume unmount/close.
+1. ~~fold policy: fold the delta by size, not only by record count; provide a
+   fold on volume unmount/close.~~ **DONE, both halves.** The trigger has a
+   payload component (64 MiB of delta payload / 262 144 records / oldest
+   record older than an hour) and `vol_close()` folds before its final
+   barrier (`src/core/volume.c:2119-2131`), so a volume nobody sweeps still
+   compacts on exit. `invf-sweep` reaches the fold through `vol_close` and
+   through `vol_sweep_pending_finish`. What is still missing is a fold by
+   delta SIZE RELATIVE TO THE BASE (the measurement above says 77k records
+   can be ~82 MiB) and an unmount-time fold for read-only/rolled-back views --
+   neither is what the original task asked for.
 2. After that repeat the comparison -- expect ~30 MiB vs squashfs's 25 MB.
+   (Superseded by `BENCH-VS-SQUASHFS.md`: at an equal pooling unit we are at
+   21.5 vs 21 MiB, +2.4%, with the sub-block rounding fixed.)
 
 ### Breakdown of `used` at equal presets: content at parity, garbage not removed
 
@@ -694,11 +717,15 @@ On the TEXT zone: in the leaf layout it is NOT used -- members are written to a
 blob by the write session, and the blob is then compressed per-segment (zstd).
 TEXT batching remains for ordinary small files outside containers.
 
-On fold: `vol_fold_request()` is called ONLY from FUSE at mount time
-(src/cli/fuse_fs.c:4655) and from tests; the comment in volume.h ("This is what
-WP-M18's sweep calls") disagrees with the code -- the sweep does not fold. The
-delta here was small (1068 records), so it did not affect the 119 MiB;
-but the comment/code discrepancy is worth fixing.
+On fold: `vol_fold_request()` is called from FOUR places, not one -- the FUSE
+mount path (`src/cli/fuse_fs.c:4701`), `vol_close()` (`volume.c:2128`), the
+FUSE drain's tail (`vol_sweep_pending_finish`, `vol_sweep.c:2112`) and tests.
+So the `volume.h` comment ("This is what WP-M18's sweep calls") is CORRECT, and
+the earlier claim that the comment lies is the stale half of this paragraph.
+The observable fact behind it is narrower: the OFFLINE `invf-sweep` does not
+call the fold itself, it only compacts when the process closes the volume
+(`tools/invf-sweep.c:2113` says otherwise and is being corrected). The delta
+in this run was small (1068 records), so none of it affected the 119 MiB.
 
 ## Found 2026-11-17 (night): free space in the image and a warning
 
@@ -831,6 +858,18 @@ extra work on every open/close).
 
 ## Full e2e tier: 29 PASS / 58 (2026-11-19)
 
+> **Read this before quoting the number.** That run invoked the suites as
+> `bash tools/run-e2e.sh <suite>` directly, in the ambient environment. `make
+> e2e` (`Makefile:1607+`) prefixes every suite with `$(TESTENV)`, i.e.
+> `INVFS_LAZY_RECLAIM=0 INVFS_RAW_MIRROR=1 INVFS_CODECPACKS_SYS=0`
+> (`Makefile:156`). With `lazy_reclaim=1` -- the shipped default
+> (`volume.c:1960`) -- a delete returns no space until a drain rebuilds the map,
+> which is exactly what `test-resize` trips on (measured: PASS with the variable
+> forced to 0, ENOSPC at `[A5]` without it). So 29/58 is a figure for the
+> DEFAULT config run by hand, not for the path CI uses, and some of the 29 are
+> policy, not defects. Re-measure with `make e2e` before treating a row below as
+> a bug.
+
 A run of `bash tools/run-e2e.sh` against each suite separately (without stopping
 at the first failure). Result: **29 passed, 29 failed**. Below is grouping by
 CAUSE, because 29 failures ≠ 29 problems.
@@ -959,3 +998,26 @@ test touches different relative slots, so both variants give the same `fresh`.
 The patch is saved at `/var/tmp/patches/touched-domain-REJECTED.patch` (not
 merged). The defect is still considered real by code inspection, but formally
 unproven.
+
+### Open question that blocks either fix of `touched[]` (re-read at `8e6ea9c`)
+
+The recipe above still describes the shape, but the DOMAIN question is not
+settled and a fix attempted without it can turn an early refusal into a missed
+overrun, which is the unsafe direction:
+
+- `touched[]` is PER CHILD: `wsession_write_seg_n` sets `s->touched[rel_j]`
+  after `wsession_switch_child` (`vol_write.c:434-543`), and the switch
+  `memset`s the array (`:346`, `:352`).
+- the ENOSPC precheck reads it with `j`, the ABSOLUTE segment index
+  (`vol_write.c:856`), inside a loop over `[first, last]` that can span
+  children.
+- `filled` in the same loop is `wsession_filled()` = `max(mat_upto, aliased_n)`,
+  both absolute (`:543`, `:764`, `:686`).
+
+So "already materialized" has three different domains in one expression. The
+`rel_j` mapping alone makes a slot touched in child 0 count as materialized in
+child 1 — the precheck then under-reserves for a write that crosses the
+boundary, which is worse than today's over-reserve (`fresh` too high -> a false
+`-2`). A correct fix has to say, in one place, that `touched[]` answers only for
+`cur_child` and that every segment of another child counts as fresh unless it is
+below `filled`. That is a WP with its own leg, not a drive-by patch.
