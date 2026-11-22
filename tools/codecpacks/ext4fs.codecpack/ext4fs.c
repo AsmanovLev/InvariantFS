@@ -178,7 +178,7 @@
 #define ABI_MAX_IDX      65535u
 #define ABI_MAP_MAX_ENTS (4u * ABI_MAX_MEMBERS + 4u)
 
-#define RECIPE_MAGIC "E4RCP001"
+#define RECIPE_MAGIC "E4RCP002"
 #define RECIPE_HDR   32u
 #define RECIPE_MENT  24u
 #define RECIPE_EENT  32u
@@ -1511,19 +1511,60 @@ static int cmd_strip(const char *in, const char *out)
     if (rc) return rc;
     ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (ofd < 0) { rc = EX_IO; goto out; }
-    if (write_recipe_header(ofd, fs, rr, n_rr, fs->file_size) != 0) {
-        close(ofd);
-        rc = EX_IO;
-        goto out;
-    }
-    woff = recipe_data_base(fs->n_mem, fs->n_gr, n_rr);
-    for (i = 0; i < n_rr; i++) {
-        if (copy_range(fs->fd, rr[i].off, ofd, woff, rr[i].len) != 0) {
-            close(ofd);
-            rc = EX_IO;
-            goto out;
+    /* E4RCP002: store the NON-ZERO runs only. Everything a range covered and
+     * this filter drops is an all-zero block the rebuild reproduces for free
+     * as a hole -- measured on a 128 MiB ext4 with one member: 119.3 of 119.5
+     * MiB of the garbage was verified zero, and verify-by-reading is what
+     * makes dropping it safe (a free block with bit-rot is not zero, so it
+     * stays). E4RCP001 stored all of it verbatim, which is why the core's size
+     * guard saw "fixed = the whole partition" and declined every decomposition
+     * at every size tried. */
+    {
+        rrange_t *nz = NULL;
+        size_t n_nz = 0, cap_nz = 0;
+        for (i = 0; i < n_rr; i++) {
+            gcfg_ent *tab = NULL;
+            size_t n = 0, cap_tab = 0, k;   /* cap_tab: the split's OWN capacity.
+                                             * Sharing nz's made it write into a
+                                             * NULL tab -- segfault, caught by the
+                                             * round-trip test, not by the build. */
+            if (gcfg_split_zero(fs->fd, rr[i].off, rr[i].off + rr[i].len,
+                                fs->block_size, &tab, &n, &cap_tab) != 0) {
+                free(tab); free(nz); close(ofd); rc = EX_IO; goto out;
+            }
+            for (k = 0; k < n; k++) {
+                if (tab[k].flags & GCFG_F_ZERO)
+                    continue;                  /* a hole reproduces it */
+                if (n_nz == cap_nz) {
+                    size_t nc = cap_nz ? cap_nz * 2 : 256;
+                    rrange_t *nn = (rrange_t *)realloc(nz, nc * sizeof *nn);
+                    if (!nn) { free(tab); free(nz); close(ofd); rc = EX_IO; goto out; }
+                    nz = nn; cap_nz = nc;
+                }
+                /* NO coalescing, deliberately: `map` builds its recipe entries
+                 * from the same split, and both sides must agree on the range
+                 * COUNT, because that count is what recipe_data_base() adds to
+                 * find where the bytes start. Merging here made the map's
+                 * src_off point 16 bytes per merged pair past the blob, and the
+                 * core's guard caught it as "memcmp failed" -- silent-looking,
+                 * but it was a real disagreement between two writers. */
+                nz[n_nz].off = tab[k].off;
+                nz[n_nz].len = tab[k].len;
+                n_nz++;
+            }
+            free(tab);
         }
-        woff += rr[i].len;
+        if (write_recipe_header(ofd, fs, nz, n_nz, fs->file_size) != 0) {
+            free(nz); close(ofd); rc = EX_IO; goto out;
+        }
+        woff = recipe_data_base(fs->n_mem, fs->n_gr, n_nz);
+        for (i = 0; i < n_nz; i++) {
+            if (copy_range(fs->fd, nz[i].off, ofd, woff, nz[i].len) != 0) {
+                free(nz); close(ofd); rc = EX_IO; goto out;
+            }
+            woff += nz[i].len;
+        }
+        free(nz);
     }
     if (close(ofd) != 0) rc = EX_IO;
     /* The classification rides beside the recipe: `<out>.cls`. Written HERE
@@ -1558,68 +1599,145 @@ out:
     return rc;
 }
 
+/* One MRMP segment. kind: 0 = recipe bytes (non-zero run), 1 = member
+ * payload, 3 = ZEROS -- the image bytes here are all zero and the recipe
+ * stores nothing for them.
+ *
+ * Kind 3 is the whole point of E4RCP002 and it is NOT ext4-specific: any pack
+ * that can prove a region of its container is zeros (free blocks, a sparse
+ * tail, an unformatted span) declares it here and the core stores nothing and
+ * serves zeros. The proof is the pack's obligation: a region may be declared
+ * zero only after READING it, because a free block may hold bit-rot. */
+typedef struct { uint64_t off, len, src_off, logical; uint32_t idx; uint8_t kind; } map_seg;
+
+static int map_seg_cmp(const void *a, const void *b)
+{
+    const map_seg *x = (const map_seg *)a, *y = (const map_seg *)b;
+    return x->off < y->off ? -1 : x->off > y->off;
+}
+
 static int cmd_map(const char *in, const char *out)
 {
     fs_t *fs;
     rrange_t *rr;
-    size_t n_rr, i, gi, n_ent;
+    size_t n_rr, i, k, n_seg = 0, cap_seg = 0;
     uint64_t dbase, rsrc, pos;
+    map_seg *seg = NULL;
     uint8_t *blob;
     size_t blen, wp;
     int ofd, rc = parse_all(in, &fs, &rr, &n_rr);
 
     if (rc) return rc;
-    n_ent = n_rr + fs->n_gr;
-    if (n_ent == 0 || n_ent > ABI_MAP_MAX_ENTS) {
-        note("map entry count", n_ent, 0);
+    /* Every byte of the image is one segment: non-zero run, member payload, or
+     * zeros. Sorted, they must tile -- that is what the core's validator
+     * checks, and it is the property that makes the map answer for every byte
+     * exactly once. */
+#define SEG_PUSH(o, l, kd)                                                   \
+    do {                                                                     \
+        if (n_seg == cap_seg) {                                              \
+            size_t nc = cap_seg ? cap_seg * 2 : 256;                         \
+            map_seg *nv = (map_seg *)realloc(seg, nc * sizeof *nv);           \
+            if (!nv) { free(seg); rc = EX_IO; goto out; }                     \
+            seg = nv; cap_seg = nc;                                          \
+        }                                                                    \
+        seg[n_seg].off = (o); seg[n_seg].len = (l);                          \
+        seg[n_seg].kind = (uint8_t)(kd); seg[n_seg].idx = 0;                 \
+        seg[n_seg].src_off = 0; seg[n_seg].logical = 0; n_seg++;                                     \
+    } while (0)
+
+    for (i = 0; i < n_rr; i++) {
+        gcfg_ent *tab = NULL;
+        size_t n = 0, cap_tab = 0;
+        if (gcfg_split_zero(fs->fd, rr[i].off, rr[i].off + rr[i].len,
+                            fs->block_size, &tab, &n, &cap_tab) != 0) {
+            free(tab); free(seg); rc = EX_IO; goto out;
+        }
+        for (k = 0; k < n; k++)
+            SEG_PUSH(tab[k].off, tab[k].len,
+                     (tab[k].flags & GCFG_F_ZERO) ? 3 : 0);
+        free(tab);
+    }
+    for (i = 0; i < fs->n_gr; i++) {
+        SEG_PUSH(fs->gr[i].image, fs->gr[i].len, 1);
+        seg[n_seg - 1].idx = fs->gr[i].idx;
+        /* A member is stored ONCE and named by several extents, so a member
+         * entry must carry WHICH part of the member it serves: the logical
+         * offset, which MRMP keeps in the src_off field. Dropping it (every
+         * extent claiming logical 0) made the core compare the second
+         * extent's image bytes against the member's FIRST bytes -- that was
+         * the guard's "memcmp failed". */
+        seg[n_seg - 1].logical = fs->gr[i].logical;
+    }
+    if (n_seg == 0 || n_seg > ABI_MAP_MAX_ENTS) {
+        note("map entry count", n_seg, 0);
+        free(seg);
         rc = EX_DECLINE;
         goto out;
     }
-    blen = 8 + n_ent * 29;
-    blob = (uint8_t *)malloc(blen);
-    if (!blob) { rc = EX_IO; goto out; }
-    memcpy(blob, "MRMP", 4);
-    put32(blob + 4, (uint32_t)n_ent);
-    wp = 8;
-    dbase = recipe_data_base(fs->n_mem, fs->n_gr, n_rr);
-    rsrc = dbase;                       /* running recipe-blob offset */
-    pos = 0;                            /* running image offset */
-    gi = 0;                             /* next member range */
-    for (i = 0; i < n_rr; i++) {
-        /* member ranges that precede this recipe range */
-        while (gi < fs->n_gr && fs->gr[gi].image < rr[i].off) {
-            put64(blob + wp, fs->gr[gi].image);
-            put64(blob + wp + 8, fs->gr[gi].len);
-            blob[wp + 16] = 1;
-            put32(blob + wp + 17, fs->gr[gi].idx);
-            put64(blob + wp + 21, fs->gr[gi].logical);
-            wp += 29;
-            pos = fs->gr[gi].image + fs->gr[gi].len;
-            gi++;
+    qsort(seg, n_seg, sizeof *seg, map_seg_cmp);
+
+    /* REFUSE while elision cannot be read back.
+     *
+     * With the logical offsets fixed the map is now accepted, the guard passes
+     * and decomposition COMPLETES -- members appear -- but the container then
+     * cannot be read: `invf-cat` exits 1 with "ext4fs: mapped container read
+     * f..." and produces 0 bytes of 134 217 728. A member that exists and a
+     * container that cannot be read is exactly the class of failure this
+     * project refuses to ship, so a map with elided zeros declines until the
+     * read path through it is proven: `cmp` of the container against its source
+     * image after a sweep, and 31 sweeps without drift.
+     *
+     * MEASURED, 128 MiB ext4 with two members, in the core tree at f66ca44:
+     *   sweep ok, members 5 (!mbr0012-ino12, !mbr0013-payload.bin,
+     *   !mbr0014-note.txt, !mbrmap, !mbrt), then invf-cat rc=1, 0 bytes.
+     * Remove this block in the commit that makes that read bit-exact. */
+    {
+        size_t z = 0, q;
+        for (q = 0; q < n_seg; q++)
+            if (seg[q].kind == 3) z++;
+        if (z) {
+            note("map: elided zero regions, read path unproven", z, 0);
+            free(seg);
+            rc = EX_DECLINE;
+            goto out;
         }
-        if (rr[i].off != pos) {         /* internal: must tile exactly */
-            free(blob);
+    }
+    blen = 8 + n_seg * 29;
+    blob = (uint8_t *)malloc(blen);
+    if (!blob) { free(seg); rc = EX_IO; goto out; }
+    memcpy(blob, "MRMP", 4);
+    put32(blob + 4, (uint32_t)n_seg);
+    wp = 8;
+    /* The recipe blob is written by cmd_strip with the FILTERED range count
+     * (only non-zero runs), so the map's src_off base must use the same count
+     * -- not n_rr, which is the pre-filter complement of the members. Getting
+     * this wrong is not a crash: it makes every recipe entry point past the
+     * blob, and the core refuses the map. */
+    {
+        size_t n_kind0 = 0;
+        for (i = 0; i < n_seg; i++)
+            if (seg[i].kind == 0) n_kind0++;
+        dbase = recipe_data_base(fs->n_mem, fs->n_gr, n_kind0);
+    }
+    rsrc = dbase;
+    pos = 0;
+    for (i = 0; i < n_seg; i++) {
+        if (seg[i].off != pos) {          /* internal: must tile exactly */
+            free(blob); free(seg);
             rc = EX_ERROR;
             goto out;
         }
-        put64(blob + wp, rr[i].off);
-        put64(blob + wp + 8, rr[i].len);
-        blob[wp + 16] = 0;
-        put32(blob + wp + 17, 0);
-        put64(blob + wp + 21, rsrc);
+        put64(blob + wp, seg[i].off);
+        put64(blob + wp + 8, seg[i].len);
+        blob[wp + 16] = seg[i].kind;
+        put32(blob + wp + 17, seg[i].kind == 1 ? seg[i].idx : 0);
+        put64(blob + wp + 21, seg[i].kind == 0 ? rsrc
+                             : (seg[i].kind == 1 ? seg[i].logical : 0));
+        if (seg[i].kind == 0) rsrc += seg[i].len;
         wp += 29;
-        rsrc += rr[i].len;
-        pos = rr[i].off + rr[i].len;
+        pos = seg[i].off + seg[i].len;
     }
-    while (gi < fs->n_gr) {
-        put64(blob + wp, fs->gr[gi].image);
-        put64(blob + wp + 8, fs->gr[gi].len);
-        blob[wp + 16] = 1;
-        put32(blob + wp + 17, fs->gr[gi].idx);
-        put64(blob + wp + 21, fs->gr[gi].logical);
-        wp += 29;
-        gi++;
-    }
+    free(seg);
     ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (ofd < 0) { free(blob); rc = EX_IO; goto out; }
     if (write_at(ofd, 0, blob, blen) != 0 || close(ofd) != 0) {
@@ -1737,9 +1855,25 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
         if (fstat(rfd, &st) != 0) { rc = EX_IO; goto out; }
         expect_size = (uint64_t)st.st_size;
     }
-    if (read_at(rfd, 0, hdr, sizeof hdr) != 0 ||
-        memcmp(hdr, RECIPE_MAGIC, 8) != 0) {
-        note("rebuild: bad recipe magic", 0, 0);
+    if (read_at(rfd, 0, hdr, sizeof hdr) != 0) {
+        note("rebuild: cannot read the recipe header", 0, 0);
+        goto out;
+    }
+    if (memcmp(hdr, RECIPE_MAGIC, 8) != 0) {
+        /* E4RCP001 stored every non-member byte verbatim; E4RCP002 stores only
+         * the non-zero runs and lets the gaps be holes. The bytes still tile
+         * the image, so a v1 recipe is not damage -- it is an older
+         * generation, and this pack deliberately carries no second read path
+         * for it (single-operator fleet, no volumes in the field; recorded in
+         * docs/EXT4FS-ZERO-ELISION.md). The way back is the source image the
+         * container was made from. */
+        if (memcmp(hdr, "E4RCP001", 8) == 0)
+            fprintf(stderr, "ext4fs: rebuild: this recipe is E4RCP001 (every "
+                            "non-member byte stored verbatim) and this pack "
+                            "writes and reads E4RCP002 only. Re-import the "
+                            "container from its source image.\n");
+        else
+            note("rebuild: unknown recipe magic", 0, 0);
         goto out;
     }
     memcpy(&image_size, hdr + 8, 8);
@@ -1837,7 +1971,16 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
             }
         }
     }
-    /* partition proof: ranges + member extents must tile [0, image_size) */
+    /* partition proof: ranges and member extents must be in bounds, ascending
+     * and DISJOINT -- they no longer have to TILE the image.
+     *
+     * In E4RCP001 they did tile it: every non-member byte was stored verbatim,
+     * so a gap would have been a hole where the original had bytes. E4RCP002
+     * stores only the NON-ZERO runs, so a gap is exactly what an all-zero
+     * stretch of the image leaves behind -- and a hole in the output reads as
+     * zeros, which is what those bytes were. Requiring tile would fail every
+     * v2 recipe; requiring disjointness is the property that still has to
+     * hold, because overlap would mean two sources for one image byte. */
     {
         rext_t *xs = (rext_t *)malloc((size_t)(n_ext ? n_ext : 1) *
                                       sizeof *xs);
@@ -1846,19 +1989,21 @@ static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
         if (!xs) { rc = EX_IO; goto out; }
         memcpy(xs, ext, (size_t)n_ext * sizeof *xs);
         qsort(xs, n_ext, sizeof *xs, rext_img_cmp);
-        /* merge-scan ranges (off-ascending) with extents (image-asc) */
         while (ri < n_rr || xi < n_ext) {
             if (ri < n_rr && (xi >= n_ext || rr[ri].off <= xs[xi].image)) {
-                if (rr[ri].off != p) { free(xs); goto out; }
+                if (rr[ri].off < p || rr[ri].off + rr[ri].len > image_size) {
+                    free(xs); goto out;          /* overlap or past the end */
+                }
                 p = rr[ri].off + rr[ri].len;
                 ri++;
             } else {
-                if (xs[xi].image != p) { free(xs); goto out; }
+                if (xs[xi].image < p || xs[xi].image + xs[xi].len > image_size) {
+                    free(xs); goto out;          /* overlap or past the end */
+                }
                 p = xs[xi].image + xs[xi].len;
                 xi++;
             }
         }
-        if (p != image_size) { free(xs); goto out; }
         free(xs);
     }
     /* write: recipe ranges verbatim, member bytes into their extents */
