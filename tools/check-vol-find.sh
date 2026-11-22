@@ -53,17 +53,17 @@ src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name
 src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
 src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
 src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
-src/cli/fuse_fs.c:1801:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2106:SKIP
-src/cli/fuse_fs.c:2445:SKIP
-src/cli/fuse_fs.c:3154:SKIP
-src/cli/fuse_fs.c:3375:SKIP
-src/cli/fuse_fs.c:3430:SKIP
-src/cli/fuse_fs.c:3691:SKIP
-src/cli/fuse_fs.c:3896:SKIP
-src/cli/fuse_fs.c:3983:SKIP
-src/cli/fuse_fs.c:4018:SKIP
-src/cli/fuse_fs.c:4055:SKIP
+src/cli/fuse_fs.c:1802:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2107:SKIP
+src/cli/fuse_fs.c:2446:SKIP
+src/cli/fuse_fs.c:3200:SKIP
+src/cli/fuse_fs.c:3421:SKIP
+src/cli/fuse_fs.c:3476:SKIP
+src/cli/fuse_fs.c:3737:SKIP
+src/cli/fuse_fs.c:3942:SKIP
+src/cli/fuse_fs.c:4029:SKIP
+src/cli/fuse_fs.c:4064:SKIP
+src/cli/fuse_fs.c:4101:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP
@@ -100,6 +100,7 @@ src/cli/sweep_bang_test.c:122:SKIP  # setup: marks whatever id the name resolves
 src/cli/sweep_bang_test.c:123:SKIP  # as :122
 src/cli/sweep_bang_test.c:132:ACTS  # the control's own zone read: a miss is not TEXT, so all_text_a clears and the harness-live control FAILS -- the control cannot be satisfied by a name that is not there
 src/cli/sweep_bang_test.c:133:ACTS  # as :132, on the '!'-bearing name: the red control's input
+src/cli/sweep_collect_test.c:314:ACTS   # the measurement IS the lookup: a name that resolves to the wrong id fails the agreement count (same grading as crc32c_test LEG 4)
 src/cli/table_sync_evict_test.c:342:SKIP
 src/cli/tar_cap_test.c:182:SKIP
 src/cli/tz_reg_collapse_test.c:158:SKIP   # oracle: whether the owner row resolves IS the fixture check -- the load is measured against this blob
@@ -108,23 +109,27 @@ src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement need
 src/cli/window_test.c:176:SKIP
 src/cli/write_create_path_test.c:248:SKIP
 src/core/vol_cpack.c:400:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:3072:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3415:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3416:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:3512:SKIP   # map-gen probe: miss means no map (gen 0)
-src/core/vol_cpack.c:3513:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:3947:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
-src/core/vol_cpack.c:4479:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:4579:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:4594:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:4595:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:4599:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:4620:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:4674:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:4706:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:2880:SKIP   # leaf list: absent means the historical per-inode layout, not a failure (cpack_leaf_parse returns 0)
+src/core/vol_cpack.c:3382:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:3514:SKIP   # guard layout probe: '<name>!mbrblob' absent means the per-inode form, so the guard reads members as inodes
+src/core/vol_cpack.c:3762:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3763:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:3832:SKIP   # cache insert layout probe: absent blob means per-member inodes (moff stays NULL)
+src/core/vol_cpack.c:3890:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:3891:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:4333:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
+src/core/vol_cpack.c:5025:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:5126:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:5141:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:5142:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:5146:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:5167:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:5225:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:5253:SKIP   # rebuild layout probe: absent blob means per-member inodes
+src/core/vol_cpack.c:5292:ACTS   # member rebuild: miss aborts with error
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
-src/core/vol_png.c:1214:SKIP
+src/core/vol_png.c:1247:SKIP
 src/core/vol_read.c:491:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
 src/core/vol_read.c:506:SKIP
 src/core/vol_read.c:980:SKIP
@@ -136,18 +141,19 @@ src/core/vol_read.c:1369:ACTS
 src/core/vol_read.c:1582:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
 src/core/vol_read.c:1589:SKIP
 src/core/vol_read.c:1782:ACTS
-src/core/vol_sweep.c:279:SKIP
-src/core/vol_sweep.c:584:ACTS
-src/core/vol_sweep.c:603:ACTS
-src/core/vol_sweep.c:623:ACTS
-src/core/vol_sweep.c:675:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
-src/core/vol_sweep.c:1935:SKIP
-src/core/vol_textzone.c:784:SKIP
-src/core/vol_tier.c:303:SKIP
-src/core/volume.c:965:SKIP   # reserve scan: direct .ivpack file lookup
-src/core/volume.c:986:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
-src/core/volume.c:1450:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
-src/core/volume.c:1451:SKIP   # shifted by the PERF_PROFILING counters in volume.c
+src/core/vol_sweep.c:280:SKIP
+src/core/vol_sweep.c:612:ACTS
+src/core/vol_sweep.c:631:ACTS
+src/core/vol_sweep.c:651:ACTS
+src/core/vol_sweep.c:703:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
+src/core/vol_sweep.c:2003:SKIP
+src/core/vol_sweep.c:2082:ACTS   # name-snapshot hint: the result decides whether the hint is accepted as this inode's name, so a failed lookup must not be mistaken for a match
+src/core/vol_textzone.c:808:SKIP
+src/core/vol_tier.c:304:SKIP
+src/core/volume.c:1283:SKIP   # reserve scan: direct .ivpack file lookup
+src/core/volume.c:1304:SKIP   # reserve scan: manifest miss skips the pack; registration is the measurement
+src/core/volume.c:1768:SKIP   # tier_owner / rawm_owner anchors (vol_open_inner)
+src/core/volume.c:1769:SKIP   # shifted by the PERF_PROFILING counters in volume.c
 src/recipes/zip.c:141:SKIP
 src/recipes/zip.c:145:SKIP
 "

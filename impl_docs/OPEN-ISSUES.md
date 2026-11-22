@@ -971,8 +971,8 @@ An agent in worktree `/var/tmp/wtC` proposed a fix correct in substance:
 +            if (!(rel_j < s->touched_cap && s->touched[rel_j])) fresh++;
 +        }
 ```
-and a new test `src/cli/write_touched_domain_test.c` (`child_segs=4`, tight
-budget, check for no false ENOSPC).
+and a new test (`write_touched_domain`, `child_segs=4`, tight budget, check for
+no false ENOSPC) which was never merged and is not in the tree.
 
 **Acceptance gate failed:** the test passes **without the fix too** (verified:
 `git stash` of the `vol_write.c` edits, rebuild, run -- the same 8/8 PASS). The

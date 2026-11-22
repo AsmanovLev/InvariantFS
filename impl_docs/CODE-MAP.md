@@ -358,11 +358,12 @@ Blindness check: the reports contain **zero** mentions of `README`/`docs/`/`ADR`
 - Pack registration from env directories and `.ivpack` does not invoke a signature check; the signature is gated only on `invf-pack install` (`src/codecs/codec.c:1748`, `src/cli/pack.c:3563`).
 - For `.ivpack` `manifest_tool_ok()` when the entry is absent falls back to searching the host `PATH` (`src/codecs/codec.c:663`, `:688`).
 - `INVFS_PACK_SANDBOX=0` completely disables sandbox mode; without Landlock mode 1 remains with no FS restrictions (`src/core/helper_exec.c:391`, `:414`).
-- Plugin pool readiness is determined only by the existence of `/tmp/invfs_plugin_pool.sock` (`src/core/vol_client.c:68`); the path and shm are fixed (`src/core/vol_plugin_client.c:123`).
-
-Last file path fix: `src/core/vol_client.c:68` → `src/core/vol_plugin_client.c:68`.
-
 - Plugin pool readiness is determined only by the existence of `/tmp/invfs_plugin_pool.sock` (`src/core/vol_plugin_client.c:68`); the path is fixed (`:123`).
+
+> The blind run first attributed this to a file that does not exist in the tree
+> (vol_client.c, which has no src/core/ counterpart); the path is corrected above
+> and the wrong bullet is gone. `tools/check-repo-hygiene.sh` fails a doc that
+> cites a missing file, which is how the leftover was caught.
 
 
 ---
