@@ -216,6 +216,31 @@ The cost: **21,356 inodes for one image** (4–12 KiB of metadata each) and
 `batch` is not declared by `ext4fs`).
 
 ### Space after decomposition does not add up: one corrupted segment
+
+> **STATUS 2026-11-22: NOT REPRODUCIBLE with the pack in this tree.** Measured
+> end to end on `tools/codecpacks/ext4fs.codecpack`, volumes `invf-mkfs 1024`:
+>
+> | source image | sweep | decomposed | container reads back |
+> |---|---|---|---|
+> | 128 MiB ext4 | ok | yes | **bit-exact** |
+> | 512 MiB | ok | yes | **bit-exact** |
+> | 1 GiB | ok | yes | **bit-exact** |
+> | 2 GiB | ok | yes | **bit-exact** |
+> | 4 GiB | ok | yes | **bit-exact** |
+> | 8 GiB | **declined, cleanly** (see below) | no | read-back OOM, not a data defect |
+>
+> And on a 256 MiB ext4 with ~2 000 files, **31 consecutive sweeps**: `used`
+> settles at 16 493.7 MiB and `unclaimed` at 33.4 MiB from the third sweep on and
+> never moves again, every `[spt0] save point:` line reports `0 already damaged`,
+> and the container is bit-exact after the 31st. The old 714 → 1209 → 1447 →
+> 1451 MiB growth does not happen. The `!mbrblob` leaf layout (2026-11-16) is the
+> likely reason; what is NOT proven is that the old case is impossible -- it
+> needed a 2.27 GiB recipe, which the store now refuses outright (next section).
+>
+> What remains genuinely open from the text below: images with ~21 000 members
+> were not re-measured (the 175 ms/member pack cost is a pack property), and
+> `invf-cat` of a file past ~4 GiB is OOM-killed on this box -- there is no
+> streaming extract path, which matters for restoring a large image.
 ### disables reclaim
 
 Measured on a 2.9-GiB Debian partition (`ext4fs`, leaf layout, **with compression**):
@@ -289,6 +314,17 @@ the header) instead of running a frame check over it. This also removes the
 space growth on repeated sweeps.
 
 ## CRITICAL: container recipe larger than INVFS_RECIPE_STREAM_MAX -- data loss
+
+> **STATUS 2026-11-22: no longer a data-loss path, and verified at both ends.**
+> The store refuses (`vol_recipe_store`, `vol_btree.c:4341`) and the builder
+> refuses (`vol_ast.c:107`); a leg pins the store side
+> (`src/cli/recipe_tree_test.c`, group 7) and `large_file_test` pins the builder.
+> At the OTHER end the lane declines before it wastes the work: an 8 GiB ext4
+> with the in-tree pack gives
+> `size guard refused, decomposition declined (the decomposition is not a gain):
+> 8 587 845 139 B vs 8 589 934 592 B original`, sweep rc=0, container untouched
+> and bit-exact. So the boundary that remains is a CAPABILITY boundary (how
+> large an image the pack's recipe covers), not a correctness one.
 
 Reproduced on a clean volume (6 GiB) with a single file `p1.img` (Debian
 partition 2.87 GiB), leaf layout, `--no-compress` NOT used:
