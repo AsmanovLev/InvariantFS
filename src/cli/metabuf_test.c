@@ -429,6 +429,55 @@ static void test_rt30(invfs_volume *v)
        "torn newer slot falls back to the older root");
 }
 
+/* The metadata zone is fully allocated by mkfs, so a full scan of it proves it
+ * EMPTY and sets mb_alloc_fail_run. Honouring that flag is what stops every
+ * page allocation from walking the whole zone: measured on a 4 GiB volume the
+ * zone is 24 608 blocks, i.e. ~25 us of scanning per allocation, paid before
+ * any real work. It is also why the incremental fold looked 25x more expensive
+ * per record than the bulk builder -- the fold allocates ~3 pages, one per
+ * level of the root-to-leaf path, for EVERY delta record (measured 107 us vs
+ * 4.2 us per record on the same 40 003-record delta).
+ *
+ * Asserted, never timed: mb_zone_scan_runs / mb_zone_scan_iters are plain
+ * counters in the volume (volume_internal.h) precisely so this check is
+ * deterministic. The invalidation half is already covered by test_allocator's
+ * "freed metadata-zone page is reused": if the flag were not cleared on a free
+ * inside the zone, that page would never be found again and that leg would go
+ * red. This leg covers the "do not rescan" half. */
+static void test_zone_scan_hint(invfs_volume *v, const char *img)
+{
+    uint64_t a, b, runs, iters;
+
+    printf("zone scan hint: a proven-empty metadata zone is not rescanned\n");
+    fake_vol_close(v);
+    if (fake_vol_open(v, img) != 0) { ok(0, "reopen for the zone-hint leg"); return; }
+    ok(v->mb_zone_scan_runs == 0 && v->mb_zone_scan_iters == 0,
+       "a fresh volume starts with no scans recorded");
+
+    ok(mbuf_alloc(v, 1) != 0, "boot page 0");
+    ok(mbuf_alloc(v, 1) != 0, "boot page 1");
+    ok(v->mb_zone_scan_runs == 0,
+       "the reserved root-area pages are handed out without touching the zone");
+
+    a = mbuf_alloc(v, 1);
+    ok(a != 0, "the third allocation falls through to the shared pool");
+    runs = v->mb_zone_scan_runs;
+    iters = v->mb_zone_scan_iters;
+    ok(runs == 1, "it scanned the zone exactly once, and proved it empty");
+    ok(iters >= FB_META_BLOCKS,
+       "that scan walked every block of the zone (the cost being removed)");
+    ok(v->mb_alloc_fail_run == 1, "the emptiness is recorded for the next alloc");
+
+    b = mbuf_alloc(v, 1);
+    ok(b != 0 && b != a, "the next allocation returns a distinct page");
+    ok(v->mb_zone_scan_runs == runs,
+       "and it did NOT rescan a zone already proven empty");
+    ok(v->mb_zone_scan_iters == iters, "no bits walked on that path");
+
+    mbuf_free(v, a);
+    mbuf_free(v, b);
+}
+
 int main(int argc, char **argv)
 {
     const char *dir = (argc > 1) ? argv[1] : "/tmp";
@@ -470,6 +519,7 @@ int main(int argc, char **argv)
     test_page_io(v);
     test_freed_page(v);
     test_rt30(v);
+    test_zone_scan_hint(v, img);
 
     fake_vol_close(v);
     free(v);

@@ -670,6 +670,12 @@ typedef struct invfs_volume {
     uint64_t mb_boot_end;           /* one past the reserved root-area pages */
     uint64_t mb_alloc_cursor;       /* free-space cursor within the meta zone */
     uint64_t mb_alloc_fail_run;     /* smallest proven-unavailable run (0=?) */
+    /* Plain counters, NOT the PERF_PROFILING ones: a test asserts on them, so
+     * they have to exist in the shipped build. They count how many times the
+     * metadata-zone scan ran to exhaustion and how many bits it walked to get
+     * there -- the cost that used to be paid on EVERY page allocation. */
+    uint64_t mb_zone_scan_runs;     /* scans that proved the zone empty */
+    uint64_t mb_zone_scan_iters;    /* bits walked by those scans      */
     /* ---- WP-M10: metadata store delta-log state (recent tier) ------------
      * The append-only delta segment chain holds coalescing namespace
      * mutations; delta_index maps a namespace key to the winning record

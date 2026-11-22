@@ -261,6 +261,23 @@ static uint64_t mb_alloc_meta_zone(invfs_volume *v)
         return 0;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
+    /* A previous full scan PROVED this zone empty, and nothing has been freed
+     * into it since: mbuf_free clears the flag for a page in the zone
+     * (vol_metabuf.c:351) and vol_open clears it on every mount (:226). So a
+     * second scan cannot find anything, and walking metadata_zone_blocks bits
+     * to re-learn that is pure overhead -- on a 4 GiB volume the zone is
+     * 24 608 blocks, i.e. ~25 us of scanning per allocation, paid before any
+     * real work.
+     *
+     * That cost was invisible until it was counted. It matters because the
+     * number of page allocations per unit of work is not constant: the
+     * incremental fold allocates ~3 pages (one per level of the root-to-leaf
+     * path) for EVERY delta record, while the bulk builder allocates about one
+     * page per fill. Measured, same 40 003-record delta: incremental fold
+     * 4.31 s (107 us/record) vs INVFS_FOLD_BULK=1 0.167 s (4.2 us/record).
+     * Most of that 107 us was this scan, not the tree. */
+    if (v->mb_alloc_fail_run)
+        return 0;                     /* nothing walked: the point of the flag */
     i = v->mb_alloc_cursor;
     if (i < start || i >= end)
         i = start;
@@ -275,11 +292,14 @@ static uint64_t mb_alloc_meta_zone(invfs_volume *v)
                 v->meta_free_blocks--;
             v->mb_alloc_cursor = (i + 1 < end) ? i + 1 : start;
             v->mb_alloc_fail_run = 0;
+            v->mb_zone_scan_iters += n + 1;
             return i;
         }
         i = (i + 1 < end) ? i + 1 : start;
     }
     v->mb_alloc_fail_run = 1;
+    v->mb_zone_scan_runs++;
+    v->mb_zone_scan_iters += end - start;
     return 0;
 }
 
