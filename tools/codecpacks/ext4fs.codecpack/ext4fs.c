@@ -1444,6 +1444,36 @@ static int cmd_estimate(const char *in)
     if (rc) return rc;
     for (i = 0; i < fs->n_mem; i++)
         sum += fs->mem[i].usize;
+
+    /* Classification summary on STDERR, so stdout stays the ONE number the
+     * core parses: a second line there would be read as part of the first by
+     * any consumer that does not expect it. A human gets the split, a parser
+     * gets what it always got.
+     *
+     * This is the "will it fit, and where would the win come from" answer for
+     * one container: meta_structure must be stored verbatim, garbage is the
+     * part an operator could trade away, and member content is what dedupe and
+     * the codec lane act on. */
+    {
+        uint64_t meta = 0, garb = 0, mem = 0;
+        size_t j;
+        for (i = 0; i < n_rr; i++) {
+            uint64_t cur = rr[i].off, end = rr[i].off + rr[i].len;
+            for (j = 0; j < fs->meta.n && cur < end; j++) {
+                uint64_t mlo = fs->meta.v[j].lo, mhi = fs->meta.v[j].hi;
+                if (mhi <= cur) continue;
+                if (mlo >= end) break;
+                if (mlo > cur) garb += mlo - cur;
+                meta += (mhi > end ? end : mhi) - (mlo < cur ? cur : mlo);
+                cur = mhi > end ? end : mhi;
+            }
+            if (cur < end) garb += end - cur;
+        }
+        for (i = 0; i < fs->n_gr; i++) mem += fs->gr[i].len;
+        fprintf(stderr, "cls: meta %" PRIu64 " garbage %" PRIu64
+                        " member %" PRIu64 " image %" PRIu64 "\n",
+                meta, garb, mem, fs->file_size);
+    }
     printf("%" PRIu64 "\n", (uint64_t)(sum + ESTIMATE_MARGIN));
     free(rr);
     fs_free(fs);
