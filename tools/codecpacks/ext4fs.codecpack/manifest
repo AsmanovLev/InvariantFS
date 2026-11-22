@@ -1,37 +1,30 @@
-# ext4fs codecpack (WP16a/WP16b): ext4 filesystem images -> per-file
-# members that flow through the whole codec pipeline (text PPMd batching,
-# binary ZSTD+BCJ batching, generic ZSTD-19). Members are identified by
-# ext4 INODE NUMBER (idx); everything that is not regular-file content
-# (superblock, GDT, bitmaps, inode tables, directory blocks, extent-tree
-# index nodes, journal, reserved/unused/unwritten blocks, past-i_size
-# tails) stays in the recipe verbatim, so bit-rot survives the round trip.
-# The map command makes the pack SEEKABLE (CAP_SEEK): reads splice locally
-# from the !mbrmap map + recipe + member siblings and never exec the tool.
-#
-# The tool is a compiled C11 helper (ext4fs.c, libc only): the test script
-# tools/test-ext4fs.sh builds it to bin/ext4fs (cc -O2 -Wall -Wextra
-# -Werror). A pack whose tool is missing is skipped by the FS probe (the
-# image waits RAW, unstamped).
-#
-# estimate prints sum(member usize) + 64 MiB (header-derived, never a
-# trial decode) so big-but-sparse images stay admissible under
-# INVFS_DEC_MEM_LIMIT.
+# ext4fs codecpack (WP16a/WP16b) — migrated to the WP60 registry manifest
+# format. ext4 filesystem images -> per-file members that flow through the
+# whole codec pipeline (text PPMd batching, binary ZSTD+BCJ batching,
+# generic ZSTD-19). Members are identified by ext4 INODE NUMBER (idx);
+# everything that is not regular-file content (superblock, GDT, bitmaps,
+# inode tables, directory blocks, extent-tree index nodes, journal,
+# reserved/unused/unwritten blocks, past-i_size tails) stays in the recipe
+# verbatim, so bit-rot survives the round trip. The map command makes the
+# pack SEEKABLE (CAP_SEEK): reads splice locally from the !mbrmap map +
+# recipe + member siblings and never exec the tool.
 name = ext4fs
-type = container
-algo = 17
-codec_id = 17
+version = 1.0.0
 pack_version = 1
-version = 1
-min_read = 1
-generation = 1
+min_read = 0.3.0
+algo = 17
+codec_id = INVFS_ALGO_EXT4FS
+format_id = ext4
 family = container
 category = primary
-provides = container
+priority = 100
+type = container
+caps = container|external
+provides = container:ext4,container
 replaces =
 conflicts =
-priority = 100
-caps = container|external
 dec_mem = 0
+generation = 1
 # ext4 superblock magic 0xEF53 (little-endian) at 1024 + 56
 sniff.magic = 53EF
 sniff.offset = 1080
@@ -41,12 +34,10 @@ extract = bin/ext4fs extract {in} {idx} {out}
 strip = bin/ext4fs strip {in} {out}
 rebuild = bin/ext4fs rebuild {recipe} {dir} {out}
 map = bin/ext4fs map {in} {out}
-# Opt into the FS-owned decomposition generation. This pack renders a v1
-# (MRMP) map today, so the stamp is a no-op -- but a pack that emits v2
-# without this key gets a map header whose generation is whatever the
-# pack happened to write, and a later generation bump re-decomposes
-# nothing. The engine only stamps an MRM2 header (src/core/vol_cpack.c,
-# the map-header stamp in the container sweep), so declaring it here is
-# inert for v1 and correct for v2. Matches the registry manifest.
-decomp_gen = 1
+# ABI v1, additive: what every non-member byte range IS (GCFG table).
+# meta_structure vs garbage, and whether the pack READ the garbage and found it
+# all zero (so it can be reproduced without being stored). The core must probe
+# for this command and fall back to "no classification" when a pack lacks it --
+# packs in the wild predate it.
+classify = bin/ext4fs classify {in} {out}
 estimate = bin/ext4fs estimate {in}
