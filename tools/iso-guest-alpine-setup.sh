@@ -297,7 +297,7 @@ if [ -n \"\$kver\" ]; then
     mkinitfs -o /boot/initramfs-virt \"\$kver\" || true
 fi
 
-invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200\"
+invf-boot-setup --esp /boot --root \"$P2\" --cmdline \"console=ttyS0,115200 hung_task_timeout_secs=180 hung_task_warnings=5\"
 " || exit 1
 
 # ---- phase 6: clean unmount & validation ----

@@ -377,7 +377,7 @@ fi
 
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
 say "running invf-boot-setup on /mnt/boot (ESP)..."
-invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 invfs.init=/init" || true
+invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 invfs.init=/init hung_task_timeout_secs=180 hung_task_warnings=5" || true
 
 # ---- phase 5: clean unmount & validation ----
 say "unmounting guest filesystems..."
