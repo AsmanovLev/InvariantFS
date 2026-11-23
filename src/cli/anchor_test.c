@@ -875,6 +875,247 @@ static int cmd_extend_meta(const char *img, const char *mode)
     return 0;
 }
 
+/* ---- WP-METABUF-ANCHOR: the metadata base-page allocator ---------------
+ *
+ * mb_alloc_meta_zone() (vol_metabuf.c:253) hands out a metadata base page
+ * from the first block of the metadata zone whose bitmap bit is clear, and its
+ * scan is CLAMPED to total_blocks (vol_metabuf.c:262-263). So on any volume
+ * whose metadata zone reaches the tail, total_blocks - 1 -- the ANC0 tail
+ * anchor -- is a candidate, and its bit is legitimately clear on a volume
+ * whose bitmap was rebuilt from replay (no delta record names the block).
+ * It was the fourth allocator-shaped path to decide "free" from a clear bit
+ * alone (fe214e2 fixed the third). Taking it marks the anchor as a metadata
+ * base page, and then mbuf_alloc's own mb_write_empty erases the volume's only
+ * second copy of RT30/SPT0.
+ *
+ * THE BUG IS UNREACHABLE ON AN IMAGE invf-mkfs BUILDS -- mkfs marks the whole
+ * metadata zone allocated (vol_metabuf.c:245-248), so the scan finds nothing
+ * whatever the geometry. So this command CONSTRUCTS the geometry the way the
+ * anchor WP did (cmd_extend_meta above): it opens a real image and injects
+ * into RAM only -- no flush, no MET0/superblock persist, every bit and every
+ * field restored before close -- then calls the REAL mbuf_alloc().
+ *
+ * Three modes:
+ *
+ *   tail    the metadata zone IS the tail: start = anchor_pba, 2 blocks, so
+ *           the clamp leaves exactly one candidate -- the anchor. Every other
+ *           candidate is excluded by construction rather than by marking
+ *           sixty thousand bits, and the CLAMP (the line the WP cites) is the
+ *           code path under test. Must refuse.
+ *   short   the same zone one block short of the tail: start = anchor_pba - 1,
+ *           1 block, so the only candidate is the ordinary free block next to
+ *           the anchor. Must SUCCEED and return that block -- otherwise a
+ *           guard that refused the whole zone would pass `tail` while
+ *           breaking the allocator, and the leg would prove nothing.
+ *   ro      `short`'s geometry with VOLF_READONLY set. Must return 0 and move
+ *           NO bit: the latch has to run before the scan's first bit_set.
+ *
+ * Two RAM fields beyond that geometry, both restored before close and both
+ * necessary for the leg to be about the thing it claims:
+ *
+ *   mb_boot_cursor/mb_boot_end = 0   otherwise mbuf_alloc() hands out the two
+ *       reserved root-area boot pages first (vol_metabuf.c:359-364) and the
+ *       zone scan never runs -- the leg would be vacuous by construction.
+ *   sb.shadow_zone_blocks = 0        otherwise a refused zone scan falls
+ *       through to the shared pool (vol_metabuf.c:367-375) and SUCCEEDS, so
+ *       "the metadata allocator handed out the anchor" could not be told
+ *       apart from "the shared pool served the request", and the leg would
+ *       write a page into the image on the refusing path as well.
+ *
+ * The anchor's bitmap bit is cleared first in every mode -- the world a bitmap
+ * rebuild leaves, and the only world in which the bug is reachable -- so an
+ * "already allocated" refusal cannot make the leg vacuous.
+ */
+#define AM_GEN 1
+
+static int cmd_alloc_meta(const char *img, const char *mode)
+{
+    invfs_volume *v;
+    uint8_t before[INVFS_BLOCK_SIZE], after[INVFS_BLOCK_SIZE];
+    uint8_t *bm_snap = NULL;
+    size_t bm_bytes;
+    uint64_t apba, total, cand, zone_end, candidates, inj_start, inj_blocks;
+    uint64_t saved_meta_start, saved_meta_blocks, saved_shadow_blocks;
+    uint64_t saved_cursor, saved_fail_run, saved_boot_cur, saved_boot_end;
+    uint64_t saved_free, saved_mfree, saved_shadow_free, saved_shadow_fail;
+    uint64_t saved_runs, saved_iters, boot_pages, ret;
+    uint32_t saved_flags;
+    int err, tail, shortm, rom, rc, ret_anchor, bytes_changed, bits_changed;
+    int anchor_bit_before, anchor_bit_after, anchor_meta_after;
+    int cand_bit_before, cand_bit_after;
+
+    tail   = !strcmp(mode, "tail");
+    shortm = !strcmp(mode, "short");
+    rom    = !strcmp(mode, "ro");
+    if (!tail && !shortm && !rom)
+        return fail("alloc-meta: unknown mode '%s' (tail|short|ro)", mode);
+
+    v = vol_open(img, &err);
+    if (!v)
+        return fail("vol_open(%s) err=%d", img, err);
+    apba = anchor_pba(v);
+    total = v->sb.total_blocks;
+    if (!apba || total < 8 || apba < 4) {
+        vol_close(v);
+        return fail("no usable anchor pba on this image (total_blocks=%llu)",
+                    (unsigned long long)total);
+    }
+    /* A missing bitmap or meta_type_bitmap would make the "the call moved no
+     * bit" half unmeasurable, and a set fail_run would make the scan
+     * short-circuit (vol_metabuf.c:279) so the leg would never reach the code
+     * under test. Refuse rather than report a pass. */
+    if (!v->bitmap || !v->meta_type_bitmap) {
+        vol_close(v);
+        return fail("alloc-meta %s: the volume has no bitmap/meta_type_bitmap "
+                    "(%p/%p), so the assertions below cannot be measured",
+                    mode, (void *)v->bitmap, (void *)v->meta_type_bitmap);
+    }
+    if (v->mb_alloc_fail_run) {
+        vol_close(v);
+        return fail("alloc-meta %s: mb_alloc_fail_run is already set at open, "
+                    "so the zone scan would be skipped and the leg vacuous",
+                    mode);
+    }
+
+    /* THE GEOMETRY. `tail` reaches the tail and relies on the clamp for the
+     * rest of the zone; `short` stops one block short of it. */
+    saved_meta_start = v->sb.metadata_zone_start;
+    saved_meta_blocks = v->sb.metadata_zone_blocks;
+    if (tail) {
+        inj_start = apba;                      /* [apba, apba+2) -> clamped */
+        inj_blocks = 2;
+    } else {
+        inj_start = apba - 1;                  /* [apba-1, apba) */
+        inj_blocks = 1;
+    }
+    v->sb.metadata_zone_start = inj_start;
+    v->sb.metadata_zone_blocks = inj_blocks;
+    zone_end = inj_start + inj_blocks;
+    if (zone_end > total)
+        zone_end = total;
+    candidates = zone_end - inj_start;
+    cand = apba - 1;      /* the ordinary free block the short/ro modes target */
+
+    /* `short`/`ro` succeed only because cand is genuinely free, so check that
+     * instead of clearing it: a leg that fabricated the free bit would prove
+     * that the allocator can read a bit, not that it still allocates. */
+    cand_bit_before = bit_get(v->bitmap, cand);
+    if (!tail && cand_bit_before) {
+        vol_close(v);
+        return fail("alloc-meta %s: the block next to the anchor (pba %llu) is "
+                    "already allocated on this image, so the scan would refuse "
+                    "it for the ordinary reason and the control would be "
+                    "vacuous", mode, (unsigned long long)cand);
+    }
+
+    /* THE WORLD A BITMAP REBUILD LEAVES. */
+    anchor_bit_before = bit_get(v->bitmap, apba);
+    xm_bit_clear(v->bitmap, apba);
+
+    /* Save every field this command writes, and take the bitmap snapshot the
+     * "did the CALL move a bit" assertion compares against -- AFTER the
+     * injection, so the injection itself is not counted. */
+    saved_shadow_blocks = v->sb.shadow_zone_blocks;
+    saved_cursor = v->mb_alloc_cursor;
+    saved_fail_run = v->mb_alloc_fail_run;
+    saved_boot_cur = v->mb_boot_cursor;
+    saved_boot_end = v->mb_boot_end;
+    saved_free = v->free_blocks;
+    saved_mfree = v->meta_free_blocks;
+    saved_shadow_free = v->shadow_free;
+    saved_shadow_fail = v->shadow_fail_run;
+    saved_runs = v->mb_zone_scan_runs;
+    saved_iters = v->mb_zone_scan_iters;
+    saved_flags = v->sb.vol_flags;
+    boot_pages = (saved_boot_cur < saved_boot_end)
+                 ? saved_boot_end - saved_boot_cur : 0;
+
+    bm_bytes = (size_t)v->bitmap_blocks * INVFS_BLOCK_SIZE;
+    bm_snap = (uint8_t *)malloc(bm_bytes);
+    if (!bm_snap) {
+        vol_close(v);
+        return fail("out of memory snapshotting the bitmap");
+    }
+    memcpy(bm_snap, v->bitmap, bm_bytes);
+
+    v->mb_boot_cursor = 0;              /* the boot pages are not this test */
+    v->mb_boot_end = 0;
+    v->sb.shadow_zone_blocks = 0;       /* no fallback pool: the scan or nothing */
+    if (rom)
+        v->sb.vol_flags |= VOLF_READONLY;
+
+    if (io_pread(&v->io, apba * (uint64_t)INVFS_BLOCK_SIZE, before,
+                 sizeof before) != 0) {
+        free(bm_snap);
+        vol_close(v);
+        return fail("cannot read the anchor block");
+    }
+
+    /* THE CALL UNDER TEST. */
+    ret = mbuf_alloc(v, AM_GEN);
+    rc = (int)ret;                                /* pbas fit in an int here */
+
+    ret_anchor = (ret != 0 && ret == apba) ? 1 : 0;
+    anchor_bit_after = bit_get(v->bitmap, apba);
+    anchor_meta_after = bit_get(v->meta_type_bitmap, apba);
+    cand_bit_after = bit_get(v->bitmap, cand);
+    bits_changed = memcmp(bm_snap, v->bitmap, bm_bytes) != 0;
+
+    if (io_pread(&v->io, apba * (uint64_t)INVFS_BLOCK_SIZE, after,
+                 sizeof after) != 0) {
+        free(bm_snap);
+        vol_close(v);
+        return fail("cannot re-read the anchor block");
+    }
+    bytes_changed = memcmp(before, after, sizeof before) != 0;
+
+    printf("MODE=%s ANCHOR_PBA=%llu ZONE_START=%llu ZONE_BLOCKS=%llu "
+           "ZONE_CANDIDATES=%llu BOOT_PAGES_SKIPPED=%llu READONLY=%d "
+           "RC=%d RETURNED_ANCHOR=%d ANCHOR_BIT_BEFORE=%d "
+           "ANCHOR_BIT_AFTER=%d ANCHOR_METATYPE_AFTER=%d "
+           "CAND_PBA=%llu CAND_BIT_BEFORE=%d CAND_BIT_AFTER=%d "
+           "BITS_CHANGED=%d ANCHOR_BYTES_CHANGED=%d "
+           "SCAN_RUNS_DELTA=%llu SCAN_ITERS_DELTA=%llu "
+           "FREE_DELTA=%lld META_FREE_DELTA=%lld\n",
+           mode, (unsigned long long)apba, (unsigned long long)inj_start,
+           (unsigned long long)inj_blocks, (unsigned long long)candidates,
+           (unsigned long long)boot_pages, rom ? 1 : 0, rc, ret_anchor,
+           anchor_bit_before, anchor_bit_after, anchor_meta_after,
+           (unsigned long long)cand, cand_bit_before, cand_bit_after,
+           bits_changed, bytes_changed,
+           (unsigned long long)(v->mb_zone_scan_runs - saved_runs),
+           (unsigned long long)(v->mb_zone_scan_iters - saved_iters),
+           (long long)(saved_free - v->free_blocks),
+           (long long)(saved_mfree - v->meta_free_blocks));
+
+    /* Put the RAM back the way the open found it, so closing this handle
+     * cannot propagate the synthetic geometry anywhere. Nothing here dirtied
+     * the volume (v->dirty stays 0, so vol_close writes nothing); the restore
+     * is belt and braces, and it does NOT restore the anchor block's BYTES --
+     * if the call wrote there, the suite has to see it. */
+    memcpy(v->bitmap, bm_snap, bm_bytes);
+    free(bm_snap);
+    if (v->meta_type_bitmap)
+        xm_bit_clear(v->meta_type_bitmap, apba);
+    v->sb.metadata_zone_start = saved_meta_start;
+    v->sb.metadata_zone_blocks = saved_meta_blocks;
+    v->sb.shadow_zone_blocks = saved_shadow_blocks;
+    v->sb.vol_flags = saved_flags;
+    v->mb_alloc_cursor = saved_cursor;
+    v->mb_alloc_fail_run = saved_fail_run;
+    v->mb_boot_cursor = saved_boot_cur;
+    v->mb_boot_end = saved_boot_end;
+    v->free_blocks = saved_free;
+    v->meta_free_blocks = saved_mfree;
+    v->shadow_free = saved_shadow_free;
+    v->shadow_fail_run = saved_shadow_fail;
+    v->mb_zone_scan_runs = saved_runs;
+    v->mb_zone_scan_iters = saved_iters;
+
+    vol_close(v);
+    return 0;
+}
+
 static int dump_block(const char *img, int at_tail, int only_anchor)
 {
     uint8_t blk[INVFS_BLOCK_SIZE];
@@ -909,7 +1150,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "usage: %s <build|readback|reserve|writecycle|probe|"
                         "readback-gen|corrupt-rt30|teleport-anchor|patch-fingerprint|"
                         "corrupt-anchor-crc|fill-tail|block0|anchorhex|"
-                        "extend-meta> <img> [args]\n", argv[0]);
+                        "extend-meta|alloc-meta> <img> [args]\n", argv[0]);
         return 2;
     }
     if (!strcmp(argv[1], "build") && argc == 4)
@@ -944,6 +1185,8 @@ int main(int argc, char **argv)
         return dump_block(argv[2], 1, 1);
     if (!strcmp(argv[1], "extend-meta") && argc == 4)
         return cmd_extend_meta(argv[2], argv[3]);
+    if (!strcmp(argv[1], "alloc-meta") && argc == 4)
+        return cmd_alloc_meta(argv[2], argv[3]);
     fprintf(stderr, "FAIL: bad arguments\n");
     return 2;
 }

@@ -67,6 +67,16 @@
 #          Two geometries that reach the anchor must refuse AND leave the
 #          block byte-identical; the same call one block further out must
 #          SUCCEED, so a blanket refusal cannot pass the leg.
+#   leg 12 the FOURTH allocator-shaped path, and the one that actually writes
+#          over the anchor: mb_alloc_meta_zone() (vol_metabuf.c:253) hands out
+#          a metadata base page from the first clear bit in a scan CLAMPED to
+#          total_blocks, so a metadata zone that reaches the tail has the
+#          anchor as a candidate. A geometry injected in RAM (one superblock
+#          field pair, no flush, every bit and field restored before close)
+#          makes the anchor the scan's only candidate: it must be refused with
+#          the block byte-identical, the same call with the zone one block
+#          short of the tail must SUCCEED, and with VOLF_READONLY the same
+#          geometry must move no bit at all.
 #
 # Run:  bash tools/run-e2e.sh tools/test-meta-anchor.sh
 #   or:  bash tools/test-meta-anchor.sh     (from make test)
@@ -462,5 +472,96 @@ note "shifted: the same call one block away SUCCEEDS (class 2, 32 blocks marked)
 note "the extent grow path is guarded structurally, and it still grows"
 
 echo
-echo "PASS:  metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat, extent-guard"
+leg12() {
+    # leg 12: the metadata BASE-PAGE allocator, mb_alloc_meta_zone().
+    #
+    # The fourth allocator-shaped path to decide "free" from a clear bit, and
+    # the first whose own next step overwrites the block: mbuf_alloc() calls
+    # mb_write_empty() on whatever this scan returns, so a metadata zone that
+    # reaches the tail does not merely mark the anchor allocated -- it erases
+    # the volume's only second copy of RT30/SPT0.
+    #
+    # Unreachable on an image invf-mkfs builds (it marks the whole metadata
+    # zone allocated, vol_metabuf.c:245-248), so `invf-anchor_test alloc-meta`
+    # CONSTRUCTS the geometry in RAM, the way leg 11 does: one superblock field
+    # pair per mode, the anchor's bitmap bit cleared first (the world a bitmap
+    # rebuild from replay leaves, and the only world in which the bug is
+    # reachable), every bit and field restored before close. No flush, no
+    # persist:
+    #
+    #   tail   the zone IS the tail ([anchor, anchor+2) -- the clamp in the
+    #          allocator leaves the anchor as the SINGLE candidate). Must
+    #          refuse, with the block byte-identical.
+    #   short  the same zone one block short of the tail ([anchor-1, anchor)).
+    #          The ordinary free block next to the anchor must be handed out,
+    #          or a guard that refused the whole zone would pass `tail` while
+    #          breaking every metadata write on the volume.
+    #   ro     `short` plus VOLF_READONLY. No bit may move: the latch has to run
+    #          before the scan's first bit_set.
+    echo "=== leg 12: the metadata base-page allocator must not hand out the anchor ==="
+    for mode in tail short ro; do
+        cp "$WORK/full.img" "$WORK/am-$mode.img" || fail "leg 12: cp $mode"
+        tailblk "$WORK/am-$mode.img" "$WORK/am-$mode.before"
+        OUT=$("$T" alloc-meta "$WORK/am-$mode.img" "$mode" 2>&1) \
+            || { echo "$OUT"; fail "leg 12: alloc-meta $mode could not build its geometry (see the message above); the leg would have been vacuous"; }
+        echo "$OUT" | sed 's/^/  /'
+        # Vacuity guards, asserted before anything else: the anchor must be the
+        # scan's ONLY candidate in `tail`, or the refusal proves nothing.
+        is "$OUT" ZONE_CANDIDATES 1 \
+            || fail "leg 12 ($mode): the injected zone has $(field "$OUT" ZONE_CANDIDATES) candidates, so 'the scan did not take the anchor' proves nothing"
+        tailblk "$WORK/am-$mode.img" "$WORK/am-$mode.after"
+        cmp -s "$WORK/am-$mode.before" "$WORK/am-$mode.after" \
+            || fail "leg 12 ($mode): RED CONTROL -- mb_alloc_meta_zone() handed out the ANC0 anchor as a metadata base page and mbuf_alloc's mb_write_empty() erased it. The volume's only second copy of RT30/SPT0 is gone."
+        is "$OUT" RETURNED_ANCHOR 0 \
+            || fail "leg 12 ($mode): the allocator RETURNED pba $(field "$OUT" ANCHOR_PBA) -- the anchor block -- as a metadata base page"
+        is "$OUT" ANCHOR_BIT_AFTER 0 \
+            || fail "leg 12 ($mode): the anchor's bitmap bit was SET by the metadata allocator"
+        is "$OUT" ANCHOR_METATYPE_AFTER 0 \
+            || fail "leg 12 ($mode): the anchor was typed META in meta_type_bitmap"
+        is "$OUT" ANCHOR_BYTES_CHANGED 0 \
+            || fail "leg 12 ($mode): the anchor block's bytes changed across the call"
+        P=$("$T" probe "$WORK/am-$mode.img" 2>&1) || { echo "$P"; fail "leg 12: probe $mode"; }
+        is "$P" ANCHOR_STATE ok \
+            || fail "leg 12 ($mode): the anchor no longer validates after the call (state '$(field "$P" ANCHOR_STATE)')"
+        if [ "$mode" = tail ]; then
+            # The refusal must be the SCAN'S verdict, not "the zone was never
+            # walked": a completed proven-empty scan is one run.
+            is "$OUT" SCAN_RUNS_DELTA 1 \
+                || fail "leg 12 (tail): the zone scan did not complete a proven-empty pass (SCAN_RUNS_DELTA=$(field "$OUT" SCAN_RUNS_DELTA)) -- the anchor was not considered, so the refusal proves nothing"
+            is "$OUT" RC 0 \
+                || fail "leg 12 (tail): the metadata allocator returned $(field "$OUT" RC) with the anchor as its only candidate -- expected 0 (no metadata block available)"
+            is "$OUT" BITS_CHANGED 0 \
+                || fail "leg 12 (tail): a bit in the allocation bitmap moved during a refused allocation"
+            note "tail: the anchor was the scan's only candidate, it was refused, and the block is byte-identical"
+        fi
+        if [ "$mode" = short ]; then
+            CAND=$(field "$OUT" CAND_PBA)
+            [ -n "$CAND" ] && [ "$CAND" != 0 ] \
+                || fail "leg 12 (short): the driver reported no control pba"
+            is "$OUT" CAND_BIT_BEFORE 0 \
+                || fail "leg 12 (short): the control block pba $CAND was already allocated, so its allocation would not be the ordinary kind"
+            is "$OUT" RC "$CAND" \
+                || fail "leg 12 (short): with the zone one block short of the tail the SAME call returned $(field "$OUT" RC), not the free block $CAND -- the guard refuses more than the anchor, and the refusing legs would prove nothing"
+            is "$OUT" CAND_BIT_AFTER 1 \
+                || fail "leg 12 (short): the returned block was not marked allocated"
+            note "short: the same call one block short of the tail SUCCEEDS (pba $CAND), anchor untouched"
+        fi
+        if [ "$mode" = ro ]; then
+            is "$OUT" READONLY 1 \
+                || fail "leg 12 (ro): the driver did not latch the volume read-only"
+            is "$OUT" RC 0 \
+                || fail "leg 12 (ro): a READ-ONLY volume's metadata allocator returned $(field "$OUT" RC)"
+            is "$OUT" BITS_CHANGED 0 \
+                || fail "leg 12 (ro): RED CONTROL -- the metadata allocator moved a bit in the allocation bitmap on a volume latched VOLF_READONLY. The latch runs after the zone scan, so a read-only volume is being changed by an allocating path."
+            is "$OUT" CAND_BIT_AFTER 0 \
+                || fail "leg 12 (ro): the block the scan would have taken ($(field "$OUT" CAND_PBA)) was marked allocated on a read-only volume"
+            note "ro: the latch runs before the scan -- no bit moved, nothing allocated"
+        fi
+    done
+    note "the metadata base-page allocator is guarded structurally, and it still allocates"
+}
+leg12
+
+echo
+echo "PASS:  metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat, extent-guard, metabuf-alloc-guard"
 exit 0
