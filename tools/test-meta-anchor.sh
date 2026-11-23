@@ -58,6 +58,15 @@
 #   leg 8  the fallback must not fire on a HEALTHY volume, and a healthy open
 #          must not print the recovery line -- a fallback that chatters is one
 #          nobody reads.
+#   leg 10 a LOST bitmap bit must not cost the volume its anchor: the bitmap is
+#          a derived cache, so the exclusion has to be structural.
+#   leg 11 the third allocator-shaped path: extend_meta_extent() must not GROW
+#          a metadata extent over the anchor. It used to decide "the adjacent
+#          run is free" from clear bits alone, and a clear bit is not proof of
+#          freedom -- leg 10 is the world in which the anchor's bit is clear.
+#          Two geometries that reach the anchor must refuse AND leave the
+#          block byte-identical; the same call one block further out must
+#          SUCCEED, so a blanket refusal cannot pass the leg.
 #
 # Run:  bash tools/run-e2e.sh tools/test-meta-anchor.sh
 #   or:  bash tools/test-meta-anchor.sh     (from make test)
@@ -374,5 +383,84 @@ SEQ1=$(printf '%s\n' "$P1" | sed -n 's/.*MIRROR_SEQ=\([0-9]*\).*/\1/p')
 note "leg 10: with its bitmap bit cleared, the anchor still validates and its seq advanced $SEQ0 -> $SEQ1"
 
 echo
-echo "PASS:  metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat"
+echo "=== leg 11: extend_meta_extent must not grow a metadata extent OVER the anchor ==="
+# The third allocator-shaped path. extend_meta_extent() (volume.c:2639) grows
+# a metadata extent in place when the adjacent run "is free", and it decided
+# that from the clear bits in v->bitmap and nothing else. A CLEAR BIT IS NOT
+# PROOF OF FREEDOM: the ANC0 anchor lies INSIDE the shadow zone's range, and
+# its bit is legitimately clear on a volume whose bitmap was rebuilt from
+# replay (no delta record ever names the block). That is leg 10's world, and
+# in it a metadata extent ending near the tail can be grown ACROSS the anchor,
+# marked allocated as metadata, and overwritten by the next metadata record --
+# taking the volume's only recoverable copy of RT30/SPT0 with it.
+#
+# `invf-anchor_test extend-meta` injects three geometries IN RAM (one mapper
+# entry, no flush, no MET0 persist, every bit restored before close) and calls
+# the real function, all with the same class bump (1 -> 2, 32 -> 64 blocks):
+#
+#   edge     the adjacent run STARTS at the anchor   (the guard's first test)
+#   runlast  the adjacent run ENDS at the anchor     (the guard's second test)
+#   shifted  the SAME CALL with the run one block further out -- free and
+#            unprotected -- which MUST succeed, or the two refusing legs above
+#            would be satisfied by a function that refuses every extension on
+#            the volume.
+#
+# The driver also performs the write the merge path would perform if the
+# extent had grown (records append at the extent's old end, i.e. the first
+# newly claimed block), so the byte assertion is measured, not assumed: in
+# `edge` that first newly claimed block IS the anchor. With the guard removed
+# this leg fails on ANCHOR_BYTES_CHANGED and on the cmp below, not merely on
+# the return code.
+for mode in edge runlast; do
+    cp "$WORK/full.img" "$WORK/xm-$mode.img" || fail "leg 11: cp $mode"
+    tailblk "$WORK/xm-$mode.img" "$WORK/xm-$mode.before"
+    OUT=$("$T" extend-meta "$WORK/xm-$mode.img" "$mode" 2>&1) \
+        || { echo "$OUT"; fail "leg 11: extend-meta $mode (the leg's geometry was not free -- it would have been vacuous)"; }
+    echo "$OUT" | sed 's/^/  /'
+    is "$OUT" RUN_FREE 1 \
+        || fail "leg 11 ($mode): the adjacent run was not free before the call, so the refusal below would prove nothing"
+    tailblk "$WORK/xm-$mode.img" "$WORK/xm-$mode.after"
+    cmp -s "$WORK/xm-$mode.before" "$WORK/xm-$mode.after" \
+        || fail "leg 11 ($mode): RED CONTROL -- extend_meta_extent() grew a metadata extent OVER the ANC0 anchor and the metadata record write that follows destroyed it. The volume's only second copy of RT30/SPT0 is gone."
+    is "$OUT" ANCHOR_BYTES_CHANGED 0 \
+        || fail "leg 11 ($mode): the anchor block's bytes changed across the call"
+    is "$OUT" RC 0 \
+        || fail "leg 11 ($mode): extend_meta_extent() returned $(field "$OUT" RC) for an adjacent run that reaches the anchor -- expected 0"
+    is "$OUT" ANCHOR_BIT_AFTER 0 \
+        || fail "leg 11 ($mode): the anchor block's BITMAP bit was set by the extension -- the block is now metadata-allocated"
+    is "$OUT" ANCHOR_METATYPE_AFTER 0 \
+        || fail "leg 11 ($mode): the anchor block was typed META in meta_type_bitmap by the extension"
+    is "$OUT" CLAIMED_ANCHOR 0 \
+        || fail "leg 11 ($mode): the mapper entry now claims the anchor block"
+    is "$OUT" RECORD_WRITE 0 \
+        || fail "leg 11 ($mode): a metadata record was written into the block the extension claimed"
+    P=$("$T" probe "$WORK/xm-$mode.img" 2>&1) || { echo "$P"; fail "leg 11: probe $mode"; }
+    is "$P" ANCHOR_STATE ok \
+        || fail "leg 11 ($mode): the anchor no longer validates after the refused extension (state '$(field "$P" ANCHOR_STATE)')"
+    note "$mode: refused, anchor bit/metatype untouched, block byte-identical"
+done
+cp "$WORK/full.img" "$WORK/xm-shifted.img" || fail "leg 11: cp shifted"
+tailblk "$WORK/xm-shifted.img" "$WORK/xm-shifted.before"
+OUT=$("$T" extend-meta "$WORK/xm-shifted.img" shifted 2>&1) \
+    || { echo "$OUT"; fail "leg 11: extend-meta shifted"; }
+echo "$OUT" | sed 's/^/  /'
+is "$OUT" RUN_FREE 1 || fail "leg 11 (shifted): the adjacent run was not free before the call"
+is "$OUT" RC 1 \
+    || fail "leg 11 (shifted): the SAME call with the run one block further from the anchor returned $(field "$OUT" RC), not 1 -- the guard refuses every extension, and rejected legs would prove nothing"
+is "$OUT" MAPPER_CLASS_AFTER 2 \
+    || fail "leg 11 (shifted): the extension did not land (mapper class $(field "$OUT" MAPPER_CLASS_AFTER), expected 2)"
+is "$OUT" RUN_BITS_SET_AFTER 32 \
+    || fail "leg 11 (shifted): the 32 newly claimed blocks were not marked in the bitmap ($(field "$OUT" RUN_BITS_SET_AFTER) set)"
+is "$OUT" CLAIMED_ANCHOR 0 \
+    || fail "leg 11 (shifted): a successful extension one block away still claims the anchor"
+is "$OUT" ANCHOR_BIT_AFTER 0 \
+    || fail "leg 11 (shifted): the anchor's bitmap bit was set by an extension that does not claim it"
+tailblk "$WORK/xm-shifted.img" "$WORK/xm-shifted.after"
+cmp -s "$WORK/xm-shifted.before" "$WORK/xm-shifted.after" \
+    || fail "leg 11 (shifted): a successful extension one block away still rewrote the anchor block"
+note "shifted: the same call one block away SUCCEEDS (class 2, 32 blocks marked), anchor untouched"
+note "the extent grow path is guarded structurally, and it still grows"
+
+echo
+echo "PASS:  metadata anchor (ANC0) -- reserve, refresh, recover, refuse, back-compat, extent-guard"
 exit 0

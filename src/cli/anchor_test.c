@@ -649,6 +649,232 @@ static int cmd_fill_tail(const char *img, const char *pattern)
     return 0;
 }
 
+/* ---- WP-ANCHOR-EXTEND: the metadata-extent grow path ------------------
+ *
+ * extend_meta_extent() (volume.c:2639) grows a metadata extent in place when
+ * the adjacent run "is free", and it used to decide that from the clear bits
+ * in v->bitmap alone. A CLEAR BIT IS NOT PROOF OF FREEDOM: the ANC0 tail
+ * anchor sits inside the shadow zone's range, and its bit is legitimately
+ * clear on a volume whose bitmap was rebuilt from replay (no delta record
+ * names the block -- see leg 10 of test-meta-anchor.sh). This command builds
+ * that geometry in RAM -- one mapper entry whose extent ends next to the
+ * anchor, its blocks marked the way alloc_meta_extent marks them -- calls the
+ * real extend_meta_extent(), and then performs the metadata record write the
+ * merge path would perform if the extent had grown. It prints KEY=VALUE; the
+ * suite decides, the driver only reports.
+ *
+ * Three modes, all with the same class bump (1 -> 2, 32 -> 64 blocks):
+ *
+ *   edge     the adjacent run STARTS at the anchor  -> the guard's 1st test
+ *   runlast  the adjacent run ENDS at the anchor    -> the guard's 2nd test
+ *   shifted  the SAME CALL one block further out: the run is [apba-32, apba),
+ *            free and unprotected, so it MUST succeed
+ *
+ * `shifted` is what keeps the two refusing modes honest: a function that
+ * refused every extension would pass `edge` and `runlast` while breaking
+ * every metadata write on the volume.
+ *
+ * The setup is RAM-only -- no meta_mapper_flush, no MET0 persist, no
+ * vol_flush, and every injected bit is restored before close -- so the image
+ * is untouched by the leg, EXCEPT in the one place it must not be: the anchor
+ * block, when the call wrongly succeeds and the record write lands on it.
+ */
+#define XM_OLD_CLASS 1      /* 128 KiB = 32 blocks */
+#define XM_NEW_CLASS 2      /* 256 KiB = 64 blocks, so adj = 32 blocks */
+
+static void xm_bit_clear(uint8_t *bm, uint64_t i)
+{
+    bm[i / 8] &= (uint8_t)~(1u << (i % 8));
+}
+
+static int cmd_extend_meta(const char *img, const char *mode)
+{
+    invfs_volume *v;
+    uint64_t apba, old_blocks, new_blocks, adj_blocks, ext_pba, run_pba;
+    uint64_t idx, saved_entry, saved_n, saved_free, saved_meta_free;
+    uint64_t k, claim_pba = 0, claim_blocks = 0;
+    uint8_t before[INVFS_BLOCK_SIZE], after[INVFS_BLOCK_SIZE];
+    int err, edge, runlast, shifted, ok;
+    int anchor_bit_orig, anchor_bit_after, anchor_meta_after, class_after;
+    int rc = 0, claimed_anchor = 0, rec_wrote = 0, bytes_changed = 0;
+    int run_bits_after = 0;
+
+    edge    = !strcmp(mode, "edge");
+    runlast = !strcmp(mode, "runlast");
+    shifted = !strcmp(mode, "shifted");
+    if (!edge && !runlast && !shifted)
+        return fail("extend-meta: unknown mode '%s' "
+                    "(edge|runlast|shifted)", mode);
+
+    v = vol_open(img, &err);
+    if (!v)
+        return fail("vol_open(%s) err=%d", img, err);
+    apba = anchor_pba(v);
+    old_blocks = (65536ULL << XM_OLD_CLASS) / INVFS_BLOCK_SIZE;   /* 32 */
+    new_blocks = (65536ULL << XM_NEW_CLASS) / INVFS_BLOCK_SIZE;   /* 64 */
+    adj_blocks = new_blocks - old_blocks;                         /* 32 */
+    /* The geometry must fit below the anchor, or there is nothing to place. */
+    if (!apba || apba < new_blocks + adj_blocks) {
+        vol_close(v);
+        return fail("no anchor pba with room below it for this volume "
+                    "(anchor_pba=%llu)", (unsigned long long)apba);
+    }
+
+    /* Place the extent so the adjacent run sits where this mode needs it. */
+    if (edge)
+        ext_pba = apba - old_blocks;                        /* run starts AT the anchor */
+    else if (runlast)
+        ext_pba = apba - old_blocks - (adj_blocks - 1);     /* run ends AT the anchor */
+    else
+        ext_pba = apba - new_blocks;                        /* run ends 1 block below it */
+    run_pba = ext_pba + old_blocks;
+
+    /* A leg that refuses for the ORDINARY reason ("the run is allocated")
+     * proves nothing about the guard, so check the geometry first and say so
+     * loudly rather than report a pass. */
+    ok = 1;
+    for (k = 0; k < old_blocks; k++)
+        if (bit_get(v->bitmap, ext_pba + k)) ok = 0;
+    if (!v->meta_mapper || v->meta_mapper_n >= INVFS_META_EXT_ENTRIES) ok = 0;
+    if (!ok) {
+        vol_close(v);
+        return fail("extend-meta %s: the %llu blocks below the anchor "
+                    "(from %llu) are not free on this image, so the leg "
+                    "would be vacuous", mode,
+                    (unsigned long long)old_blocks,
+                    (unsigned long long)ext_pba);
+    }
+    /* Every block the extension would claim counts as free BEFORE the call,
+     * apart from the anchor bit -- which is the whole point, and which is
+     * cleared below to reproduce a rebuilt bitmap. */
+    for (k = 0; k < adj_blocks; k++) {
+        if (run_pba + k != apba && bit_get(v->bitmap, run_pba + k)) ok = 0;
+    }
+    if (!ok) {
+        vol_close(v);
+        return fail("extend-meta %s: a block in the adjacent run "
+                    "[%llu, %llu) is already allocated, so the leg would "
+                    "be vacuous", mode,
+                    (unsigned long long)run_pba,
+                    (unsigned long long)(run_pba + adj_blocks));
+    }
+
+    idx = v->meta_mapper_n;
+    saved_entry = v->meta_mapper[idx];
+    saved_n = v->meta_mapper_n;
+    saved_free = v->free_blocks;
+    saved_meta_free = v->meta_free_blocks;
+    anchor_bit_orig = bit_get(v->bitmap, apba);
+
+    /* THE WORLD A BITMAP REBUILD LEAVES: the anchor's bit is clear, the rest
+     * of the volume exactly as it is. This is leg 10's finding, and it is the
+     * only world in which the bug is reachable. */
+    xm_bit_clear(v->bitmap, apba);
+
+    /* alloc_meta_extent's own marking: the extent's blocks are allocated and
+     * typed META. */
+    for (k = 0; k < old_blocks; k++) {
+        bit_set(v->bitmap, ext_pba + k);
+        if (v->meta_type_bitmap)
+            bit_set(v->meta_type_bitmap, ext_pba + k);
+    }
+    v->meta_mapper[idx] = invfs_meta_ext_encode(ext_pba, XM_OLD_CLASS);
+    v->meta_mapper_n = idx + 1;
+
+    if (io_pread(&v->io, apba * (uint64_t)INVFS_BLOCK_SIZE, before,
+                 sizeof before) != 0) {
+        vol_close(v);
+        return fail("cannot read the anchor block");
+    }
+
+    /* THE CALL UNDER TEST -- the same one vol_meta_merge.c:170 makes. */
+    rc = extend_meta_extent(v, idx, XM_NEW_CLASS);
+
+    if (v->meta_mapper) {
+        uint64_t e = v->meta_mapper[idx];
+        claim_pba = invfs_meta_ext_pba(e);
+        class_after = invfs_meta_ext_class(e);
+        claim_blocks = invfs_meta_ext_size(e) / INVFS_BLOCK_SIZE;
+        claimed_anchor = (apba >= claim_pba &&
+                          apba < claim_pba + claim_blocks) ? 1 : 0;
+    } else {
+        class_after = -1;
+    }
+    anchor_bit_after = bit_get(v->bitmap, apba);
+    anchor_meta_after = v->meta_type_bitmap
+                        ? bit_get(v->meta_type_bitmap, apba) : -1;
+    for (k = 0; k < adj_blocks; k++)
+        if (bit_get(v->bitmap, run_pba + k)) run_bits_after++;
+
+    /* THE RECORD WRITE. The merge path's next step after a GRANTED extension
+     * is to append at the extent's old end (pba + offset, and the offset was
+     * already at the old size). If -- and only if -- the mapper now claims
+     * blocks past that point, the write lands in the newly claimed region,
+     * and in `edge` mode its FIRST block is the anchor. So the write is not
+     * staged: no claim, no write. */
+    if (claim_blocks > old_blocks) {
+        uint8_t rec[INVFS_BLOCK_SIZE];
+        memset(rec, 0x5A, sizeof rec);
+        memcpy(rec, "INVFS-META-RECORD-OVERWRITE", 28);
+        if (io_pwrite(&v->io, (claim_pba + old_blocks) * (uint64_t)INVFS_BLOCK_SIZE,
+                      rec, sizeof rec) == 0)
+            rec_wrote = 1;
+        blkio_force_flush(&v->io);
+    }
+
+    if (io_pread(&v->io, apba * (uint64_t)INVFS_BLOCK_SIZE, after,
+                 sizeof after) != 0) {
+        vol_close(v);
+        return fail("cannot re-read the anchor block");
+    }
+    bytes_changed = memcmp(before, after, sizeof before) != 0;
+
+    printf("MODE=%s ANCHOR_PBA=%llu EXT_PBA=%llu RUN_PBA=%llu RC=%d "
+           "SPAN_FREE=1 RUN_FREE=1 ANCHOR_BIT_ORIGINAL=%d "
+           "ANCHOR_BIT_AFTER=%d ANCHOR_METATYPE_AFTER=%d "
+           "MAPPER_CLASS_AFTER=%d MAPPER_CLAIM_BLOCKS=%llu "
+           "CLAIMED_ANCHOR=%d RUN_BITS_SET_AFTER=%d RECORD_WRITE=%d "
+           "RECORD_WRITE_PBA=%llu ANCHOR_BYTES_CHANGED=%d "
+           "FREE_BLOCKS_DELTA=%lld\n",
+           mode, (unsigned long long)apba, (unsigned long long)ext_pba,
+           (unsigned long long)run_pba, rc, anchor_bit_orig,
+           anchor_bit_after, anchor_meta_after, class_after,
+           (unsigned long long)claim_blocks, claimed_anchor, run_bits_after,
+           rec_wrote, (unsigned long long)(rec_wrote ? claim_pba + old_blocks : 0),
+           bytes_changed, (long long)(saved_free - v->free_blocks));
+
+    /* Put the RAM back the way the open found it, so closing this handle
+     * cannot propagate the synthetic geometry anywhere (nothing here dirties
+     * the volume, so vol_close writes nothing -- this is belt and braces).
+     * The anchor BLOCK is deliberately not restored: if it was written, the
+     * suite has to see it. */
+    for (k = 0; k < old_blocks; k++) {
+        xm_bit_clear(v->bitmap, ext_pba + k);
+        if (v->meta_type_bitmap)
+            xm_bit_clear(v->meta_type_bitmap, ext_pba + k);
+    }
+    for (k = 0; k < adj_blocks; k++) {
+        if (run_pba + k == apba)
+            continue;
+        xm_bit_clear(v->bitmap, run_pba + k);
+        if (v->meta_type_bitmap)
+            xm_bit_clear(v->meta_type_bitmap, run_pba + k);
+    }
+    if (anchor_bit_orig)
+        bit_set(v->bitmap, apba);
+    else
+        xm_bit_clear(v->bitmap, apba);
+    if (v->meta_type_bitmap)
+        xm_bit_clear(v->meta_type_bitmap, apba);
+    v->meta_mapper[idx] = saved_entry;
+    v->meta_mapper_n = saved_n;
+    v->free_blocks = saved_free;
+    v->meta_free_blocks = saved_meta_free;
+
+    vol_close(v);
+    return 0;
+}
+
 static int dump_block(const char *img, int at_tail, int only_anchor)
 {
     uint8_t blk[INVFS_BLOCK_SIZE];
@@ -682,8 +908,8 @@ int main(int argc, char **argv)
     if (argc < 3) {
         fprintf(stderr, "usage: %s <build|readback|reserve|writecycle|probe|"
                         "readback-gen|corrupt-rt30|teleport-anchor|patch-fingerprint|"
-                        "corrupt-anchor-crc|fill-tail|block0|anchorhex> "
-                        "<img> [args]\n", argv[0]);
+                        "corrupt-anchor-crc|fill-tail|block0|anchorhex|"
+                        "extend-meta> <img> [args]\n", argv[0]);
         return 2;
     }
     if (!strcmp(argv[1], "build") && argc == 4)
@@ -716,6 +942,8 @@ int main(int argc, char **argv)
         return dump_block(argv[2], 0, 1);
     if (!strcmp(argv[1], "anchorhex") && argc == 3)
         return dump_block(argv[2], 1, 1);
+    if (!strcmp(argv[1], "extend-meta") && argc == 4)
+        return cmd_extend_meta(argv[2], argv[3]);
     fprintf(stderr, "FAIL: bad arguments\n");
     return 2;
 }
