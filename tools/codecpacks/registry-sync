@@ -41,8 +41,13 @@
 # Makefile:52 keeps /usr/lib/invfs/codecpacks out of `make test`, and
 # Makefile:402 ships the directory in the release tarball.
 
-# --- byte-identical to the registry (jxlest.c, raw_image.py, splt.py) ------
-jxl          mirror  -           -
+# --- byte-identical to the registry (raw_image.py, splt.py) ----------------
+#  jxl moved OUT of this section in WP-CODECPACK-RESYNC: jxlest.c gained the
+#  ADR-007 plugin glue (WP615) and a cmd_estimate()/main() split, so it is a
+#  fork now -- the registry copy is exactly the engine copy minus the glue,
+#  verified by layer C below. Its manifest `requires = cjxl,djxl` also came
+#  back to the registry, which had lost it (the engine probes it; see
+#  src/codecs/codec.c:1036).
 raw_image    mirror  -           -
 splt_test    mirror  -           -
 
@@ -86,11 +91,45 @@ fatfs        fork    -           -
 # other engine-first packs. No generation macro: the manifest's
 # 'generation = 1' is the only declaration.
 iso9660      fork    -           -
+
+# --- WP-CODECPACK-RESYNC: the forks, after the registry was brought up to
+#     this tree. Every line above this comment was written when the registry
+#     was still missing four things the engine side already had; all four
+#     were ported FORWARD (vendored -> registry) by that WP, so the remaining
+#     fork delta is the ADR-007 glue and nothing else:
+#
+#       1. 4db1872's member-bound raise (2^20) and vdi/fatfs's derived
+#          MAP_MAX_ENTS, plus rawdisk's hardcoded 65536u in its recipe
+#          reader, which outlived the define above it by one bump.
+#       2. WP640's ntfs MAX_IMAGE 4 GiB -> 1 TiB.
+#       3. WP140's p7z extract_batch (one header parse for the whole member
+#          set) and the O(n) kName index that came with it.
+#       4. jxlest's cmd_estimate() split (WP615), minus the plugin glue.
+#
+#     Direction, measured, not assumed: `git -C <registry> diff` on these
+#     six packs shows ADDED bound-bump lines on the engine side and none on
+#     the registry side, i.e. the registry was STALE, which is what the
+#     CORRECTION above says and what the "registry has code the vendored copy
+#     lacks" message cannot tell you on its own (it names the direction of
+#     the ADDED line, not of the change).
+#
+#     Each ported file was compiled standalone in the registry's own shape --
+#     `cc -std=c11 -O2 -Wall -Wextra -Werror -c` with no engine headers -- and
+#     the registry's `make test` (tools/test-invf-pack.sh) went from 22 passed
+#     / 3 failed to 25 passed / 0 failed on the same box: the two ext4fs
+#     failures were its sha256 having gone stale when 27f6143 touched
+#     ext4fs.c, and the third was p7z's missing `depends = 7zz`.
 ntfs         fork    -           -
 p7z          fork    -           -
 rawdisk      fork    -           -
 vdi          fork    -           -
 xfs          fork    -           -
+# jxl: a codecpack fork, not a mirror any more -- its only delta is the
+# ADR-007 glue (the .so export block plus the __has_include chain), because
+# jxlest.c is a WP615 plugin target. The shared cmd_estimate() body means the
+# CLI and the .so cannot disagree, which is also why the registry copy carries
+# that split: layer C compares the two files line by line.
+jxl          fork    -           -
 
 # --- qcow2: a real FORK, not staleness. -----------------------------------
 # The engine pack and the registry pack are two different designs:
@@ -105,7 +144,23 @@ xfs          fork    -           -
 # Q2R3 recipe" on the compressed fixture). Reconciling the two is a design
 # WP of its own; until then the two generation numbers MUST NOT be made to
 # agree, which is why they are excepted here instead of "fixed".
-qcow2        independent  generation,pack_version  QCOW2_DECOMP_GEN
+#
+# `map` is excepted for the same reason, and it is the one key in this file
+# whose exception is not a lag but a per-implementation ABI pairing:
+#   engine   map {recipe} {out} -- cmd_map() loads the Q2R3/Q2R1 RECIPE
+#            (qc_map_load, tools/codecpacks/qcow2.codecpack/qcow2.c:1261)
+#            because the deflate reproduction parameters only exist there.
+#   registry map {in} {out}     -- cmd_map() parses the IMAGE (qc_parse,
+#            codecpacks/qcow2/1.0.0/qcow2.c) and re-derives the layout from
+#            the L1/L2 tables, which is what its one-member design allows.
+# The engine passes BOTH operands and the manifest template decides which one
+# the pack is handed (src/core/vol_cpack.c:4706-4715 spells the rule out and
+# names qcow2 as the case that needs {recipe}); each manifest is therefore
+# correct for its own source, and forcing either value on the other side
+# breaks that side's map. `decomp_gen` is NOT excepted: the registry copy
+# renders a v1 MRMP map, so declaring it is inert now and correct if the map
+# ever becomes v2 (src/core/vol_cpack.c:4721 stamps only an MRM2 header).
+qcow2        independent  generation,pack_version,map  QCOW2_DECOMP_GEN
 
 # --- wim: engine-ORIGINATED, the registry has no copy at all. --------------
 # WP637 vendored this pack here first; the registry was seeded from this tree

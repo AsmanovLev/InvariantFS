@@ -8,6 +8,15 @@ PKGBUILD text eol=lf
 template text eol=lf
 Makefile text eol=lf
 
+# The vendored codecpack tree is BYTE-COMPARED against the registry checkout
+# by tools/check-codecpack-sync.sh layer C (`mirror` packs must be identical).
+# A host whose checkout is CRLF turns every mirror pack into a false drift
+# report -- measured on the Windows box: raw_image.py and splt.py differed by
+# 714 and 163 lines respectively while their git blobs were identical
+# (61a225e, 2f6c255 in both repos). Pin the line endings instead of loosening
+# the check.
+tools/codecpacks/** text eol=lf
+
 # GitHub's language stats (and therefore any code-size badge) count vendored
 # sources as the project's own unless told otherwise. Measured before this
 # line existed: C = 10 431 746 B, roughly double what the project itself has
