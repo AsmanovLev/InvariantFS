@@ -183,17 +183,28 @@ udevadm settle 2>/dev/null || sleep 2
 #     "image is in use by another process (flock: Resource temporarily unavailable)"
 # Measured 2026-11-23 in engine-ci on void/arch/debian/gentoo: invf-fsck ran
 # three seconds after a successful umount and was refused with exactly that
-# line, so the installation was fine and the VERIFICATION failed. NixOS has
-# carried `fuser -km` since its setup was written; the other six never got it.
-# Kill the daemon and wait for it to go instead of sleeping a fixed second: the
-# runner's load decides how long the exit takes.
-fuser -km /mnt 2>/dev/null || true
-for _i in $(seq 1 100); do
+# line, so the installation was fine and the VERIFICATION failed.
+#
+# Kill it by NAME and wait for it to go. Not `fuser -km <mountpoint>`: after a
+# successful umount the mount point is detached, so fuser no longer attributes
+# the daemon's open files to it and finds nothing -- checked locally, a live
+# process named invf-fuse survives `fuser -km` on a path it does not hold open.
+# Not a fixed sleep either: the runner's load decides how long the exit takes,
+# and the three seconds this setup used to give it were not enough.
+pkill -x invf-fuse 2>/dev/null || true
+for _i in $(seq 1 10); do
     pgrep -x invf-fuse >/dev/null 2>&1 || break
     sleep 0.2
 done
 if pgrep -x invf-fuse >/dev/null 2>&1; then
-    say "invf-fuse still holds the volume after umount: pid $(pgrep -x invf-fuse | tr '
+    pkill -9 -x invf-fuse 2>/dev/null || true
+    for _i in $(seq 1 10); do
+        pgrep -x invf-fuse >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+fi
+if pgrep -x invf-fuse >/dev/null 2>&1; then
+    say "invf-fuse survived SIGTERM and SIGKILL: $(pgrep -x invf-fuse | tr '
 ' ' ')"
 fi
 
