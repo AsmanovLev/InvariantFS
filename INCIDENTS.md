@@ -3438,3 +3438,66 @@ in-soak proven-exhausted accept).
   regression test needs at least a sparse-dirty bitmap on a ≥64 GB loop image
   (span vs touched-block bytes) and a drain-hold time assertion on a pending
   set of ≥100 inodes.
+
+## OPEN (2026-11-23) — an installed root hangs mid-boot on InvFS: void freezes in dracut before switch_root, arch freezes in systemd after udev coldplug, gentoo boots
+
+**Status:** OPEN. Installation is not the problem any more (see below); the boot
+of the installed rootfs is. Found the moment the post-install fsck stopped
+masking it.
+
+What the engine-ci run on `96db43a` says, per distro:
+
+| job | setup | boot |
+|---|---|---|
+| `installation-iso-gentoo` | PASS | **PASS** (whole job green, 13:15→14:04) |
+| `installation-iso-void` | PASS 13:48:40 `root=/dev/vda2 esp=/dev/vda1` | freeze, 900 s timeout |
+| `installation-iso-arch` | PASS 14:02:13 | freeze, 900 s timeout |
+| `installation-iso-nixos` | FAIL 13:48:41 (the flock race, fixed in `96db43a`) | n/a |
+| `installation-iso-alpine` | FAIL (ISO URL 404, fixed in `3d68588`) | n/a |
+
+The two freezes stop at different places and neither prints a panic:
+
+* **void** (`iso-void-install-logs/serial-bootloader.log`, last lines, guest
+  time ~181 s, then twelve minutes of silence):
+  ```
+  => FUSE root detected; skipping root fsck/remount and mount -a
+  => Initializing swap...
+  => Seeding random number generator...
+  ```
+  i.e. the project's own dracut path, after the root is up, before
+  `switch_root`. `boot-void-qemu.sh` then reports
+  `FAIL: did not reach runit stage 2 within 900s`.
+* **arch** (same artifact shape): the installed system boots *all the way into
+  systemd* — it mounts proc/sys/tmp/debugfs/configfs/fusectl, finishes
+  "Remount Root and Kernel File Systems", starts "Coldplug All udev Devices",
+  and then nothing for eleven minutes:
+  ```
+  [ OK ] Mounted Kernel Debug File System.
+  [ OK ] Mounted FUSE Control File System.
+  (11 minutes of silence)
+  FAIL: login prompt never appeared
+  ```
+
+Not TCG slowness by itself: gentoo completed the same post-install boot under
+the same `accel=tcg` fallback in the same run, and both frozen guests stop
+emitting within ~3 s of guest time and then stay silent.
+
+The common shape is **many concurrent metadata operations on InvFS around udev
+coldplug** (both stop in/just after it; arch in systemd's coldplug, void in the
+dracut stage that ends with a settled device set). Two candidates, and the first
+test distinguishes them:
+
+1. a lost wakeup / deadlock in the engine's locking under concurrent lookup,
+   which would show up as tasks blocked forever in the kernel module;
+2. the same shape in the FUSE path, if the void initramfs mounted the root with
+   `invf-fuse` rather than the module (the "FUSE root detected" line says the
+   dracut branch believes it is FUSE — and `rootfstype=invfs` in the grub
+   cmdline written by `invf-boot-setup` is the module).
+
+Next step, in this order: reproduce with KVM
+(`WORK=... bash tools/iso-void-install.sh`, then
+`bash tools/boot-void-qemu.sh --bootloader` on the volume it leaves) and, on the
+freeze, get a task dump rather than another silent timeout — SysRq-w over the
+serial console, or `info registers` on the QEMU monitor to separate "all vCPUs
+idle" (a lost wakeup) from "a vCPU spinning". WSL on this box has no
+`/dev/kvm`, so the repro needs the bare-metal/KVM host.
