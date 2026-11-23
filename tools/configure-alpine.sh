@@ -39,10 +39,15 @@ EOF
 printf 'nameserver 10.0.2.3\nnameserver 1.1.1.1\n' > "$E/resolv.conf"
 
 # --- apk repositories -----------------------------------------------------
+# v<major>.<minor>, from the root tree being configured when it says, otherwise
+# from the one place this branch is written down. It is NOT the release string:
+# `/.24` (a lost `v3`) is what broke the alpine ISO job, see the same fix in
+# tools/iso-guest-alpine-setup.sh.
 mkdir -p "$E/apk"
-cat > "$E/apk/repositories" <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/.24/main
-https://dl-cdn.alpinelinux.org/alpine/.24/community
+ALPINE_BRANCH="${INVFS_ALPINE_BRANCH:-v$(cut -d. -f1-2 "$E/alpine-release" 2>/dev/null || echo 3.24)}"
+cat > "$E/apk/repositories" <<EOF
+https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main
+https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/community
 EOF
 
 # --- serial console: autologin root on ttyS0 ------------------------------
