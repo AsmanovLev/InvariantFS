@@ -55,11 +55,23 @@
 #define IVPACK_UNUSED
 #endif
 
-/* The pack's own exit-code convention (all containerpacks agree). */
+/* The pack's own exit-code convention (all containerpacks agree).
+ *
+ * IVPACK_RC_DECLINE_SOLID is the same "honest refusal" as DECLINE, with one
+ * extra fact: the container was READ and understood, and the reason it cannot
+ * be decomposed is that it is SOLID -- its members are not addressable in the
+ * stored bytes (a 7z solid block, a WIM .esd solid resource), so per-member
+ * decomposition would store the archive twice and pay a full unpack to do it
+ * (ADR-015 decision 7). The core stamps INVFS_CLASS_GENERIC_SOLID and stops
+ * retrying; INVFS_CPACK_SOLID=1 makes the core treat it as a plain decline
+ * again for the operator who wants to pay for it. A v1/v2 pack never emits
+ * this code, so the value is additive in both directions: an older core sees
+ * a non-zero status and abandons exactly as it does today. */
 #define IVPACK_RC_OK       0
 #define IVPACK_RC_ERROR    1
 #define IVPACK_RC_USAGE    2
 #define IVPACK_RC_DECLINE  3
+#define IVPACK_RC_DECLINE_SOLID 5
 
 /* ------------------------------------------------------------------ */
 /* fork-guarded command run                                            */
@@ -209,22 +221,29 @@ static int PREFIX##_iv_body(void *user)                                      \
                                                                              \
 int ivpack_container_cmd(const ivpack_container_args *args)                  \
 {                                                                            \
+    int has_in;                                                              \
+    /* ABI v3 (ADR-015): a command that reads the container accepts EITHER a
+     * path (the CLI helper, the out-of-process daemon, a v1/v2 host) OR host
+     * I/O callbacks. The host never fills both, and it fills `io` only for a
+     * pack that declares IVPACK_F_HOST_IO, so this relaxation is invisible
+     * to every pack that does not ask for it. */                            \
     if (!args)                                                               \
         return -IVPACK_RC_ERROR;                                             \
+    has_in = (args->in_path || (args->io && args->io->pread));                \
     switch (args->cmd) {                                                     \
     case 1:                                                                  \
     case 3:                                                                  \
-        if (!args->in_path || !args->out_path)                               \
+        if (!has_in || !args->out_path)                                      \
             return -IVPACK_RC_USAGE;                                         \
         break;                                                               \
     case 5:                                                                  \
-        if ((!args->in_path && !args->recipe_path) || (!args->out_path && !args->out_buf)) \
+        if ((!has_in && !args->recipe_path) || (!args->out_path && !args->out_buf)) \
             return -IVPACK_RC_USAGE;                                         \
         if (args->out_buf && args->out_cap > 0)                              \
             return PREFIX##_iv_call_map(args);                               \
         break;                                                               \
     case 2:                                                                  \
-        if (!args->in_path || !args->extract_idx || !args->out_path)          \
+        if (!has_in || !args->extract_idx || !args->out_path)                \
             return -IVPACK_RC_USAGE;                                         \
         break;                                                               \
     case 4:                                                                  \

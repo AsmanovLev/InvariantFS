@@ -49,10 +49,15 @@ extern "C" {
 
 /* Versioned C ABI. The major MUST equal IVPACK_API_VERSION: a plugin
  * whose desc->api_version major differs is refused (fallback to IPC).
- * Minor drift within a major is accepted — v1/v2 field-append history in
- * ivpack_api.h is backward compatible by construction (the host fills v2
- * fields only when desc->api_version >= 2). */
-#define INVFS_CODEC_ABI_MAJOR 2
+ * Minor drift within a major is accepted — the v1/v2/v3 field-append
+ * history in ivpack_api.h is backward compatible by construction (the host
+ * fills the v2 fields only when desc->api_version >= 2, and ABI v3's `io`
+ * only when the pack is >= 3 AND declares IVPACK_F_HOST_IO).
+ *
+ * The number tracks IVPACK_API_VERSION because a pack built against this
+ * tree reports the header it was built with: leaving it behind would refuse
+ * every freshly built plugin in-process for a version nobody changed. */
+#define INVFS_CODEC_ABI_MAJOR 3
 #define INVFS_CODEC_ABI_MINOR 0
 
 /* Pilot allowlist: the only pack names this WP ever loads in-process.

@@ -20,6 +20,7 @@ This map answers "where does X live". Source layout is in `FILEMAP.md`;
 | write path, sessions, ESTALE, xattrs | `vol_write.c`, `fuse_fs.c` | ADR-009 (durability) |
 | sweep: walk, class policy, text/binary batches, migration | `vol_sweep.c`, `vol_textzone.c`, `vol_cpack.c`, `vol_heat.c` | ADR-010-amendment2 |
 | containerpacks + codecpack plugin ABI | `vol_cpack.c`, `codec.c/h`, `ivpack_api.h`, `tools/codecpacks/*/` | ADR-007 |
+| containerpack host I/O (ABI v3 `ivpack_host_io`: ranged reads, no pin, the in-process dispatcher and its containment) | `vol_cpack_hostio.c/h`, `helper_exec.c/h`, `ivpack_api.h`, `ivpack_impl.h` | ADR-015 |
 | codecs (zlib repro, ppmd, zstd, lz4, crc32c) | `deflate_repro.c`, `deflate_backend_zlib.c`, `ppmd_codec.c`, `crc32c.c` | — |
 | dedupe, heat, tiering | `vol_dedupe.c`, `vol_heat.c`, `vol_tier.c` | — |
 | crash recovery, fsck, seal | `vol_crash.c`, `vol_fsck.c`, `src/cli/fsck.c`, `vol_seal.c`, `vol_repair.c` | ADR-009 |

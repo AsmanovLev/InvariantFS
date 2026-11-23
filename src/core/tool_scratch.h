@@ -1,11 +1,18 @@
 /* tool_scratch.h — WHERE the tool pipeline's intermediate files live.
  *
- * The containerpack sweep pins a whole container and then extracts every
- * member of it (src/core/vol_cpack.c), so the scratch peak is roughly twice
- * the container. Where that lands used to be "the first /dev/shm or /tmp
- * that mkdtemp() accepted", with nothing anywhere asking whether the chosen
- * root can hold the job -- on a host where both of those are tmpfs, that is
- * RAM, and the pin is what fills it.
+ * The containerpack sweep extracts every member of a container into scratch
+ * (src/core/vol_cpack.c), and -- for a pack that does NOT speak ABI v3 host
+ * I/O -- first writes the whole container there as well (the "pin"), so that
+ * pack's peak is roughly twice the container. ABOVE one container that is the
+ * number this policy exists for: where it lands used to be "the first
+ * /dev/shm or /tmp that mkdtemp() accepted", with nothing anywhere asking
+ * whether the chosen root can hold the job -- and on a host where both of
+ * those are tmpfs, that is RAM.
+ *
+ * ADR-015 removes the pin for a v3 pack (src/core/vol_cpack_hostio.c), so the
+ * demand it declares is the member total, which is what phase 2 of the sweep
+ * prices; a v1/v2 pack, a CLI-only pack and an .ivpack archive still ask for
+ * the pin and still need a root that can hold the container.
  *
  * This module owns the choice. It is a policy, not a convenience: it is
  * deliberately small and dependency-free so that the codecpack trampolines

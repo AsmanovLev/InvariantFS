@@ -633,9 +633,8 @@ static void helper_child_setup(const invfs_helper_sandbox *sb, int sbmode,
                                char *const argv[], uint64_t mem_cap,
                                uint64_t timeout_ms, int is_root,
                                uid_t h_uid, gid_t h_gid,
-                               const char *work_dir)
+                               const char *work_dir, int keep_fds)
 {
-    (void)argv;
 
     (void)setpgid(0, 0);
     helper_netns();
@@ -657,7 +656,13 @@ static void helper_child_setup(const invfs_helper_sandbox *sb, int sbmode,
                               h_uid, h_gid) != 0)
             _exit(126);
     }
-    helper_close_inherited();
+    /* keep_fds: the in-process ABI v3 pack child serves the host-I/O
+     * callbacks over the volume descriptor it inherited (blkio keeps one open
+     * for the whole session), so it must not be closed. Landlock does not
+     * restrict I/O on an already-open descriptor, so this widens the sandbox
+     * by nothing: no new path becomes reachable, the child simply keeps using
+     * the one the daemon already had open. */
+    if (!keep_fds) helper_close_inherited();
 }
 
 static void helper_kill_group(pid_t pid)
@@ -771,7 +776,7 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
         if (dn > STDERR_FILENO) close(dn);
 
         helper_child_setup(sb, sbmode, argv, mem_cap, tmo, is_root,
-                           h_uid, h_gid, work_dir);
+                           h_uid, h_gid, work_dir, 0);
 
         /* ADR-007: direct in-memory execution from uncompressed .ivpack archive */
         if (argv[0]) {
@@ -805,6 +810,62 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
     return helper_wait(pid, capture, pfd[0], out, out_cap, tmo, argv[0]);
 }
 
+/* ABI v3 (ADR-015): run a pack's container command in a contained child of
+ * THIS process, because the host-I/O callbacks cannot cross an execve.
+ * Everything the exec path guarantees about the child is applied first
+ * (setpgid, netns, rlimits, no_new_privs, Landlock whitelist, env scrub,
+ * privilege drop when root); the only differences are the two documented in
+ * helper_exec.h -- inherited descriptors stay open, and nothing is exec'd. */
+int invfs_helper_run_child(int (*fn)(void *), void *user, uint64_t mem_cap,
+                           const invfs_helper_sandbox *sb,
+                           const char *work_dir, const char *argv_hint,
+                           uint64_t timeout_ms)
+{
+    pid_t pid;
+    int sbmode;
+    int is_root;
+    int verbose;
+    uid_t h_uid = 0;
+    gid_t h_gid = 0;
+    uint64_t tmo;
+    char *hargv[2];
+    char hint[4096];
+
+    if (!fn) return -1;
+    tmo = helper_timeout_ms(timeout_ms);
+    sbmode = sb ? pack_sandbox_mode() : 0;
+    is_root = (getuid() == 0);
+    verbose = helper_verbose();
+    if (is_root) (void)helper_target_ids(&h_uid, &h_gid);
+    hargv[0] = (char *)argv_hint;
+    hargv[1] = NULL;
+    if (argv_hint && realpath(argv_hint, hint)) hargv[0] = hint;
+
+    if (verbose) {
+        fprintf(stderr, "helper_exec: [%d] run-child %s\n",
+                (int)getpid(), argv_hint ? argv_hint : "(no hint)");
+        fflush(stderr);
+    }
+
+    pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int dn = open("/dev/null", O_RDWR);
+        if (dn >= 0) {
+            dup2(dn, STDIN_FILENO);
+            dup2(dn, STDOUT_FILENO);
+            if (!verbose) dup2(dn, STDERR_FILENO);
+            if (dn > STDERR_FILENO) close(dn);
+        }
+        helper_child_setup(sb, sbmode, hargv, mem_cap, tmo, is_root,
+                           h_uid, h_gid, work_dir, 1);
+        _exit(fn(user) & 0xff);
+    }
+    (void)setpgid(pid, pid);
+    return helper_wait(pid, 0, -1, NULL, 0, tmo,
+                       argv_hint ? argv_hint : "(in-process pack)");
+}
+
 #else  /* _WIN32: the POSIX launcher does not exist; callers keep their
         * own CreateProcessW paths. */
 int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
@@ -816,6 +877,16 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
 {
     (void)argv; (void)mem_cap; (void)sb; (void)work_dir;
     (void)no_path_search; (void)out; (void)out_cap; (void)timeout_ms;
+    return -1;
+}
+
+int invfs_helper_run_child(int (*fn)(void *), void *user, uint64_t mem_cap,
+                           const invfs_helper_sandbox *sb,
+                           const char *work_dir, const char *argv_hint,
+                           uint64_t timeout_ms)
+{
+    (void)fn; (void)user; (void)mem_cap; (void)sb; (void)work_dir;
+    (void)argv_hint; (void)timeout_ms;
     return -1;
 }
 #endif /* !_WIN32 */

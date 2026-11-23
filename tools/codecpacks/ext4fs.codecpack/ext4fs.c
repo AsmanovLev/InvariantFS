@@ -148,6 +148,10 @@
 #include <unistd.h>
 
 #define EX_DECLINE 3        /* honest refusal: unsupported / unprovable */
+/* Same refusal, with the one fact the core acts on: the file is a SOLID
+ * archive (ADR-015 decision 7). Only the test hook in cmd_enumerate emits it
+ * here; p7z/wim are the packs that can really meet one. */
+#define EX_DECLINE_SOLID IVPACK_RC_DECLINE_SOLID
 #define EX_ERROR   1        /* content error (rebuild mismatch, junk)   */
 #define EX_USAGE   2        /* argv error                              */
 #define EX_IO      4        /* I/O or allocation failure               */
@@ -280,6 +284,45 @@ static int write_at(int fd, uint64_t off, const void *buf, size_t len)
     return 0;
 }
 
+/* ---- image source: a file, or ABI v3 host callbacks (ADR-015) --------
+ *
+ * Every byte this pack reads from the container goes through one of two
+ * places: read_at() on an open image (the CLI, and the core's exec path), or
+ * io->pread when the host handed the container's bytes over as callbacks
+ * instead of a path. The second form is what lets the core
+ * decompose an image it never materializes -- a 100 GiB guest disk costs the
+ * scratch it needs for ONE member, not twice its own size.
+ *
+ * stdio has done this for decades; the point of doing it here is that the
+ * alternative (a path) does not exist for a container that is too big to be
+ * written out, and inventing a device node for it is exactly what ADR-015
+ * refuses (kernel module or CAP_SYS_ADMIN to hand a pack a fake file).
+ *
+ * Nothing else changes: the same parse, the same extents, the same recipe,
+ * byte-identical by construction because the bytes are the same bytes. */
+typedef struct {
+    int                   fd;      /* >= 0: a real file            */
+    const ivpack_host_io *io;      /* non-NULL: ranged host reads  */
+} e4src;
+
+/* Read exactly len bytes at off. 0 = ok, -1 = short/error. A host callback
+ * may legally answer short only at the end of the handle, and an image parse
+ * never asks past that, so any shortfall is an I/O error here. */
+static int src_read(const e4src *s, uint64_t off, void *buf, size_t len)
+{
+    uint8_t *p = (uint8_t *)buf;
+    size_t done = 0;
+
+    if (!s->io) return read_at(s->fd, off, buf, len);
+    while (done < len) {
+        ssize_t r = s->io->pread(s->io->user, p + done, len - done,
+                                 off + done);
+        if (r <= 0) return -1;
+        done += (size_t)r;
+    }
+    return 0;
+}
+
 /* copy [in_off, +len) of infd to [out_off, +len) of outfd, <=8 MiB windows */
 static int copy_range(int infd, uint64_t in_off, int outfd,
                       uint64_t out_off, uint64_t len)
@@ -292,6 +335,26 @@ static int copy_range(int infd, uint64_t in_off, int outfd,
     while (len) {
         size_t n = len > COPY_WINDOW ? COPY_WINDOW : (size_t)len;
         if (read_at(infd, in_off, win, n) != 0) return -1;
+        if (write_at(outfd, out_off, win, n) != 0) return -1;
+        in_off += n;
+        out_off += n;
+        len -= n;
+    }
+    return 0;
+}
+
+/* copy_range over a source: the ranged-read twin of copy_range above */
+static int copy_range_src(const e4src *s, uint64_t in_off, int outfd,
+                          uint64_t out_off, uint64_t len)
+{
+    static uint8_t *win;
+    if (!win) {
+        win = (uint8_t *)malloc(COPY_WINDOW);
+        if (!win) return -1;
+    }
+    while (len) {
+        size_t n = len > COPY_WINDOW ? COPY_WINDOW : (size_t)len;
+        if (src_read(s, in_off, win, n) != 0) return -1;
         if (write_at(outfd, out_off, win, n) != 0) return -1;
         in_off += n;
         out_off += n;
@@ -375,8 +438,9 @@ typedef struct {
 } grange_t;                          /* member content, image-sorted view */
 
 typedef struct {
-    int      fd;
-    uint64_t file_size;              /* actual image file size */
+    int      fd;                     /* -1 when the image comes via host io */
+    const ivpack_host_io *io;        /* ABI v3 host reads, or NULL  */
+    uint64_t file_size;              /* actual image size */
     uint32_t block_size;
     uint64_t blocks_count;
     uint32_t first_data_block;
@@ -453,13 +517,31 @@ static int dblk_push(walk_t *w, uint64_t phys)
     return 0;
 }
 
+/* every parse read: the file when there is one, the host callbacks otherwise */
+static int fs_read(const fs_t *fs, uint64_t off, void *buf, size_t len)
+{
+    e4src s;
+    s.fd = fs->fd;
+    s.io = fs->io;
+    return src_read(&s, off, buf, len);
+}
+
+static int fs_copy_range(const fs_t *fs, uint64_t in_off, int outfd,
+                         uint64_t out_off, uint64_t len)
+{
+    e4src s;
+    s.fd = fs->fd;
+    s.io = fs->io;
+    return copy_range_src(&s, in_off, outfd, out_off, len);
+}
+
 /* ---- superblock + GDT parse (validate everything we rely on) ---- */
 static int parse_super(fs_t *fs)
 {
     uint8_t sb[E4_SB_SIZE];
     uint32_t log_bs, rev;
 
-    if (read_at(fs->fd, E4_SB_OFF, sb, sizeof sb) != 0) {
+    if (fs_read(fs, E4_SB_OFF, sb, sizeof sb) != 0) {
         note("superblock read", 0, 0);
         return EX_DECLINE;
     }
@@ -567,7 +649,7 @@ static int parse_gdt(fs_t *fs)
 
     gdt = (uint8_t *)malloc(gsz ? gsz : 1);
     if (!gdt) return EX_IO;
-    if (read_at(fs->fd, fs->gdt_off, gdt, (size_t)gsz) != 0) {
+    if (fs_read(fs, fs->gdt_off, gdt, (size_t)gsz) != 0) {
         free(gdt);
         note("GDT read", 0, 0);
         return EX_DECLINE;
@@ -601,7 +683,7 @@ static int parse_gdt(fs_t *fs)
             free(gdt);
             return EX_IO;
         }
-        if (read_at(fs->fd, ib * fs->block_size,
+        if (fs_read(fs, ib * fs->block_size,
                     fs->ibmp + (size_t)g * fs->block_size,
                     fs->block_size) != 0) {
             free(gdt);
@@ -629,14 +711,14 @@ static int read_inode(fs_t *fs, uint32_t ino, uint8_t *buf)
     uint8_t dbuf[64];
     g = (ino - 1) / fs->inodes_per_group;
     j = (ino - 1) % fs->inodes_per_group;
-    if (read_at(fs->fd, fs->gdt_off + (uint64_t)g * fs->desc_size,
+    if (fs_read(fs, fs->gdt_off + (uint64_t)g * fs->desc_size,
                 dbuf, fs->desc_size) != 0)
         return -1;
     it = le32(dbuf + 0x08);
     if (fs->feat_incompat & E4I_64BIT)
         it |= (uint64_t)le32(dbuf + 0x28) << 32;
     off = it * fs->block_size + (uint64_t)j * fs->inode_size;
-    return read_at(fs->fd, off, buf, fs->inode_size);
+    return fs_read(fs, off, buf, fs->inode_size);
 }
 
 /* ---- extent tree walk (depth 0..5); leaves feed the walk_t sink ---- */
@@ -738,7 +820,7 @@ static int walk_extents(fs_t *fs, walk_t *w, const uint8_t *node,
                 return EX_IO;
             child = (uint8_t *)malloc(fs->block_size);
             if (!child) return EX_IO;
-            if (read_at(fs->fd, leaf * fs->block_size, child,
+            if (fs_read(fs, leaf * fs->block_size, child,
                         fs->block_size) != 0) {
                 free(child);
                 note("extent node read", leaf, 0);
@@ -953,7 +1035,7 @@ static int walk_dir(fs_t *fs, uint32_t ino, unsigned depth)
             rc = EX_DECLINE;
             goto out;
         }
-        if (read_at(fs->fd, w.dblocks[0] * fs->block_size, blk,
+        if (fs_read(fs, w.dblocks[0] * fs->block_size, blk,
                     fs->block_size) != 0) {
             rc = EX_DECLINE;
             goto out;
@@ -966,7 +1048,7 @@ static int walk_dir(fs_t *fs, uint32_t ino, unsigned depth)
             uint16_t ncount, nlimit;
             uint32_t k;
             if (!((nodes[i / 8] >> (i % 8)) & 1)) continue;
-            if (read_at(fs->fd, w.dblocks[i] * fs->block_size, blk,
+            if (fs_read(fs, w.dblocks[i] * fs->block_size, blk,
                         fs->block_size) != 0) {
                 rc = EX_DECLINE;
                 goto out;
@@ -1000,7 +1082,7 @@ static int walk_dir(fs_t *fs, uint32_t ino, unsigned depth)
     for (i = 0; i < w.n_dblocks; i++) {
         if (i == 0 && nodes) continue;   /* dx root: dot entries only */
         if (nodes && ((nodes[i / 8] >> (i % 8)) & 1)) continue;
-        if (read_at(fs->fd, w.dblocks[i] * fs->block_size, blk,
+        if (fs_read(fs, w.dblocks[i] * fs->block_size, blk,
                     fs->block_size) != 0) {
             rc = EX_DECLINE;
             goto out;
@@ -1212,8 +1294,8 @@ static void fs_free(fs_t *fs)
 
 /* full parse: superblock -> GDT -> bitmaps -> inode scan -> dir walk ->
  * member content ranges -> overlap proof -> recipe ranges */
-static int parse_all(const char *path, fs_t **fs_out, rrange_t **rr_out,
-                     size_t *n_rr_out)
+static int parse_all(const char *path, const ivpack_host_io *io, fs_t **fs_out,
+                     rrange_t **rr_out, size_t *n_rr_out)
 {
     fs_t *fs;
     struct stat st;
@@ -1225,6 +1307,20 @@ static int parse_all(const char *path, fs_t **fs_out, rrange_t **rr_out,
     fs = (fs_t *)calloc(1, sizeof *fs);
     if (!fs) return EX_IO;
     fs->fd = -1;
+    fs->io = io;
+    if (io) {
+        /* ABI v3: the container's bytes arrive through the host callbacks and
+         * there is no file at all. path is NULL here (the host says so by
+         * leaving in_path NULL), and the size the host announces IS the image
+         * size -- the same fact fstat() would have given. */
+        if (!io->pread || io->size < E4_SB_OFF + E4_SB_SIZE) {
+            fs_free(fs);
+            note("not an ext4 image (host io size)", io ? io->size : 0, 0);
+            return EX_DECLINE;
+        }
+        fs->file_size = io->size;
+        goto have_image;
+    }
     fs->fd = open(path, O_RDONLY);
     if (fs->fd < 0) { fs_free(fs); return EX_IO; }
     if (fstat(fs->fd, &st) != 0 || !S_ISREG(st.st_mode) ||
@@ -1234,6 +1330,7 @@ static int parse_all(const char *path, fs_t **fs_out, rrange_t **rr_out,
         return EX_DECLINE;
     }
     fs->file_size = (uint64_t)st.st_size;
+have_image:
     rc = parse_super(fs);
     if (rc) goto out;
     rc = parse_gdt(fs);
@@ -1315,13 +1412,25 @@ static int write_recipe_header(int ofd, const fs_t *fs, const rrange_t *rr,
 }
 
 /* ---- commands ---- */
-static int cmd_enumerate(const char *in, const char *out)
+static int cmd_enumerate(const char *in, const char *out,
+                         const ivpack_host_io *io)
 {
     fs_t *fs;
     rrange_t *rr;
     size_t n_rr, i;
     FILE *o;
-    int rc = parse_all(in, &fs, &rr, &n_rr);
+    int rc;
+
+    /* TEST HOOK, not a code path any real image takes: an ext4 image is never
+     * solid. It exists so the CORE's handling of IVPACK_RC_DECLINE_SOLID
+     * (INVFS_CLASS_GENERIC_SOLID stamp, the sweep's "refused (solid)" count,
+     * the INVFS_CPACK_SOLID opt-in) can be proven end to end without changing
+     * the packs that really can meet a solid block (p7z's LZMA solid archive,
+     * wim's .esd), which are outside this WP's scope. tests/test-cpack-hostio
+     * is its only caller. */
+    if (getenv("EXT4FS_SOLID") && getenv("EXT4FS_SOLID")[0] == '1')
+        return EX_DECLINE_SOLID;
+    rc = parse_all(in, io, &fs, &rr, &n_rr);
     if (rc) return rc;
     o = fopen(out, "w");
     if (!o) { rc = EX_IO; goto out; }
@@ -1335,7 +1444,8 @@ out:
     return rc;
 }
 
-static int cmd_extract(const char *in, const char *idx_s, const char *out)
+static int cmd_extract(const char *in, const char *idx_s, const char *out,
+                       const ivpack_host_io *io)
 {
     fs_t *fs;
     rrange_t *rr;
@@ -1343,7 +1453,7 @@ static int cmd_extract(const char *in, const char *idx_s, const char *out)
     char *endp = NULL;
     unsigned long idx;
     member_t *m = NULL;
-    int ofd, rc = parse_all(in, &fs, &rr, &n_rr);
+    int ofd, rc = parse_all(in, io, &fs, &rr, &n_rr);
 
     if (rc) return rc;
     idx = strtoul(idx_s, &endp, 10);
@@ -1358,7 +1468,7 @@ static int cmd_extract(const char *in, const char *idx_s, const char *out)
     ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (ofd < 0) { rc = EX_IO; goto out; }
     for (i = 0; i < m->n_ext; i++)
-        if (copy_range(fs->fd, m->ext[i].image, ofd, m->ext[i].logical,
+        if (fs_copy_range(fs, m->ext[i].image, ofd, m->ext[i].logical,
                        m->ext[i].len) != 0) {
             close(ofd);
             rc = EX_IO;
@@ -1439,7 +1549,8 @@ static int gcfg_push(gcfg_ent **v, size_t *n, size_t *cap,
 /* Split [lo,hi) into block-granular runs of all-zero / not-all-zero. Whole
  * blocks only: a partial tail block can never be elided, so it is reported as
  * not-zero. Returns 0 on success, -1 on read error. */
-static int gcfg_split_zero(int fd, uint64_t lo, uint64_t hi, uint64_t bs,
+static int gcfg_split_zero(const fs_t *fs, uint64_t lo, uint64_t hi,
+                           uint64_t bs,
                            gcfg_ent **v, size_t *n, size_t *cap)
 {
     uint8_t *buf = (uint8_t *)malloc((size_t)bs);
@@ -1452,7 +1563,7 @@ static int gcfg_split_zero(int fd, uint64_t lo, uint64_t hi, uint64_t bs,
         int z = 0;
         if (got == bs) {
             size_t k;
-            if (read_at(fd, b, buf, bs) != 0) { free(buf); return -1; }
+            if (fs_read(fs, b, buf, bs) != 0) { free(buf); return -1; }
             z = 1;
             for (k = 0; k < bs; k++)
                 if (buf[k]) { z = 0; break; }
@@ -1497,7 +1608,7 @@ static int build_gcfg(fs_t *fs, rrange_t *rr, size_t n_rr,
             if (mhi <= cur) continue;
             if (mlo >= end) break;
             if (mlo > cur &&
-                gcfg_split_zero(fs->fd, cur, mlo, fs->block_size,
+                gcfg_split_zero(fs, cur, mlo, fs->block_size,
                                 &tab, &n, &cap) != 0) goto fail;
             if (gcfg_push(&tab, &n, &cap, mlo < cur ? cur : mlo,
                           (mhi > end ? end : mhi) - (mlo < cur ? cur : mlo),
@@ -1505,7 +1616,7 @@ static int build_gcfg(fs_t *fs, rrange_t *rr, size_t n_rr,
             cur = mhi > end ? end : mhi;
         }
         if (cur < end &&
-            gcfg_split_zero(fs->fd, cur, end, fs->block_size,
+            gcfg_split_zero(fs, cur, end, fs->block_size,
                             &tab, &n, &cap) != 0) goto fail;
     }
     for (i = 0; i < fs->n_gr; i++)
@@ -1547,13 +1658,14 @@ static int write_gcfg(const char *path, const gcfg_ent *tab, size_t n,
     return 0;
 }
 
-static int cmd_strip(const char *in, const char *out)
+static int cmd_strip(const char *in, const char *out,
+                     const ivpack_host_io *io)
 {
     fs_t *fs;
     rrange_t *rr;
     size_t n_rr, i;
     uint64_t woff;
-    int ofd, rc = parse_all(in, &fs, &rr, &n_rr);
+    int ofd, rc = parse_all(in, io, &fs, &rr, &n_rr);
 
     if (rc) return rc;
     ofd = open(out, O_WRONLY | O_CREAT | O_TRUNC, 0600);
@@ -1575,7 +1687,7 @@ static int cmd_strip(const char *in, const char *out)
                                              * Sharing nz's made it write into a
                                              * NULL tab -- segfault, caught by the
                                              * round-trip test, not by the build. */
-            if (gcfg_split_zero(fs->fd, rr[i].off, rr[i].off + rr[i].len,
+            if (gcfg_split_zero(fs, rr[i].off, rr[i].off + rr[i].len,
                                 fs->block_size, &tab, &n, &cap_tab) != 0) {
                 free(tab); free(nz); close(ofd); rc = EX_IO; goto out;
             }
@@ -1606,7 +1718,7 @@ static int cmd_strip(const char *in, const char *out)
         }
         woff = recipe_data_base(fs->n_mem, fs->n_gr, n_nz);
         for (i = 0; i < n_nz; i++) {
-            if (copy_range(fs->fd, nz[i].off, ofd, woff, nz[i].len) != 0) {
+            if (fs_copy_range(fs, nz[i].off, ofd, woff, nz[i].len) != 0) {
                 free(nz); close(ofd); rc = EX_IO; goto out;
             }
             woff += nz[i].len;
@@ -1663,7 +1775,8 @@ static int map_seg_cmp(const void *a, const void *b)
     return x->off < y->off ? -1 : x->off > y->off;
 }
 
-static int cmd_map(const char *in, const char *out)
+static int cmd_map(const char *in, const char *out,
+                   const ivpack_host_io *io)
 {
     fs_t *fs;
     rrange_t *rr;
@@ -1672,7 +1785,7 @@ static int cmd_map(const char *in, const char *out)
     map_seg *seg = NULL;
     uint8_t *blob;
     size_t blen, wp;
-    int ofd, rc = parse_all(in, &fs, &rr, &n_rr);
+    int ofd, rc = parse_all(in, io, &fs, &rr, &n_rr);
 
     if (rc) return rc;
     /* Every byte of the image is one segment: non-zero run, member payload, or
@@ -1708,7 +1821,7 @@ static int cmd_map(const char *in, const char *out)
     for (i = 0; i < n_rr; i++) {
         gcfg_ent *tab = NULL;
         size_t n = 0, cap_tab = 0;
-        if (gcfg_split_zero(fs->fd, rr[i].off, rr[i].off + rr[i].len,
+        if (gcfg_split_zero(fs, rr[i].off, rr[i].off + rr[i].len,
                             fs->block_size, &tab, &n, &cap_tab) != 0) {
             free(tab); free(seg); rc = EX_IO; goto out;
         }
@@ -1792,7 +1905,13 @@ static int cmd_estimate(const char *in)
     rrange_t *rr;
     size_t n_rr, i;
     uint64_t sum = 0;
-    int rc = parse_all(in, &fs, &rr, &n_rr);
+    /* Host io is deliberately absent here: `estimate` is the number the core
+     * parses before it decides whether to decompose at all, and a pack whose
+     * container only exists as ranges would have to be asked in the same
+     * breath as the decomposition. A pack with host io and an estimate is
+     * therefore kept on the path flow by the core (vol_cpack.c), which keeps
+     * this command honest instead of pretending to answer without bytes. */
+    int rc = parse_all(in, NULL, &fs, &rr, &n_rr);
 
     if (rc) return rc;
     for (i = 0; i < fs->n_mem; i++)
@@ -1835,13 +1954,14 @@ static int cmd_estimate(const char *in)
 
 
 
-static E4_MAYBE_UNUSED int cmd_classify(const char *in, const char *out)
+static E4_MAYBE_UNUSED int cmd_classify(const char *in, const char *out,
+                                        const ivpack_host_io *io)
 {
     fs_t *fs;
     rrange_t *rr;
     size_t n_rr, n = 0;
     gcfg_ent *tab = NULL;
-    int rc = parse_all(in, &fs, &rr, &n_rr);
+    int rc = parse_all(in, io, &fs, &rr, &n_rr);
 
     if (rc) return rc;
     if (build_gcfg(fs, rr, n_rr, &tab, &n) != 0) { rc = EX_IO; goto done; }
@@ -1872,9 +1992,16 @@ static int rext_img_cmp(const void *pa, const void *pb)
     return u < v ? -1 : u > v;
 }
 
-static int cmd_rebuild(const char *recipe, const char *dir, const char *out)
+static int cmd_rebuild(const char *recipe, const char *dir, const char *out,
+                       const ivpack_host_io *io)
 {
     int rfd = -1, ofd = -1, rc = EX_ERROR;
+    /* rebuild's INPUTS are the recipe and the members, and both are paths in
+     * every flow: the core holds the recipe in RAM and the members in scratch
+     * and hands them over that way, so there is nothing for host io to serve
+     * here. The parameter is part of the command signature so a v3 call can
+     * pass its args through unchanged. */
+    (void)io;
     uint8_t hdr[RECIPE_HDR];
     uint64_t image_size, dbase, expect_size, woff;
     uint32_t n_mem, n_rr, n_ext, i;
@@ -2103,13 +2230,31 @@ out:
  * `invf-ivpack_packs_test` fails on "ext4fs: exports the three ABI symbols" --
  * which is how shard 4 of `make test` had been dying one line past the member
  * bound check. */
+/* flags: IVPACK_F_HOST_IO (ADR-015). Every read this pack makes of the
+ * container goes through e4src (read_at or io->pread), and every command that
+ * needs the image accepts in_path == NULL with io filled, which is what a v3
+ * pack has to promise before the core will skip its pin. Without this bit the
+ * core keeps handing the pack a path (and materializing it), so a pack that
+ * does not assert the capability can never be handed a NULL in_path. */
 static const ivpack_desc s_ext4fs_desc = {
-    IVPACK_API_VERSION, "ext4fs", "1.0.0", "containerpack", 0
+    IVPACK_API_VERSION, "ext4fs", "1.0.0", "containerpack", IVPACK_F_HOST_IO
 };
 
 const ivpack_desc *ivpack_get_desc(void) { return &s_ext4fs_desc; }
 
-IVPACK_CANON_CALLS(ext4fs)
+/* The five command adapters, written out instead of IVPACK_CANON_CALLS:
+ * this pack reads `a->io` (ABI v3, ADR-015) and the canonical macro only
+ * forwards the path operands. Same one line each. */
+static int ext4fs_iv_call_enumerate(const ivpack_container_args *a)
+{ return (int)cmd_enumerate(a->in_path, a->out_path, a->io); }
+static int ext4fs_iv_call_extract(const ivpack_container_args *a)
+{ return (int)cmd_extract(a->in_path, a->extract_idx, a->out_path, a->io); }
+static int ext4fs_iv_call_strip(const ivpack_container_args *a)
+{ return (int)cmd_strip(a->in_path, a->out_path, a->io); }
+static int ext4fs_iv_call_rebuild(const ivpack_container_args *a)
+{ return (int)cmd_rebuild(a->recipe_path, a->mbr_dir, a->out_path, a->io); }
+static int ext4fs_iv_call_map(const ivpack_container_args *a)
+{ return (int)cmd_map(a->in_path, a->out_path, a->io); }
 
 IVPACK_DEFINE_CONTAINER_CMD(ext4fs, IVPACK_GLUE_NONE())
 
@@ -2122,19 +2267,19 @@ int main(int argc, char **argv)
     g_verbose = getenv("EXT4FS_DEBUG") != NULL;
     if (argc < 2) return EX_USAGE;
     if (!strcmp(argv[1], "enumerate") && argc == 4)
-        return cmd_enumerate(argv[2], argv[3]);
+        return cmd_enumerate(argv[2], argv[3], NULL);
     if (!strcmp(argv[1], "extract") && argc == 5)
-        return cmd_extract(argv[2], argv[3], argv[4]);
+        return cmd_extract(argv[2], argv[3], argv[4], NULL);
     if (!strcmp(argv[1], "strip") && argc == 4)
-        return cmd_strip(argv[2], argv[3]);
+        return cmd_strip(argv[2], argv[3], NULL);
     if (!strcmp(argv[1], "rebuild") && argc == 5)
-        return cmd_rebuild(argv[2], argv[3], argv[4]);
+        return cmd_rebuild(argv[2], argv[3], argv[4], NULL);
     if (!strcmp(argv[1], "map") && argc == 4)
-        return cmd_map(argv[2], argv[3]);
+        return cmd_map(argv[2], argv[3], NULL);
     if (!strcmp(argv[1], "estimate") && argc == 3)
         return cmd_estimate(argv[2]);
     if (!strcmp(argv[1], "classify") && argc == 4)
-        return cmd_classify(argv[2], argv[3]);
+        return cmd_classify(argv[2], argv[3], NULL);
     return EX_USAGE;
 }
 #endif /* !IVPACK_SHARED_LIB */

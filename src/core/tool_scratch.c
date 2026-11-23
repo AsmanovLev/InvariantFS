@@ -4,10 +4,11 @@
  * A tmpfs scratch is genuinely right for a small transcoding job — the
  * intermediates are written once, read once, and tmpfs makes that cheap —
  * so tmpfs stays first in the preference order. What is not acceptable is
- * choosing a memory-backed root for a job whose size nobody looked at: the
- * containerpack sweep pins a whole container and extracts every member of
- * it, so a 3.5 GB rootfs container asks ~7 GB of scratch, and on a host
- * where /dev/shm and /tmp are both tmpfs that is RAM. The tmpfs fills, the
+ * choosing a memory-backed root for a job whose size nobody looked at: a
+ * containerpack sweep with a v1/v2 pack pins the whole container and extracts
+ * every member of it, so a 3.5 GB rootfs container asks ~7 GB of scratch
+ * (ADR-015's host-I/O packs pin nothing), and on a host where /dev/shm and
+ * /tmp are both tmpfs that is RAM. The tmpfs fills, the
  * extract fails, the file silently falls through to the generic lane, and
  * in the field the same staging is what gets the sweep OOM-killed.
  *
@@ -43,8 +44,9 @@
 
 #define SCRATCH_MAX_ROOTS 8
 
-/* Bytes left free on top of the demand. The pin, the member table, the
- * recipe, the map and the rebuilt output all land in the same directory,
+/* Bytes left free on top of the demand. The pin (when the pack has no ABI v3
+ * host I/O), the member table, the recipe, the map and the rebuilt output all
+ * land in the same directory,
  * and a scratch sized to the last byte of the demand is a scratch that
  * fails on the last file. 128 MiB, or INVFS_SCRATCH_MARGIN_MB. */
 #define SCRATCH_MARGIN_MB_DEFAULT 128

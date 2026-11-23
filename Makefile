@@ -58,7 +58,7 @@ else
 FUSE_DAEMON_LIBS := $(FUSE_LIBS)
 endif
 
-CORE    := volume vol_format vol_cpack helper_exec ivpack_loader tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
+CORE    := volume vol_format vol_cpack vol_cpack_hostio helper_exec ivpack_loader tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
            vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
@@ -1625,6 +1625,14 @@ e2e: all $(OUT)/meta_probe
 # the env-independence legs, and ext4fs in leaf mode over three sweeps. The
 # old-reader leg is opt-in (INVFS_OLD_BIN) because it needs a pre-change build.
 	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-map-consolidation.sh
+# WP-CPACK-HOSTIO-V3 / ADR-015: the ABI v3 host-I/O lane. Its acceptance is a
+# 1 MiB scratch root -- the pin cannot fit, the members can -- so it proves
+# that a v3 pack decomposes a container the sweep never materializes, and its
+# control leg (INVFS_CPACK_HOSTIO=0) proves the same run refuses without it.
+# Also covers the v2 gate, the solid verdict and a member larger than the
+# sweep's peak RSS. Needs an unprivileged mount namespace (the 1 MiB tmpfs),
+# which the runner's ISOLATED mode is.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-hostio.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh

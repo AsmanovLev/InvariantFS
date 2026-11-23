@@ -2676,6 +2676,19 @@ progress:
      * during the walk (one line per container instead of one per part) */
     part_agg_print();
 
+    /* ADR-015 decision 7: solid archives are refused, not decomposed. The
+     * per-file verdict is on stderr as it happens (and stamped
+     * INVFS_CLASS_GENERIC_SOLID, so later sweeps do not re-ask); this is the
+     * total, beside the batching lines that explain where the space went. */
+    {
+        uint64_t sf = 0, sb = 0;
+        cpack_solid_take(&sf, &sb);
+        if (sf && !invfs_sweep_ui_active())
+            printf("  refused (solid): %llu file%s, %.1f MiB\n",
+                   (unsigned long long)sf, sf == 1 ? "" : "s",
+                   (double)sb / (1024.0 * 1024.0));
+    }
+
     /* WP19: extract read-hot PPMd batch members to standalone per-segment
      * ZSTD (class GENERIC) -- between the walk and the dedupe pass, so the
      * promoted segments can merge and the GC below reclaims any batch the
