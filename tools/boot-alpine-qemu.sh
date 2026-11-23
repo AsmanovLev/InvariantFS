@@ -18,7 +18,11 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 B="$REPO/bin"
 WORK="${INVFS_ALPINE_WORK:-/var/tmp/invfs-alpine-boot}"
 LOGDIR="${INVFS_ALPINE_LOGDIR:-/var/tmp/invfs-alpine-logs}"
-URL="${INVFS_ALPINE_URL:-https://dl-cdn.alpinelinux.org/alpine/.24/releases/x86_64}"
+# v<major>.<minor>, derived from the rootfs tarball pinned on the next line:
+# the branch directory is not the release string, and /.24 (a lost v3)
+# 404s. See iso-guest-alpine-setup.sh for the same fix and the job it cost.
+ALPINE_BRANCH="v$(printf '%s' "${INVFS_ALPINE_ROOTFS:-alpine-minirootfs-3.24.4-x86_64.tar.gz}" | grep -oE '[0-9]+\.[0-9]+' | head -1)"
+URL="${INVFS_ALPINE_URL:-https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/releases/x86_64}"
 ROOTFS="${INVFS_ALPINE_ROOTFS:-alpine-minirootfs-3.24.4-x86_64.tar.gz}"
 TARBALL="${INVFS_ALPINE_TARBALL:-$WORK/$ROOTFS}"
 STAGE="${INVFS_ALPINE_STAGE:-$WORK/stage}"

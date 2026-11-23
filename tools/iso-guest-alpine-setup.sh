@@ -92,15 +92,29 @@ case "$VOL" in
 esac
 
 # Install necessary partitioning & glibc compatibility packages in live Alpine
+# Alpine's apk branch directory is v<major>.<minor>, and it is not the same
+# string as the release: this file used to write `/.24` (a lost `v3`), apk then
+# answered `gcompat (no such package)` from a repository that does not exist,
+# gcompat/fuse3/zstd/zlib never installed, and the glibc release binaries died
+# as "not found" (a missing ELF interpreter reads exactly like a missing file)
+# at mkfs.invfs -- engine-ci 2026-11-23, installation-iso-alpine, nine minutes
+# into the job. The live system knows its own release; ask it.
+ALPINE_BRANCH="v$(cut -d. -f1-2 /etc/alpine-release 2>/dev/null || echo 3.24)"
+
 say "updating live apk and installing prerequisites (gcompat, dosfstools, sfdisk)..."
 # In stock Alpine live ISO, repositories may need community for some packages
 grep -q community /etc/apk/repositories 2>/dev/null || {
     sed -i 's/main/community/' /etc/apk/repositories 2>/dev/null || true
-    echo "https://dl-cdn.alpinelinux.org/alpine/.24/main" >> /etc/apk/repositories
-    echo "https://dl-cdn.alpinelinux.org/alpine/.24/community" >> /etc/apk/repositories
+    echo "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main" >> /etc/apk/repositories
+    echo "https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/community" >> /etc/apk/repositories
 }
 apk update || true
-apk add sfdisk util-linux dosfstools e2fsprogs gcompat curl zstd || true
+# gcompat, fuse3, zstd and zlib are REQUIRED: without them the release tarball's
+# binaries do not run on musl at all. This used to be `|| true`, which turned the
+# 404 above into "mkfs.invfs: ... /usr/bin/invf-mkfs: not found" four steps later.
+apk add sfdisk util-linux dosfstools e2fsprogs curl || true
+apk add gcompat fuse3 zstd zlib     || { say "required packages did not install (repositories: $(tr '
+' ' ' < /etc/apk/repositories))"; exit 1; }
 
 say "partitioning $VOL (GPT: 512M ESP + InvFS root)..."
 if command -v sfdisk >/dev/null 2>&1; then
@@ -180,9 +194,12 @@ mkdir -p /mnt/etc/apk
 # Disable grub.trigger; bootloader setup is handled standalone by invf-boot-setup.
 echo "disable_trigger=1" > /mnt/etc/update-grub.conf
 cp -a /etc/apk/keys /mnt/etc/apk/ 2>/dev/null || true
-cat > /mnt/etc/apk/repositories <<'EOF'
-https://dl-cdn.alpinelinux.org/alpine/.24/main
-https://dl-cdn.alpinelinux.org/alpine/.24/community
+# Unquoted heredoc on purpose: the branch comes from the live system above, so
+# the target root and the installer cannot disagree about which repository set
+# the base system comes from.
+cat > /mnt/etc/apk/repositories <<EOF
+https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/main
+https://dl-cdn.alpinelinux.org/alpine/$ALPINE_BRANCH/community
 EOF
 
 apk add --root /mnt --initdb --repositories-file /mnt/etc/apk/repositories --keys-dir /etc/apk/keys \
