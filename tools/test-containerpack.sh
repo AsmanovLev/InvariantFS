@@ -150,17 +150,29 @@ inner = splt([b"inner member alpha\n" * 5000, b"inner member beta\n" * 7000])
 nest = splt([inner, b"outer tail\n" * 3000])
 open(os.path.join(d, "nest.splt"), "wb").write(nest)
 
-# negative: the table announces 5 payload bytes but 10 are present --
+# negative: the table announces 5 payload bytes but 10240 are present --
 # enumerate/extract/strip succeed; for the seekable pack the FS-side MAP
 # VALIDATION refuses (recipe+members cannot partition the container), for
 # a map-less pack the rebuild guard refuses (the nomap leg below).
+#
+# The payload is 10240 BINARY bytes, not the 10 it used to be, and both
+# numbers are load-bearing:
+#   * >= INVFS_BLOCK_SIZE (4096): below one block, vol_sweep.c:587 sends any
+#     non-text file to the shared ZSTD batch BEFORE a containerpack is
+#     sniffed, so a 26-byte fixture was never shown to splt_test at all and
+#     this leg silently tested the batching lane instead of the validator
+#     (found 2026-11-23: the sweep log read "neg.splt: binary -> ZSTD
+#     batch").
+#   * not text: invfs_text_family() == 0 is the other half of that lane's
+#     gate, and an ASCII payload of this size would take the PPMd batch.
 open(os.path.join(d, "neg.splt"), "wb").write(
-    b"SPLT" + struct.pack("<I", 1) + struct.pack("<Q", 5) + b"0123456789")
+    b"SPLT" + struct.pack("<I", 1) + struct.pack("<Q", 5) +
+    bytes(range(256)) * 40)
 
 print("  multi.splt", len(multi), "(4 members: text %d, empty, elf %d, rand 32768)"
       % (len(text), len(elf)))
 print("  nest.splt ", len(nest), "(member 0 = inner SPLT of %d bytes)" % len(inner))
-print("  neg.splt  ", 26, "(corrupt table)")
+print("  neg.splt  ", 14 + 10240, "(corrupt table, binary payload)")
 PY
 . "$WORK/orig/multi.layout"   # size data_off m0_len m2_off m2_len
 
