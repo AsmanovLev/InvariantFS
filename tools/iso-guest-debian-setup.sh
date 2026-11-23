@@ -177,6 +177,26 @@ umount /mnt/boot || exit 1
 umount /mnt || exit 1
 udevadm settle 2>/dev/null || sleep 2
 
+# A FUSE daemon is not a mount: `umount` detaches the mount point and returns,
+# the invf-fuse that served it exits a moment later, and until it does it still
+# holds the volume's flock -- vol_open() then answers
+#     "image is in use by another process (flock: Resource temporarily unavailable)"
+# Measured 2026-11-23 in engine-ci on void/arch/debian/gentoo: invf-fsck ran
+# three seconds after a successful umount and was refused with exactly that
+# line, so the installation was fine and the VERIFICATION failed. NixOS has
+# carried `fuser -km` since its setup was written; the other six never got it.
+# Kill the daemon and wait for it to go instead of sleeping a fixed second: the
+# runner's load decides how long the exit takes.
+fuser -km /mnt 2>/dev/null || true
+for _i in $(seq 1 100); do
+    pgrep -x invf-fuse >/dev/null 2>&1 || break
+    sleep 0.2
+done
+if pgrep -x invf-fuse >/dev/null 2>&1; then
+    say "invf-fuse still holds the volume after umount: pid $(pgrep -x invf-fuse | tr '
+' ' ')"
+fi
+
 say "verifying root filesystem with invf-fsck..."
 invf-fsck "$P2" || exit 1
 
