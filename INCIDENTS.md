@@ -3457,7 +3457,8 @@ What the engine-ci run on `96db43a` says, per distro:
 
 The two freezes stop at different places and neither prints a panic:
 
-* **void** (`iso-void-install-logs/serial-bootloader.log`, last lines, guest
+* **void** (the `serial-bootloader.log` inside the `iso-void-install-logs`
+  upload artifact, last lines, guest
   time ~181 s, then twelve minutes of silence):
   ```
   => FUSE root detected; skipping root fsck/remount and mount -a
