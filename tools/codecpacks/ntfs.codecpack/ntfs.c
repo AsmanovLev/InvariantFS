@@ -52,7 +52,7 @@
  *                           first: dense content caps at the 64 MiB recipe
  *                           stream cap, sparse content at holes/RMC2, both
  *                           WP634's beat, not this pack's)
- *   members                 <= 65536 and every idx <= 65535 (FS ABI caps)
+ *   members                 <= 1048576 and every idx <= 1048575 (FS ABI caps)
  *
  * --------------------------------------------------------------------
  * HONEST DECLINES (exit 3; the FS then stores the image generically)
