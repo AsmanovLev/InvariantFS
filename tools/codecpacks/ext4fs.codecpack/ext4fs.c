@@ -22,7 +22,7 @@
  *
  * MEMBERS
  *
- *   idx   = ext4 inode number (must fit the ABI range 0..65535);
+ *   idx   = ext4 inode number (must fit the ABI range 0..ABI_MAX_IDX);
  *   set   = used inodes >= s_first_ino whose i_mode is S_IFREG — and only
  *           those. Directories, symlinks (fast targets ride inside the
  *           inode, slow targets sit in data blocks), device/fifo/socket
@@ -119,7 +119,8 @@
  *                      structural corruption the parse cannot prove
  *                      (bad extent trees, dirent chains, dx roots, shared
  *                      data blocks, member content overlapping metadata,
- *                      > 65536 members or an inode number > 65535), and
+ *                      > ABI_MAX_MEMBERS members or an inode number >
+ *                      ABI_MAX_IDX), and
  *                      images with no regular files (zero members).
  */
 
@@ -201,8 +202,8 @@
 #define E4_S_IFREG       0x8000u
 #define E4_S_IFDIR       0x4000u
 
-#define ABI_MAX_MEMBERS  65536u
-#define ABI_MAX_IDX      65535u
+#define ABI_MAX_MEMBERS  1048576u
+#define ABI_MAX_IDX      1048575u
 #define ABI_MAP_MAX_ENTS (4u * ABI_MAX_MEMBERS + 4u)
 
 #define RECIPE_MAGIC "E4RCP002"
