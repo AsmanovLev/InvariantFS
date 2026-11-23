@@ -61,11 +61,20 @@ sites=$(awk '
     /vol_read_range\(/ { print fn }
 ' "$REPO/src/core/vol_cpack.c" | sort -u | tr '\n' ' ')
 echo "  vol_read_range() call sites, by enclosing function: $sites"
+# The non-member readers are the ones that read the CONTAINER, not a member:
+# the streaming pin (WP641), the family sniff, and -- ADR-015 -- the
+# container-side reference of the two guards, which is cpack_container_read:
+# with ABI v3 host I/O there is no pin, so the map guard and the rebuild guard
+# read the container back from the volume through that one function instead of
+# comparing against a materialized copy. It never touches a member sibling or
+# the payload blob; the funnel still owns those.
 case "$sites" in
-    "cpack_member_read cpack_stream_pin vol_containerpack_sweep "*) ;;
+    "cpack_container_read cpack_member_read cpack_stream_pin vol_containerpack_sweep "*)
+        ;;
     *) echo "FAIL: a member-payload read bypasses cpack_member_read()"
-       echo "      (got: $sites; the streaming pin and the family sniff are"
-       echo "       the two documented non-member readers)"
+       echo "      (got: $sites; cpack_container_read is the one documented"
+       echo "       container-side reader, next to the streaming pin and the"
+       echo "       family sniff)"
        exit 1 ;;
 esac
 # and the funnel must still be the thing that names the payload sibling for

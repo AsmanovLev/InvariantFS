@@ -110,25 +110,26 @@ src/cli/tz_registry_test.c:178:SKIP
 src/cli/why.c:116:SKIP   # inspector: a miss aborts; the layout measurement needs the row, or there is nothing to report
 src/cli/window_test.c:176:SKIP
 src/cli/write_create_path_test.c:248:SKIP
-src/core/vol_cpack.c:400:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
-src/core/vol_cpack.c:3127:SKIP   # leaf list: absent means the historical per-inode layout, not a failure (cpack_leaf_parse returns 0)
-src/core/vol_cpack.c:3753:SKIP   # member read: a miss aborts the slice
-src/core/vol_cpack.c:3907:SKIP   # guard layout probe: '<name>!mbrblob' absent means the per-inode form, so the guard reads members as inodes
-src/core/vol_cpack.c:4155:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:4156:SKIP   # map load: miss declines the load
-src/core/vol_cpack.c:4204:SKIP   # map load: the payload-sibling probe moved ABOVE the validate (a kind-4 entry bounds itself against the sibling's length), and an absent blob still means per-member inodes, moff stays NULL
-src/core/vol_cpack.c:4324:SKIP   # map-gen probe: miss means no map (gen 0)
-src/core/vol_cpack.c:4325:SKIP   # map-gen probe: unreadable map degrades to gen 0
-src/core/vol_cpack.c:4768:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
-src/core/vol_cpack.c:5492:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:5593:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:5608:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:5609:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:5613:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:5634:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:5692:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:5720:SKIP   # rebuild layout probe: absent blob means per-member inodes
-src/core/vol_cpack.c:5763:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:402:ACTS   # mat_copy_one: a missing pack member declines the whole staging (fail closed, no partial exec dir)
+src/core/vol_cpack.c:3148:SKIP   # leaf list: absent means the historical per-inode layout, not a failure (cpack_leaf_parse returns 0)
+src/core/vol_cpack.c:3833:SKIP   # member read: a miss aborts the slice
+src/core/vol_cpack.c:4049:SKIP   # guard layout probe: '<name>!mbrblob' absent means the per-inode form, so the guard reads members as inodes
+src/core/vol_cpack.c:4305:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:4306:SKIP   # map load: miss declines the load
+src/core/vol_cpack.c:4354:SKIP   # map load: the payload-sibling probe moved ABOVE the validate (a kind-4 entry bounds itself against the sibling's length), and an absent blob still means per-member inodes, moff stays NULL
+src/core/vol_cpack.c:4474:SKIP   # map-gen probe: miss means no map (gen 0)
+src/core/vol_cpack.c:4475:SKIP   # map-gen probe: unreadable map degrades to gen 0
+src/core/vol_cpack.c:5072:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
+src/core/vol_cpack.c:5954:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:6063:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:6078:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:6079:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:6083:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:6104:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:6162:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:6190:SKIP   # rebuild layout probe: absent blob means per-member inodes
+src/core/vol_cpack.c:6233:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:5742:SKIP   # member commit (streamed): the member inode is looked up after vol_write_commit(), which does not hand its id back, so a miss means the commit failed and the container is abandoned
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
 src/core/vol_png.c:1247:SKIP
@@ -148,8 +149,8 @@ src/core/vol_sweep.c:612:ACTS
 src/core/vol_sweep.c:631:ACTS
 src/core/vol_sweep.c:651:ACTS
 src/core/vol_sweep.c:703:ACTS   # WP620 two-way PNG branch: either lane sibling present keeps its codec (a miss runs the lane for the knob's codec)
-src/core/vol_sweep.c:2003:SKIP
-src/core/vol_sweep.c:2082:ACTS   # name-snapshot hint: the result decides whether the hint is accepted as this inode's name, so a failed lookup must not be mistaken for a match
+src/core/vol_sweep.c:2018:SKIP
+src/core/vol_sweep.c:2097:ACTS   # name-snapshot hint: the result decides whether the hint is accepted as this inode's name, so a failed lookup must not be mistaken for a match
 src/core/vol_textzone.c:808:SKIP
 src/core/vol_tier.c:304:SKIP
 src/core/volume.c:1283:SKIP   # reserve scan: direct .ivpack file lookup
