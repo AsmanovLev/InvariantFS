@@ -1593,6 +1593,7 @@ test-packs: all
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pack-sign.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-mcost-bitexact.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-map-consolidation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ivpacks.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-pngflac.sh
@@ -1617,6 +1618,13 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-exercarve.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-containerpack.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-mcost-bitexact.sh
+# WP-CPACK-MAP-CONSOLIDATION: the container member map's ONE source of truth.
+# Leg 1 is a grep-shaped gate over src/core/vol_cpack.c (every member-payload
+# read goes through cpack_member_read), the rest are real volumes: kind-4
+# round trips (leaf / blob / nested / map-less), the legacy leaf-list volume,
+# the env-independence legs, and ext4fs in leaf mode over three sweeps. The
+# old-reader leg is opt-in (INVFS_OLD_BIN) because it needs a pre-change build.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-cpack-map-consolidation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-sandbox.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-helper-isolation.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rawdisk.sh
