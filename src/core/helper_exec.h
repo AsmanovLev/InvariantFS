@@ -58,4 +58,40 @@ int invfs_helper_exec(char *const argv[], uint64_t mem_cap,
                       char *out, size_t out_cap,
                       uint64_t timeout_ms);
 
+/* Run fn(user) in a child under the SAME containment, without execve.
+ *
+ * This exists for ABI v3 host-I/O packs (ADR-015): a pack's container
+ * commands are C functions, and the callbacks the host hands them
+ * (ivpack_host_io) are function pointers into this process, which cannot
+ * survive an execve -- but they DO survive fork(). So a pack that reads the
+ * container through those callbacks has to run in a forked child of the
+ * process that owns the volume handle, and that child must keep the pack
+ * containment the exec path gives (Landlock whitelist, RLIMIT_AS/CPU, netns,
+ * privilege drop). InvariantFS' read path reaches its backing store through
+ * blkio's already-open descriptor, so the child serves the callbacks over the
+ * INHERITED fd: the sandbox is not widened by a single path.
+ *
+ * Differences from invfs_helper_exec, both deliberate:
+ *   - inherited descriptors are NOT closed in the child (the volume fd is the
+ *     read path; closing it would leave the callbacks with EBADF). Nothing is
+ *     leaked: the child is short-lived.
+ *   - argv_hint is the pack's own .so path; it is used only so the Landlock
+ *     rules cover the image path and the pack's directory exactly as they do
+ *     for an exec'd helper. It is not executed.
+ *   - stdin/stdout/stderr are muted to /dev/null like the container-command
+ *     path (a pack's chatter belongs to the CLI, not to the daemon's log).
+ *   - the return value is the child's exit status (0..255), 0x7f00+ if the
+ *     child was killed by a signal (the caller must treat that as a crash),
+ *     or -1 on fork failure / timeout kill.
+ *
+ * The caller is responsible for the fork-safety of everything fn touches: it
+ * runs single-threaded in a forked image of the parent, so any mutex another
+ * parent thread holds at fork time stays locked forever. InvariantFS' rule is
+ * that every core read/write entry point runs under g_io_lock, and this is
+ * called from the sweep while it holds it, which is what makes that safe. */
+int invfs_helper_run_child(int (*fn)(void *), void *user, uint64_t mem_cap,
+                           const invfs_helper_sandbox *sb,
+                           const char *work_dir, const char *argv_hint,
+                           uint64_t timeout_ms);
+
 #endif /* INVFS_HELPER_EXEC_H */

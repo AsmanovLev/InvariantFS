@@ -1324,6 +1324,12 @@ static inline int vol_key_cmp(const uint8_t *a, uint16_t an,
  * No torn states. */
 
 /* read file data back via AST + L2P (recursive for containers); returns 0 */
+/* ADR-015 decision 7: solid-archive refusals, aggregated for the sweep
+ * report ("refused (solid): N files, M MiB"). The core counts them where the
+ * pack reports one; tools/invf-sweep.c prints and clears the total next to
+ * the batching lines, so a `-o` run reports the same number as the CLI. */
+void cpack_solid_take(uint64_t *files, uint64_t *bytes);
+
 /* WP16a (the definition lives with the codecpack exec layer, below) */
 
 /*
@@ -2144,6 +2150,18 @@ void tool_rm(const char *dir, const char *name);
 
 /* write a whole buffer, creating/truncating; 0 on success */
 int tool_write(const char *path, const uint8_t *data, size_t len);
+
+/* The pack child's RLIMIT_AS ceiling for a codec (vol_cpack.c). Shared with
+ * the ABI v3 host-I/O dispatcher (vol_cpack_hostio.c) so an in-process pack
+ * child runs under the SAME memory ceiling the exec'd helper gets: two
+ * derivations of one number is how a pack starts failing in one flow and not
+ * the other. */
+uint64_t tool_mem_cap_for(const invfs_codec *c);
+
+/* dirname(path) into buf; NULL when path is NULL or carries no '/'.
+ * Shared for the same reason: the host-I/O dispatcher derives the Landlock
+ * RW directory of a container command exactly the way the exec path does. */
+const char *sb_dirname(char *buf, size_t cap, const char *path);
 #endif
 int run_tool(const char *exe, const char *a1, const char *a2, const char *opts);
 

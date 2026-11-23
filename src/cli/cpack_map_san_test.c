@@ -1285,6 +1285,20 @@ int invfs_deflate_repro_encode(const uint8_t *raw, size_t raw_len, const invfs_d
 { (void)raw; (void)raw_len; (void)params; (void)out_stream; (void)out_len; return -1; }
 int invfs_helper_exec(char *const argv[], uint64_t mem_cap, const invfs_helper_sandbox *sb, const char *work_dir, int no_path_search, char *out, size_t out_cap, uint64_t timeout_ms)
 { (void)argv; (void)mem_cap; (void)sb; (void)work_dir; (void)no_path_search; (void)out; (void)out_cap; (void)timeout_ms; return -1; }
+/* ADR-015 host I/O: the dispatcher needs a volume to read ranges from and a
+ * contained forked child to load the pack in -- this binary has neither, and
+ * none of the legs here decomposes a container through a pack. Link ballast
+ * exactly like invfs_helper_exec above: "host I/O unavailable", which is the
+ * same answer a v1/v2 pack gets. */
+int cpack_hostio_pack_supported(const invfs_codec *c) { (void)c; return 0; }
+int cpack_hostio_begin(invfs_volume *v, uint64_t inode, uint64_t size)
+{ (void)v; (void)inode; (void)size; return -1; }
+void cpack_hostio_end(void) { }
+int cpack_hostio_active(void) { return 0; }
+void cpack_hostio_stats(uint64_t *reads, uint64_t *bytes)
+{ if (reads) *reads = 0; if (bytes) *bytes = 0; }
+int cpack_hostio_cmd(const invfs_codec *c, int cmd, const char *idx, const char *dir, const char *recipe, const char *out)
+{ (void)c; (void)cmd; (void)idx; (void)dir; (void)recipe; (void)out; return -1; }
 int invfs_plugin_pool_container_cmd(const char *pack_name, const char *pack_so_path, int cmd, const char *in_path, const char *idx, const char *out_path, const char *recipe_path, const char *mbr_dir)
 { (void)pack_name; (void)pack_so_path; (void)cmd; (void)in_path; (void)idx; (void)out_path; (void)recipe_path; (void)mbr_dir; return -1; }
 int invfs_plugin_pool_container_estimate(const char *pack_name, const char *pack_so_path, const char *in_path, uint64_t *out_mbr_sz)
