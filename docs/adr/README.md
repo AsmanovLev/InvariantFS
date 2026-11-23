@@ -18,3 +18,4 @@ This directory documents key architectural decisions made in InvariantFS.
 | [ADR-012](ADR-012-verbatim-space-dedup-chunk-index.md) | Deduplication over the Verbatim (Logical) Space — Chunk Index + Merkle Leaves | Proposed | 2026-11-17 |
 | [ADR-013](ADR-013-computed-view-inodes.md) | Computed (View) Inodes — Base Spec + Delta Overlay, Materialize on Sweep | Proposed | 2026-11-17 |
 | [ADR-014](ADR-014-container-map-is-the-abi.md) | The Container Map is the ABI, and It Declares Its Vocabulary | Accepted | 2026-11-23 |
+| [ADR-015](ADR-015-pack-io-is-ranged-or-streamed.md) | A Pack Reads Ranges or a Stream, Never a Materialized File | Accepted | 2026-11-23 |

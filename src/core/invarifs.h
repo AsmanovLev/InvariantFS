@@ -166,10 +166,21 @@ enum {
                                        * the file waits RAW and is
                                        * re-evaluated EVERY sweep; stamped
                                        * {algo,gen} of the declining codec */
-    INVFS_CLASS_ANCHORED         = 10 /* WP59a: pinned builtin-readable
+    INVFS_CLASS_ANCHORED         = 10,/* WP59a: pinned builtin-readable
                                        * (/.invariantfs/).  Never assigned
                                        * a pack/container codec; skip dedup
                                        * remap and tier demotion. */
+    INVFS_CLASS_GENERIC_SOLID    = 11 /* ADR-015 decision 7: a containerpack
+                                       * READ the file and refused it as a
+                                       * SOLID archive -- its members are not
+                                       * addressable in the stored bytes, so
+                                       * per-member decomposition cannot pay.
+                                       * Terminal like UNCOMPRESSIBLE: the
+                                       * verdict is a property of the bytes,
+                                       * not of the pack's generation, so a
+                                       * sweep stops re-asking. INVFS_CPACK_SOLID=1
+                                       * makes the pack decline plainly instead
+                                       * and the generic floor keeps the bytes */
 };
 
 #pragma pack(push, 1)

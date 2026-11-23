@@ -1122,7 +1122,8 @@ static void stamp_generic(invfs_volume *v, uint64_t id, uint8_t cls,
     uint16_t og = 0;
     int havec = vol_get_class(v, id, &oc, &oa, &og) == 0;
     if (havec && (oc == INVFS_CLASS_GENERIC_MEMLIMIT ||
-                  oc == INVFS_CLASS_GENERIC_GUARD))
+                  oc == INVFS_CLASS_GENERIC_GUARD ||
+                  oc == INVFS_CLASS_GENERIC_SOLID))
         return;
     vol_stamp_class(v, id, cls, algo, invfs_registry_generation());
 }
@@ -1307,6 +1308,20 @@ static int vol_sweep_one_impl(invfs_volume *v, uint64_t inode_id,
             if (invfs_registry_generation() <= cgen)
                 return 0;       /* retry only when the registry grew */
             break;
+        case INVFS_CLASS_GENERIC_SOLID: {
+            /* ADR-015 decision 7. A pack READ this file and refused it as a
+             * solid archive: its members are not addressable in the stored
+             * bytes, so re-asking every sweep re-derives a verdict that cannot
+             * change -- solidity is a property of the bytes, not of a pack
+             * generation. INVFS_CPACK_SOLID=1 is the operator asking for the
+             * full unpack anyway, and then the verdict must not hold the file
+             * back: fall through to the dispatch, which hands the pack the
+             * file as a plain decline and lets the container lane try. */
+            const char *opt = getenv("INVFS_CPACK_SOLID");
+            if (opt && *opt == '1')
+                break;          /* opted in: retry */
+            return 0;           /* solid: already answered */
+        }
         case INVFS_CLASS_DEFER_ENOSPC:
             break;              /* space is a property of NOW: retry */
         case INVFS_CLASS_GENERIC_MEMLIMIT: {
