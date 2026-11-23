@@ -25,3 +25,9 @@ Redefine savepoint tracking to use generation tuples:
 ### Positive
 - Resolves undefined behavior when rolling back a volume where fold occurred during savepoint lifespan.
 - Decouples savepoint validity from physical byte offsets in circular or multi-segment delta logs.
+
+## See also
+
+- [ADR-009-durability-contract](ADR-009-durability-contract.md) — when a savepoint is durable
+- [ADR-002-fold-watermark-ordering](ADR-002-fold-watermark-ordering.md) — read consistency across a fold
+- [all ADRs](README.md)

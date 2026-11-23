@@ -266,3 +266,9 @@ encoder, because that would change its content.
    exclusively and already has the queue discipline (defer/admission/retry) that a
    composer needs. Consequence to accept: views created on a volume whose sweep never
    runs stay `NOT_READY` — which `open()` reports as `EAGAIN`, so nothing lies.
+
+## See also
+
+- [ADR-012-verbatim-space-dedup-chunk-index](ADR-012-verbatim-space-dedup-chunk-index.md) — the chunk index behind the view
+- [ADR-008-fuse-vs-kernel](ADR-008-fuse-vs-kernel.md) — who serves the view
+- [all ADRs](README.md)

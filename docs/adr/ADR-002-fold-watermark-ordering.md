@@ -30,3 +30,9 @@ Incorporate a monotonic fold watermark $W$ into the published base root descript
 
 ### Negative / Trade-offs
 - Requires passing the base watermark down to read resolution helpers.
+
+## See also
+
+- [ADR-001-meta-v3-btree-delta-model](ADR-001-meta-v3-btree-delta-model.md) — the btree + delta log being folded
+- [ADR-009-durability-contract](ADR-009-durability-contract.md) — the durability point a fold lands on
+- [all ADRs](README.md)

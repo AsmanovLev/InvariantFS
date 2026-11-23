@@ -119,3 +119,9 @@ current binary. Two separate defects made that expensive to diagnose:
   information at the only layer that can enforce it.
 - **Skipping unknown kinds and serving zeros.** That would read a `kind 4`
   payload region as zeros and return plausible-looking garbage.
+
+## See also
+
+- [ADR-007-plugin-architecture-ivpack](ADR-007-plugin-architecture-ivpack.md) — the pack ABI this map belongs to
+- [ADR-015-pack-io-is-ranged-or-streamed](ADR-015-pack-io-is-ranged-or-streamed.md) — what a pack reads *through*
+- [all ADRs](README.md)

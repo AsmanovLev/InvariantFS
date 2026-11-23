@@ -167,3 +167,9 @@ mutating call leaves the pre-call state (never a torn prefix); post-soak
 terminal damage that is fully named is an accepted proven-exhausted state,
 not a failure to repair (the  checker never learned the content cut and
 the bitmap carries no CRC -- both recorded gaps, neither silent).
+
+## See also
+
+- [ADR-003-savepoint-generation-semantics](ADR-003-savepoint-generation-semantics.md) — generation semantics the barrier protects
+- [ADR-002-fold-watermark-ordering](ADR-002-fold-watermark-ordering.md) — the fold this contract orders after
+- [all ADRs](README.md)

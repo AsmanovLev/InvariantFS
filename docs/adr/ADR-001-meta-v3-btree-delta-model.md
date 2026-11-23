@@ -27,3 +27,9 @@ In InvariantFS Meta-v2, metadata was maintained as an append-only stream of inod
 ### Negative / Risks
 - Background fold worker adds write amplification during high-churn workloads.
 - Requires careful ordering to ensure crash consistency and race-free reads during fold publication.
+
+## See also
+
+- [ADR-006-delta-lossless-compression](ADR-006-delta-lossless-compression.md) — how the delta is encoded
+- [ADR-002-fold-watermark-ordering](ADR-002-fold-watermark-ordering.md) — when it is merged
+- [all ADRs](README.md)

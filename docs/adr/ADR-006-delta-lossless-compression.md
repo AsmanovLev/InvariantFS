@@ -41,3 +41,9 @@ Instead of choosing between binary verbatim storage or risky non-exact re-compre
 - **Bit-exactness is mathematically guaranteed:** The reconstruction reproduces 100% identical SHA-256 hashes.
 - **Containers are unlocked:** `qcow2` images with compressed clusters, compressed tarballs, and custom archives can now be fully decomposed into guest disk images and inner filesystems.
 - **Cross-VM deduplication enabled:** Identical OS libraries and files inside different compressed VMs can now be deduplicated.
+
+## See also
+
+- [ADR-001-meta-v3-btree-delta-model](ADR-001-meta-v3-btree-delta-model.md) — the log this compresses
+- [ADR-012-verbatim-space-dedup-chunk-index](ADR-012-verbatim-space-dedup-chunk-index.md) — dedup over the verbatim space
+- [all ADRs](README.md)

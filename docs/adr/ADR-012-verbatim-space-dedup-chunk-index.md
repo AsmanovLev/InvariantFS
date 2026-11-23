@@ -354,3 +354,9 @@ batch accumulators sort candidates by `(family, size, index)`
 the PPMd lesson applied to storage. The planner labels every file's family and prints the
 per-family totals, and on this corpus the remaining gain comes from chunk size rather
 than grouping, because the text share is already batched by family.
+
+## See also
+
+- [ADR-006-delta-lossless-compression](ADR-006-delta-lossless-compression.md) — the delta this indexes over
+- [ADR-013-computed-view-inodes](ADR-013-computed-view-inodes.md) — view inodes as a consumer
+- [all ADRs](README.md)

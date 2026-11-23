@@ -94,3 +94,9 @@ To guarantee both high performance and crash resilience:
 - **Portability:** Volumes carrying `.invariantfs/packs/` are self-hosting and mountable on any compatible Linux host without prior external tool installations.
 - **Deduplication Enabled on Guest Disk Content:** Containers like `qcow2` can utilize `helper:deflate_repro` to extract uncompressed guest clusters, allowing cross-VM deduplication and compact recipes.
 - **Graceful Lifecycle & Migration:** `old_packs/` guarantees seamless read backward-compatibility while allowing offline sweeps to advance recipe formats.
+
+## See also
+
+- [ADR-014-container-map-is-the-abi](ADR-014-container-map-is-the-abi.md) — how a decomposed container is described
+- [ADR-015-pack-io-is-ranged-or-streamed](ADR-015-pack-io-is-ranged-or-streamed.md) — how a pack reaches its input
+- [all ADRs](README.md)
