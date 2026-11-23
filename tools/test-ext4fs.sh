@@ -390,6 +390,42 @@ EOF
 dbg "$F" "$WORK/fs2k.cmds"
 e2fsck -fn "$F" >/dev/null 2>&1 || { echo "FAIL: fs2k not clean"; exit 1; }
 
+echo "== fixture zl.ext4 (16 MB, 4K blocks, 2 MiB of random bytes in FREE space) =="
+# E4RCP002 elides all-zero runs, and that must be a MEASUREMENT (the block is
+# READ, a free block may hold bit-rot) and not an assumption ("unallocated =>
+# zero"). This fixture is the difference: after mkfs + one member, 2 MiB of
+# random bytes are written straight into the image file at an offset that
+# debugfs proves to be unallocated, so the filesystem is still clean and those
+# bytes are still garbage nobody's metadata names. strip/flush/map must keep
+# them in the RANGE side of the split, and the hand self-test's splice
+# (rebuilt image vs this file, byte for byte) is what proves it.
+F=$WORK/zl.ext4
+ZL_OFF=$((12 * 1024 * 1024))
+ZL_LEN=$((2 * 1024 * 1024))
+dd if=/dev/zero of="$F" bs=1M count=16 status=none
+mkfs.ext4 -q -F -b 4096 "$F"
+cat > "$WORK/zl.cmds" <<EOF
+mkdir /src
+write $WORK/stage/ping.c /src/ping.c
+write $WORK/stage/head256k.bin /payload.bin
+EOF
+dbg "$F" "$WORK/zl.cmds"
+python3 - "$F" "$ZL_OFF" "$ZL_LEN" <<'PY'
+import random, sys
+img, off, ln = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+rnd = random.Random(20)
+with open(img, "r+b") as f:
+    f.seek(off)
+    f.write(rnd.randbytes(ln))
+PY
+# the write must have landed in FREE space, or the fixture proves nothing
+for blk in $((ZL_OFF / 4096)) $((ZL_OFF / 4096 + 256)) $(((ZL_OFF + ZL_LEN) / 4096 - 1)); do
+    debugfs -R "testb $blk" "$F" 2>/dev/null | grep -q "not in use" \
+        || { echo "FAIL: zl.ext4 block $blk is allocated, the random bytes are not in free space"; exit 1; }
+done
+e2fsck -fn "$F" >/dev/null 2>&1 \
+    || { echo "FAIL: zl.ext4 not clean after the free-space write"; exit 1; }
+
 echo "== fixtures ht0/ht1 (htree dirs via e2fsck -D, hand legs only) =="
 F=$WORK/ht0.ext4
 dd if=/dev/zero of="$F" bs=1M count=32 status=none
@@ -476,12 +512,19 @@ assert len(d) == 8 + n * 29, "map blob length"
 out = bytearray(len(orig))
 pos = 0
 nmem = 0
+nzero = 0
 for i in range(n):
     off, ln, kind, idx, so = struct.unpack_from("<QQBIQ", d, 8 + i * 29)
     assert off == pos and ln > 0, "map must partition contiguously"
     if kind == 0:
         assert idx == 0 and so + ln <= len(recipe), "RECIPE bounds"
         out[off:off+ln] = recipe[so:so+ln]
+    elif kind == 3:
+        # E4RCP002 zero run: nothing is stored, the bytes ARE zeros. The
+        # splice below still proves the claim against the image, so a pack
+        # that elides a region it did not prove zero fails here.
+        assert idx == 0 and so == 0, "a zero entry names a source"
+        nzero += ln
     else:
         mp = os.path.join(mdir, "%d" % idx)
         m = open(mp, "rb").read()
@@ -491,7 +534,8 @@ for i in range(n):
     pos += ln
 assert pos == len(orig), "map must cover the whole image"
 assert bytes(out) == orig, "map-splice mismatch"
-print("    map: %d entries (%d member runs), splice bit-exact" % (n, nmem))
+print("    map: %d entries (%d member runs, %d zero bytes), splice bit-exact"
+      % (n, nmem, nzero))
 PY
 }
 
@@ -539,6 +583,25 @@ hand_selftest() {
 hand_selftest "$WORK/incoming/fsA.ext4" fsA
 hand_selftest "$WORK/incoming/fsB.ext4" fsB
 hand_selftest "$WORK/fs2k.ext4" fs2k
+hand_selftest "$WORK/zl.ext4" zl
+# and the zero-elision must not have swallowed the dirty free space: every
+# map entry covering the random window is kind 0 (recipe bytes), never kind 3.
+python3 - "$WORK/zl.map" "$ZL_OFF" "$ZL_LEN" <<'PY'
+import struct, sys
+mp, lo, ln = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+d = open(mp, "rb").read()
+(n,) = struct.unpack_from("<I", d, 4)
+hit = 0
+for i in range(n):
+    off, l, kind = struct.unpack_from("<QQB", d, 8 + i * 29)
+    if off < lo + ln and off + l > lo:
+        assert kind == 0, ("the random window is served as kind %d at %d"
+                           % (kind, off))
+        hit += 1
+assert hit, "no map entry covers the random window"
+print("  zl: the %d B random window (free space) rides in %d kind-0 entr%s"
+      % (ln, hit, "y" if hit == 1 else "ies"))
+PY
 # htree fixtures: member content is uniform; exercise extract + rebuild
 for t in ht0 $HT1; do
     F=$WORK/$t.ext4
@@ -616,7 +679,18 @@ rc=0
 $E4 rebuild "$WORK/$T.trunc.recipe" "$WORK/$T.mbr" "$WORK/junk.out" 2>/dev/null || rc=$?
 [ $rc -eq 1 ] || { echo "FAIL: truncated recipe rc=$rc, want 1"; exit 1; }
 cp "$WORK/$T.recipe" "$WORK/$T.corrupt.recipe"
-printf 'ZZZZ' | dd of="$WORK/$T.corrupt.recipe" bs=1 seek=8 conv=notrunc status=none
+# E4RCP002 stores only the NON-ZERO runs, so the gaps in the range table ARE
+# the elided zero runs and there is no tiling property left for `rebuild` to
+# check: a bogus image_size is in bounds for every range the recipe carries
+# (measured: 'ZZZZ' at offset 8, i.e. 1.4 GiB for a 64 MiB image, rebuilt
+# with exit 0 into a 1.4 GiB sparse file). What the recipe CAN still prove is
+# that no range or member extent lies past image_size, so the leg corrupts
+# the size to one that cannot hold the recipe's own ranges -- still exit 1.
+# The oversized direction is covered one layer up: pack_container_rebuild()
+# requires the rebuilt file to be exactly the record's length and refuses
+# with "rebuild of ... produced N bytes, want M" (src/core/vol_cpack.c).
+python3 -c 'import sys,struct; sys.stdout.buffer.write(struct.pack("<Q", 65536))' \
+    | dd of="$WORK/$T.corrupt.recipe" bs=1 seek=8 conv=notrunc status=none
 rc=0
 $E4 rebuild "$WORK/$T.corrupt.recipe" "$WORK/$T.mbr" "$WORK/junk.out" 2>/dev/null || rc=$?
 [ $rc -eq 1 ] || { echo "FAIL: corrupt-size recipe rc=$rc, want 1"; exit 1; }
@@ -886,7 +960,7 @@ PKRATIO=$($B/invf-stats "$IMG2" | sed -n 's/^  est. ratio[^:]*: \([0-9.]*\)x.*/\
 CTRATIO=$($B/invf-stats "$IMGCTL" | sed -n 's/^  est. ratio[^:]*: \([0-9.]*\)x.*/\1/p')
 echo "  control (whole images, generic ZSTD-19): used $CTUSED MiB / logical $CTLOG MiB / ratio ${CTRATIO}x"
 echo "  pack (recipe raw + members batched):     used $PKUSED MiB / logical $PKLOG MiB / ratio ${PKRATIO}x"
-echo "  fsA recipe blob: $RRECIPE bytes (all non-member bytes verbatim)"
+echo "  fsA recipe blob: $RRECIPE bytes (the non-member bytes that are NOT verified zero -- E4RCP002 stores only the non-zero runs)"
 echo "  member pipeline: 8 text members -> PPMd batch, ELF -> ZSTD_BCJ batch"
 [ -n "$PKUSED" ] && [ -n "$CTUSED" ] || { echo "FAIL: stats parse"; exit 1; }
 echo "ratio demo recorded: pack_used=${PKUSED}MiB(${PKRATIO}x) control_used=${CTUSED}MiB(${CTRATIO}x) recipe=$RRECIPE"

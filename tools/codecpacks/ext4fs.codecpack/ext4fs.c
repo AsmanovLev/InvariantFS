@@ -40,7 +40,7 @@
  *
  * RECIPE FORMAT (pack-owned; the FS never parses it; all integers LE)
  *
- *    0   8   magic "E4RCP001"
+ *    0   8   magic "E4RCP002"
  *    8   8   u64 image_size        (byte size of the original image file)
  *   16   4   u32 block_size
  *   20   4   u32 n_members
@@ -57,17 +57,44 @@
  *    ..  ..  range bytes: the image bytes of every range, concatenated in
  *             range-table order. data_base = 32 + 24*M + 32*E + 16*R.
  *
- *   The ranges cover EVERYTHING in [0, image_size) except member content:
- *   superblock, GDT, block/inode bitmaps, inode tables, directory blocks,
- *   extent-tree index nodes, journal, reserved-GDT blocks, unwritten
- *   extents, beyond-i_size tails and every unused block — verbatim, so
- *   bit-rot is preserved. The per-member extent map says where each
+ *   E4RCP002 stores the NON-ZERO runs of the non-member bytes only. Every
+ *   block of that region is READ and classified (gcfg_split_zero), and the
+ *   all-zero runs are written down nowhere: their complement in
+ *   [0, image_size) IS zeros, and rebuild reproduces them for free because
+ *   it writes every range at its absolute image offset into a file it
+ *   ftruncate()s -- the gaps become holes, and holes read as zeros. The
+ *   proof is a MEASUREMENT, not an assumption: a free block holding bit-rot
+ *   is not zero, so it stays in the range table (measured: 8 MiB of random
+ *   bytes written into a 128 MiB image's free space moved that much coverage
+ *   from the elided side to the stored side, and the recipe grew from 60 652
+ *   B to 8 449 276 B). E4RCP001 stored every non-member byte verbatim, which
+ *   is why the core's size guard saw "fixed = the whole partition" and
+ *   declined every decomposition at every size tried.
+ *
+ *   WHAT THAT COSTS: because the gaps are not written down, image_size can no
+ *   longer be PROVEN from the recipe body (E4RCP001's ranges+extents tiled
+ *   [0, image_size) exactly; v2 only requires them to be disjoint, in bounds
+ *   and ascending). A corrupted image_size that is merely TOO LARGE therefore
+ *   rebuilds without complaint -- measured, 'ZZZZ' at header offset 8 gave
+ *   exit 0 and a 1.4 GiB sparse file from a 64 MiB recipe. The wrong-size
+ *   output is caught one layer up: pack_container_rebuild() requires the
+ *   rebuilt file to be exactly the record's length (src/core/vol_cpack.c).
+ *
+ *   The ranges and the per-member extents still cover everything that is
+ *   NOT elided: superblock, GDT, block/inode bitmaps, inode tables, directory
+ *   blocks, extent-tree index nodes, journal, reserved-GDT blocks, unwritten
+ *   extents, beyond-i_size tails and every non-zero unused block -- verbatim,
+ *   so bit-rot is preserved. The per-member extent map says where each
  *   member's logical bytes live in the image: idx -> (logical_off,
  *   image_off, len) list. rebuild truncates the output to image_size,
  *   writes the ranges verbatim, then splices member bytes into their
  *   extents in order; a member file whose size != usize fails with
  *   exit 1. strip+map agree on data_base, so MRMP RECIPE src_off values
  *   point into the recipe blob's data section.
+ *
+ *   rebuild accepts E4RCP002 only. An E4RCP001 recipe is refused BY NAME
+ *   (it is a real generation, not damage) with a message that names the way
+ *   out: re-import the container from its source image.
  *
  * SUPPORTED (parse-proven; anything else declines, exit 3)
  *
@@ -1631,7 +1658,20 @@ static int cmd_map(const char *in, const char *out)
     /* Every byte of the image is one segment: non-zero run, member payload, or
      * zeros. Sorted, they must tile -- that is what the core's validator
      * checks, and it is the property that makes the map answer for every byte
-     * exactly once. */
+     * exactly once.
+     *
+     * kind 3 (zeros) is emitted here, and it is what makes the decomposition
+     * PAY: on a 128 MiB image with two small members the recipe falls from
+     * the whole partition to 60 652 B, and the core stores nothing for the
+     * 127 MiB that are classified zero. The read path through such a map is
+     * proven, not assumed -- the core's sweep-time guard reads EVERY entry
+     * back through the real read path (recipe segment + member siblings) and
+     * memcmps it against the original image, and tools/test-ext4fs.sh takes
+     * `cmp` of the whole container back (fsA 4K blocks, fsB 1K blocks, 2K/
+     * htree/multi-extent/orphan-only fixtures, pack-absent reads through the
+     * same map) plus three consecutive sweeps without drift. The map used to
+     * REFUSE when a recipe had elided zeros, because the core could not serve
+     * kind 3 yet; that gate is gone with the reader in place. */
 #define SEG_PUSH(o, l, kd)                                                   \
     do {                                                                     \
         if (n_seg == cap_seg) {                                              \
@@ -1676,32 +1716,6 @@ static int cmd_map(const char *in, const char *out)
     }
     qsort(seg, n_seg, sizeof *seg, map_seg_cmp);
 
-    /* REFUSE while elision cannot be read back.
-     *
-     * With the logical offsets fixed the map is now accepted, the guard passes
-     * and decomposition COMPLETES -- members appear -- but the container then
-     * cannot be read: `invf-cat` exits 1 with "ext4fs: mapped container read
-     * f..." and produces 0 bytes of 134 217 728. A member that exists and a
-     * container that cannot be read is exactly the class of failure this
-     * project refuses to ship, so a map with elided zeros declines until the
-     * read path through it is proven: `cmp` of the container against its source
-     * image after a sweep, and 31 sweeps without drift.
-     *
-     * MEASURED, 128 MiB ext4 with two members, in the core tree at f66ca44:
-     *   sweep ok, members 5 (!mbr0012-ino12, !mbr0013-payload.bin,
-     *   !mbr0014-note.txt, !mbrmap, !mbrt), then invf-cat rc=1, 0 bytes.
-     * Remove this block in the commit that makes that read bit-exact. */
-    {
-        size_t z = 0, q;
-        for (q = 0; q < n_seg; q++)
-            if (seg[q].kind == 3) z++;
-        if (z && !getenv("EXT4FS_MAP_ELIDE")) {
-            note("map: elided zero regions, read path unproven", z, 0);
-            free(seg);
-            rc = EX_DECLINE;
-            goto out;
-        }
-    }
     blen = 8 + n_seg * 29;
     blob = (uint8_t *)malloc(blen);
     if (!blob) { free(seg); rc = EX_IO; goto out; }

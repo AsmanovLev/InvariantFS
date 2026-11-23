@@ -2616,10 +2616,23 @@ typedef struct {
 
 /* Parse a map blob (pack output at sweep time, disk data at read time --
  * validated identically). Strict: the blob is exactly the header plus
- * count entries. Returns 0 on success. */
+ * count entries. Returns 0 on success.
+ *
+ * `why` (optional) gets a one-clause reason for a refusal. It exists because
+ * this function is the ONE place a "the container cannot be read back" report
+ * has to be attributed from, and it used to answer with a bare -1 behind a
+ * message that also covered the sibling read: "[cpack] get X: map read/parse
+ * failed" cannot be told apart from "the !mbrmap blob is missing/truncated" or
+ * "this map uses a KIND this build does not know", and those three have
+ * completely different fixes. Measured cost of not having it: a reader one
+ * commit older than the map's kind byte (kind 3, "these bytes are zeros",
+ * f66ca44) produces exactly that line plus "mapped container read failed",
+ * 0 bytes of 134 217 728, and a false "the read path through the map is
+ * broken" conclusion -- while the same volume reads bit-exactly with the
+ * current binary. See the kind case below. */
 static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
                            cpack_map_ent **out, size_t *n_out,
-                           uint32_t *decomp_gen_out)
+                           uint32_t *decomp_gen_out, const char **why)
 {
     cpack_map_ent *ents;
     uint32_t count, i;
@@ -2628,8 +2641,12 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
 
     *out = NULL;
     *n_out = 0;
+    if (why) *why = NULL;
     if (decomp_gen_out) *decomp_gen_out = 0;
-    if (blob_len < 8) return -1;
+    if (blob_len < 8) {
+        if (why) *why = "the map blob is shorter than a header";
+        return -1;
+    }
     if (memcmp(blob, CPACK_MAP_MAGIC2, 4) == 0) {
         v2 = 1;
         ent_wire = CPACK_MAP_ENT_WIRE2;
@@ -2639,18 +2656,32 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
         ent_wire = CPACK_MAP_ENT_WIRE;
         base = 8;
     } else {
+        if (why) *why = "the map blob does not start with MRMP/MRM2";
         return -1;
     }
     memcpy(&count, blob + 4, 4);   /* LE by the host convention (invarifs.h) */
-    if (!count || count > CPACK_MAP_MAX_ENTS) return -1;
-    if (blob_len != base + (size_t)count * ent_wire) return -1;
+    if (!count) {
+        if (why) *why = "the map holds no entries";
+        return -1;
+    }
+    if (count > CPACK_MAP_MAX_ENTS) {
+        if (why) *why = "the map holds more entries than the reader limits";
+        return -1;
+    }
+    if (blob_len != base + (size_t)count * ent_wire) {
+        if (why) *why = "the map blob length does not match its entry count";
+        return -1;
+    }
     if (v2) {
         uint32_t g;
         memcpy(&g, blob + 8, 4);
         if (decomp_gen_out) *decomp_gen_out = g;
     }
     ents = (cpack_map_ent *)calloc(count, sizeof *ents);
-    if (!ents) return -1;
+    if (!ents) {
+        if (why) *why = "the map entry table could not be allocated";
+        return -1;
+    }
     for (i = 0; i < count; i++) {
         const uint8_t *p = blob + base + (size_t)i * ent_wire;
         memcpy(&ents[i].orig_off, p, 8);
@@ -2671,6 +2702,15 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
          * predates it refuses the map and abandons the decomposition, which is
          * the safe direction -- it never reads zeros as if they were bytes. */
         if (ents[i].kind > CPACK_MAP_KIND_ZERO) {
+            /* The one refusal a reader can hit on a map that is PERFECTLY
+             * VALID for a newer build, so it is worth its own sentence: the
+             * map is FS-owned (the wire format lives in this file, not in the
+             * pack), so a new kind is an ABI step, and a downgraded reader
+             * must say what it is missing instead of blaming the container. */
+            if (why) *why = "an entry names a kind this build does not know "
+                            "(a map written by a newer core; this one knows "
+                            "kinds 0..3 -- upgrade, or read with the build "
+                            "that wrote the volume)";
             free(ents);
             return -1;
         }
@@ -3793,10 +3833,26 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
         if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: tino=%llu mino=%llu\n", name, (unsigned long long)tino, (unsigned long long)mino);
         return 0;
     }
-    if (vol_read_file(v, mino, &mapb, &map_len) != 0 ||
-        cpack_map_parse(mapb, map_len, &ents, &nents, &decomp_gen) != 0) {
-        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] get %s: map read/parse failed\n", name);
+    if (vol_read_file(v, mino, &mapb, &map_len) != 0) {
+        /* ONE step per message: the sibling read, the parse and the validate
+         * are three different failures with three different fixes, and they
+         * used to share a line (see cpack_map_parse's header comment). */
+        if (getenv("INVFS_DEBUG_PACKS"))
+            fprintf(stderr, "[cpack] map_get %s: '%s' unreadable (ino=%llu)\n",
+                    name, mn, (unsigned long long)mino);
         goto fail;
+    }
+    {
+        const char *parse_why = NULL;
+        if (cpack_map_parse(mapb, map_len, &ents, &nents, &decomp_gen,
+                            &parse_why) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[cpack] map_get %s: '%s' does not parse "
+                                "(%zu bytes): %s\n",
+                        name, mn, map_len,
+                        parse_why ? parse_why : "(no reason)");
+            goto fail;
+        }
     }
     if (vol_read_file(v, tino, &table, &table_len) != 0 ||
         cpack_parse_table(table, table_len, &mem, &nmem, NULL) != 0 || !nmem) {
@@ -4669,10 +4725,14 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             uint32_t g = pc->generation;
             memcpy(mapb + 8, &g, 4);
         }
-        if (cpack_map_parse(mapb, map_len, &ments, &nments, NULL) != 0) {
-            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map parse failed\n");
-            fprintf(stderr, "sweep: %s: %s: map unreadable, "
-                            "decomposition abandoned\n", pc->name, name);
+        if (cpack_map_parse(mapb, map_len, &ments, &nments, NULL,
+                            &map_why) != 0) {
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr,"[cpack] map parse failed (%zu bytes): %s\n",
+                        map_len, map_why ? map_why : "(no reason)");
+            fprintf(stderr, "sweep: %s: %s: map unreadable (%s), "
+                            "decomposition abandoned\n", pc->name, name,
+                    map_why ? map_why : "no reason given");
             goto out;
         }
         /* Shape first, price second: a map that does not tile the container
