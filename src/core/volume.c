@@ -2662,11 +2662,29 @@ int extend_meta_extent(invfs_volume *v, uint64_t extent_idx, uint8_t new_size_cl
     adj_blocks = new_blocks - old_blocks;
     adj_pba = old_pba + old_blocks;
 
-    if (bit_get(v->bitmap, adj_pba) == 0) {
+    /* A CLEAR BIT IS NOT PROOF OF FREEDOM. The ANC0 tail anchor sits INSIDE
+     * the shadow zone's range (shadow_zone_start + shadow_zone_blocks ==
+     * total_blocks), so it is a candidate block for any run that reaches the
+     * tail -- and its bit can legitimately be clear: the bitmap is a derived
+     * cache, and a rebuild from replay leaves the anchor free because no
+     * delta record ever names it. That is the same clear bit that let
+     * vol_punch_holes() zero the block before anchor_block_protected() became
+     * the structural test (volume.c:2521 in alloc_blocks, volume.c:3890 in
+     * vol_punch_holes). This is the third
+     * allocator-shaped path and it did not have the guard, so a metadata
+     * extent ending near the tail could be GROWN over the anchor, mark it
+     * allocated as metadata, and have the next metadata record overwrite the
+     * volume's only second copy of its two descriptors.
+     *
+     * So a protected block counts as NOT free in both loops. The guard is a
+     * compare against volume geometry and takes a const volume: it cannot
+     * fail, and it costs one compare per candidate block. */
+    if (!bit_get(v->bitmap, adj_pba) && !anchor_block_protected(v, adj_pba)) {
         uint64_t k;
         int can_extend = 1;
         for (k = 1; k < adj_blocks; k++) {
-            if (bit_get(v->bitmap, adj_pba + k) != 0) {
+            if (bit_get(v->bitmap, adj_pba + k) ||
+                anchor_block_protected(v, adj_pba + k)) {
                 can_extend = 0;
                 break;
             }
