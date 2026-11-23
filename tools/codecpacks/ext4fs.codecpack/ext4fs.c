@@ -134,6 +134,16 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+/* The plugin C ABI (ADR-007). Same pair of includes as fatfs/ntfs: the pack is
+ * built twice from this one source -- once as the CLI (bin/ext4fs) and once as
+ * libext4fs.so with -DIVPACK_SHARED_LIB -- so the CLI and the plugin can never
+ * drift apart. */
+#if __has_include("ivpack_impl.h")
+#include "ivpack_impl.h"
+#elif __has_include("../../../src/include/ivpack_impl.h")
+#include "../../../src/include/ivpack_impl.h"
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -205,6 +215,15 @@
 #define ABI_MAX_MEMBERS  1048576u
 #define ABI_MAX_IDX      1048575u
 #define ABI_MAP_MAX_ENTS (4u * ABI_MAX_MEMBERS + 4u)
+
+/* `classify` is a CLI-only manifest command: the plugin C ABI carries five
+ * (enumerate/extract/strip/rebuild/map). Under -DIVPACK_SHARED_LIB nothing
+ * references it, so -Werror=unused-function would reject the .so. */
+#if defined(__GNUC__)
+#define E4_MAYBE_UNUSED __attribute__((unused))
+#else
+#define E4_MAYBE_UNUSED
+#endif
 
 #define RECIPE_MAGIC "E4RCP002"
 #define RECIPE_HDR   32u
@@ -1816,7 +1835,7 @@ static int cmd_estimate(const char *in)
 
 
 
-static int cmd_classify(const char *in, const char *out)
+static E4_MAYBE_UNUSED int cmd_classify(const char *in, const char *out)
 {
     fs_t *fs;
     rrange_t *rr;
@@ -2076,6 +2095,28 @@ out:
     return rc;
 }
 
+/* ---- ivpack plugin C ABI export (ADR-007) --------------------------------
+ * The five cmd_* below already take the canonical signatures, so the whole
+ * glue is one descriptor plus three macros; ivpack_impl.h fork-guards each call
+ * so the CLI's exit(3)=decline / exit(1)=error contract survives inside a
+ * long-lived worker. Without this block libext4fs.so exports nothing and
+ * `invf-ivpack_packs_test` fails on "ext4fs: exports the three ABI symbols" --
+ * which is how shard 4 of `make test` had been dying one line past the member
+ * bound check. */
+static const ivpack_desc s_ext4fs_desc = {
+    IVPACK_API_VERSION, "ext4fs", "1.0.0", "containerpack", 0
+};
+
+const ivpack_desc *ivpack_get_desc(void) { return &s_ext4fs_desc; }
+
+IVPACK_CANON_CALLS(ext4fs)
+
+IVPACK_DEFINE_CONTAINER_CMD(ext4fs, IVPACK_GLUE_NONE())
+
+IVPACK_DEFINE_CONTAINER_ESTIMATE(ext4fs, IVPACK_GLUE_NONE(),
+                                rc = (int)cmd_estimate(a);)
+
+#ifndef IVPACK_SHARED_LIB
 int main(int argc, char **argv)
 {
     g_verbose = getenv("EXT4FS_DEBUG") != NULL;
@@ -2096,3 +2137,4 @@ int main(int argc, char **argv)
         return cmd_classify(argv[2], argv[3]);
     return EX_USAGE;
 }
+#endif /* !IVPACK_SHARED_LIB */
