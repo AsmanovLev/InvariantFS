@@ -281,8 +281,28 @@ static uint64_t mb_alloc_meta_zone(invfs_volume *v)
     i = v->mb_alloc_cursor;
     if (i < start || i >= end)
         i = start;
+    /* A CLEAR BIT IS NOT PROOF OF FREEDOM. This is the fourth allocator-shaped
+     * path to hand out a block on the strength of a clear bitmap bit, after
+     * alloc_blocks (volume.c:2521), vol_punch_holes (volume.c:3891) and
+     * extend_meta_extent (volume.c:2682, fe214e2). The ANC0 tail anchor is
+     * the block nobody allocated: it lies INSIDE the shadow zone's range
+     * (shadow_zone_start + shadow_zone_blocks == total_blocks), and the scan
+     * below is CLAMPED to total_blocks (see `end` above), so on any volume
+     * whose metadata zone reaches the tail, total_blocks - 1 is a candidate.
+     * Its bit is legitimately clear -- the bitmap is a DERIVED cache, and a
+     * rebuild from replay leaves the anchor free because no delta record ever
+     * names it (the world leg 10 of tools/test-meta-anchor.sh builds, and the
+     * world a repair is in). Taking it would mark the anchor as a metadata
+     * base page and then mbuf_alloc's own mb_write_empty would erase the
+     * volume's only second copy of RT30/SPT0.
+     *
+     * So a protected block counts as NOT free and the walk continues. The
+     * guard is a compare against volume geometry on a const volume: it cannot
+     * fail, and it costs one compare per candidate block. If the anchor is the
+     * zone's only candidate the scan simply finds nothing and records the
+     * proven-empty hint, which is the honest answer. */
     for (n = 0; n < end - start; n++) {
-        if (!bit_get(v->bitmap, i)) {
+        if (!bit_get(v->bitmap, i) && !anchor_block_protected(v, i)) {
             bit_set(v->bitmap, i);
             if (v->meta_type_bitmap)
                 bit_set(v->meta_type_bitmap, i);
@@ -317,11 +337,20 @@ uint64_t mbuf_alloc(invfs_volume *v, uint64_t gen)
         return 0;
     /* A read-only volume is read-only at the METADATA level too. Every other
      * allocator applies this latch -- alloc_blocks does it at
-     * src/core/volume.c:2886 -- and this path did not, so it scanned the
+     * src/core/volume.c:2468 -- and this path did not, so it scanned the
      * metadata-zone bitmap and handed blocks out on a volume that had latched
      * itself read-only for lack of space. That is the one guarantee the latch
      * exists to give. Return 0, which is this function-s allocation-failure
-     * value and is already handled by every caller. */
+     * value and is already handled by every caller.
+     *
+     * IT MUST STAY ABOVE THE ALLOCATING PATHS. mb_alloc_meta_zone's first act
+     * on finding a candidate is to set a bit in v->bitmap, and the boot-page
+     * hand-out below writes a page, so a latch placed after either of them
+     * would return 0 with the mutation already made. Read from the top of this
+     * function: the test is the first statement after the `!v` guard and both
+     * allocating paths follow it. The `ro` mode of `invf-anchor_test
+     * alloc-meta` drives it -- the same geometry as that driver's `short`
+     * mode, plus the flag -- and asserts that no bit moved. */
     if (v->sb.vol_flags & VOLF_READONLY)
         return 0;
     if (v->rt_present && v->rt.page_size != INVFS_BLOCK_SIZE)
