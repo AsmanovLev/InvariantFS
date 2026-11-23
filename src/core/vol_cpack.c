@@ -11,7 +11,9 @@
 #include "tool_scratch.h"
 #include "vol_plugin_client.h"
 #include "vol_plugin_inproc.h"
+#include "vol_cpack_hostio.h"   /* ABI v3 host I/O (ADR-015) */
 #include "ivpack_loader.h"
+#include "../include/ivpack_impl.h"   /* IVPACK_RC_DECLINE_SOLID */
 #include "../codecs/deflate_repro.h"
 #include <dirent.h>
 #include <sys/stat.h>
@@ -147,7 +149,7 @@ static const char *tool_resolve_strict(const char *name, char *buf,
 #define TOOL_MEM_CAP_FLOOR   (256ull << 20)  /* 256 MiB */
 
 
-static uint64_t tool_mem_cap_for(const invfs_codec *c)
+uint64_t tool_mem_cap_for(const invfs_codec *c)
 {
     if (c && c->dec_mem_bytes) {
         uint64_t cap = c->dec_mem_bytes > UINT64_MAX / 2
@@ -164,7 +166,7 @@ static uint64_t tool_mem_cap_for(const invfs_codec *c)
 
 
 /* dirname(path) into buf; NULL when path is NULL or carries no '/' */
-static const char *sb_dirname(char *buf, size_t cap, const char *path)
+const char *sb_dirname(char *buf, size_t cap, const char *path)
 {
     const char *sl;
     size_t n;
@@ -773,6 +775,22 @@ int invfs_codec_pack_cmd(const invfs_codec *c, int cmd,
 
     if (!def || !def->is_container) return -1;
     if (!hd) return -1;
+
+    /* ADR-015: the sweep is decomposing a container through ABI v3 host I/O,
+     * so this call has no input path to give anyone -- the bytes are reached
+     * through the callbacks. It MUST go to the in-process dispatcher: falling
+     * through to the pool or to the CLI helper would hand the pack a NULL
+     * in_path, and there is no pin on disk to point at instead. A failure
+     * here aborts the decomposition (the file keeps its record, stays
+     * unstamped and is retried next sweep), which is the fail-closed shape
+     * the whole lane uses. */
+    if (cpack_hostio_active()) {
+        int hrc = cpack_hostio_cmd(c, cmd, idx, dir, recipe, out);
+        if (hrc < 0)
+            fprintf(stderr, "cpack: %s: host_io dispatch failed (cmd=%d); "
+                            "decomposition abandoned\n", c->name, cmd);
+        return hrc;
+    }
 
     /* ADR-007: the worker pool daemon runs the pack's .so in RAM instead of
      * fork()+execve()'ing the CLI helper. The operands are routed exactly the
@@ -2648,6 +2666,9 @@ out:
                                  * into recipe/member runs bounds entries;
                                  * four runs per member is generous */
 #define CPACK_GUARD_CHUNK  (8ull << 20)   /* map-guard read-back window */
+#define CPACK_COMMIT_SLURP_MAX (1u << 20)   /* members <= 1 MiB: one read */
+#define CPACK_COMMIT_CHUNK     (4u << 20)   /* else: 4 MiB windows        */
+
 
 /* The containerpack SIZE GUARD's constants (CPACK_ZSTD_LANE,
  * CPACK_MEMBER_META, CPACK_ZGAIN_MILLE, CPACK_REPRO_MAX) and the
@@ -3483,6 +3504,67 @@ uint64_t cpack_member_data_cost(uint64_t projected_len)
 }
 
 
+/* Bytes a ZSTD-19 pass over `path` produces, computed in CPACK_COMMIT_CHUNK
+ * windows so the member is never in RAM. `expect` is the size the member must
+ * have (the pack announced it); a mismatch is an unreadable member, which the
+ * guard must refuse rather than price. 0 = ok. */
+static int cpack_zstd19_len_stream(const char *path, uint64_t expect,
+                                  uint64_t *out_len)
+{
+    FILE *f;
+    ZSTD_CCtx *c = NULL;
+    uint8_t *in = NULL, *out = NULL;
+    uint64_t total_in = 0, total_out = 0;
+    int rc = -1;
+
+    f = fopen(path, "rb");
+    if (!f) return -1;
+    c = ZSTD_createCCtx();
+    in = (uint8_t *)malloc(CPACK_COMMIT_CHUNK);
+    out = (uint8_t *)malloc(CPACK_COMMIT_CHUNK);
+    if (!c || !in || !out) goto done;
+    if (ZSTD_isError(ZSTD_CCtx_setParameter(c, ZSTD_c_compressionLevel,
+                                            CPACK_ZSTD_LANE)))
+        goto done;
+    for (;;) {
+        size_t got = fread(in, 1, CPACK_COMMIT_CHUNK, f);
+        ZSTD_inBuffer ib;
+        int last = (got == 0) || (got < CPACK_COMMIT_CHUNK && feof(f));
+        ib.src = in;
+        ib.size = got;
+        ib.pos = 0;
+        total_in += got;
+        for (;;) {
+            ZSTD_outBuffer ob;
+            size_t r;
+            ob.dst = out;
+            ob.size = CPACK_COMMIT_CHUNK;
+            ob.pos = 0;
+            r = ZSTD_compressStream2(c, &ob, &ib,
+                                     last ? ZSTD_e_end : ZSTD_e_continue);
+            if (ZSTD_isError(r)) goto done;
+            total_out += ob.pos;
+            /* ZSTD_e_end returns 0 when the frame is complete; e_continue
+             * returns a lower bound on the next call's input need, and the
+             * loop ends when the input is consumed and nothing is pending */
+            if (last ? (r == 0) : (ib.pos == ib.size && r == 0))
+                break;
+            if (!last && ib.pos == ib.size && ob.pos == 0)
+                break;
+        }
+        if (last) break;
+    }
+    if (total_in != expect) goto done;
+    *out_len = total_out;
+    rc = 0;
+done:
+    if (c) ZSTD_freeCCtx(c);
+    free(in);
+    free(out);
+    fclose(f);
+    return rc;
+}
+
 /* Project the cost of the decomposition the sweep is about to commit.
  * `fixed` is recipe + table (+ map, once the pack has produced one) and the
  * member payloads are read back from the pack's scratch dir: each is put
@@ -3559,27 +3641,25 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
     }
     for (i = 0; i < nmem; i++) {
         char pm[256];
-        uint8_t *mb = NULL;
-        uint8_t *cb = NULL;
-        size_t mlen = 0, bound, cl;
+        uint64_t cl = 0;
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
-        if (slurp_file(pm, &mb, &mlen) != 0 || mlen != (size_t)mem[i].usize) {
-            free(mb);
+        /* WINDOWED, not slurped (ADR-015). This projection compresses every
+         * member at ZSTD-19 to price what the generic lane WOULD spend on it,
+         * and the previous shape held the member AND its compression bound in
+         * RAM at once -- 2x the member, which is the same wall the commit had
+         * one function below: a 192 MiB member in a 400 MiB container peaked
+         * the sweep at 469 MiB RSS (measured), and a member larger than RAM
+         * failed the PRICE, not just the copy. A streaming zstd frame over a
+         * 4 MiB window costs one window and answers the same question. */
+        if (cpack_zstd19_len_stream(pm, (uint64_t)mem[i].usize, &cl) != 0)
             return -1;
-        }
-        bound = ZSTD_compressBound(mlen);
-        cb = (uint8_t *)malloc(bound);
-        if (!cb) { free(mb); return -1; }
-        cl = ZSTD_compress(cb, bound, mb, mlen, CPACK_ZSTD_LANE);
-        /* an error, or a member that does not compress: it is stored
-         * verbatim, which is the most the projection may charge for it */
-        if (ZSTD_isError(cl) || cl >= mlen) cl = mlen;
+        /* An error, or a member that does not compress: it is stored
+         * verbatim, which is the most the projection may charge for it. */
+        if (cl >= mem[i].usize) cl = mem[i].usize;
         /* Sum the projections; the blocks are rounded up ONCE, at the end,
          * because the members share them: stage 6 seals them into shared
          * batch segments rather than giving each one its own. */
-        out->content += (uint64_t)cl;
-        free(cb);
-        free(mb);
+        out->content += cl;
     }
     out->content = cpack_member_data_cost(out->content);
     return 0;
@@ -3873,6 +3953,69 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
 }
 
 
+/* What the map guard proves, and against WHAT (ADR-015).
+ *
+ * The proof is unchanged: for every entry of the validated map, the bytes the
+ * map says live there -- served from the recipe and from the members -- must
+ * equal the container's bytes at that offset, byte for byte. The two things
+ * that can move are its INPUTS:
+ *
+ *   full        the container's bytes held in RAM. Present on the whole-file
+ *               admission and on the streamed-pin admission (the pin is
+ *               mmapped). ABSENT on an ABI v3 host-I/O decomposition, where
+ *               the whole point is that the container was never written out.
+ *   full == NULL + ref_ino != 0: then the reference is the container read back
+ *               from the volume in CPACK_GUARD_CHUNK windows, which is exactly
+ *               what the io->pread callback the pack used does.
+ *   recipe      the recipe bytes; when NULL they are read from the committed
+ *               recipe record (recipe_ino), which is what the read path will
+ *               do for every later served byte.
+ *
+ * Host-I/O decompositions run the guard BEFORE the name flips (there is no
+ * pinned copy to compare against afterwards) and hand over their in-RAM
+ * recipe, so recipe_ino is 0 there. That is not a weaker bar: serving from
+ * byte-identical sources yields byte-identical output, and the one thing it
+ * cannot see -- that the recipe STORED in the volume is the recipe handed
+ * over -- is proven separately, right after the create: the stored recipe
+ * segment is read back through the same CRC-checked reader every later read
+ * uses and compared with the bytes handed over. */
+struct cpack_guard {
+    const uint8_t *full;        /* container bytes in hand, or NULL          */
+    uint64_t       ref_ino;     /* container inode to read when full == NULL */
+    const uint8_t *recipe;      /* recipe bytes in hand, or NULL             */
+    size_t         recipe_len;
+    uint64_t       recipe_ino;  /* committed recipe record when recipe==NULL */
+};
+
+/* The CONTAINER's own bytes at [off, off+len). One function, because there is
+ * one such source and the guards must not each grow their own answer: with a
+ * pin in hand it is the mmapped copy, and without one (ABI v3 host I/O, where
+ * the container was never written out) it is the volume's ranged read of the
+ * container inode -- the same read the pack's io->pread callback performs.
+ *
+ * This is NOT a member-payload reader: it never touches a member sibling or
+ * the payload blob, which is what the funnel (cpack_member_read) owns. The
+ * map-consolidation gate knows both categories; see
+ * tools/test-cpack-map-consolidation.sh. */
+static int cpack_container_read(invfs_volume *v, const uint8_t *full,
+                                uint64_t ref_ino, uint64_t off,
+                                uint8_t *dst, size_t len)
+{
+    if (full) {
+        memcpy(dst, full + (size_t)off, len);
+        return 0;
+    }
+    if (!ref_ino) return -1;
+    if (vol_read_range(v, ref_ino, off, len, dst) != (int)len) return -1;
+    return 0;
+}
+
+static int cpack_guard_ref(invfs_volume *v, const struct cpack_guard *g,
+                           uint64_t off, uint8_t *dst, size_t len)
+{
+    return cpack_container_read(v, g->full, g->ref_ino, off, dst, len);
+}
+
 /* The seekable guard: with the members + the recipe record committed, read
  * every map entry's source range back through the real read path (the
  * recipe segment of the fresh recipe record, member siblings through
@@ -3880,12 +4023,11 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
  * Streaming, constant memory, no rebuild exec. 0 = the stored state
  * reproduces the original bit-exactly. */
 static int cpack_map_guard(invfs_volume *v, const char *name,
-                           uint64_t recipe_ino,
-                           const uint8_t *full, size_t full_len,
+                           const struct cpack_guard *g, size_t full_len,
                            const cpack_map_ent *ents, size_t n_ents,
                            const cpack_member *mem_sorted, size_t nmem)
 {
-    uint8_t *recipe = NULL, *buf = NULL;
+    uint8_t *recipe = NULL, *buf = NULL, *buf2 = NULL;
     size_t recipe_len = 0, gi;
     int rc = -1;
     /* packed layout: the guard must read the member ranges from where they
@@ -3912,10 +4054,16 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
                 goto out;
         }
     }
-    if (cpack_recipe_seg(v, recipe_ino, &recipe, &recipe_len) != 0)
-        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: recipe seg read failed (ino=%llu)\n", (unsigned long long)recipe_ino); goto out; }
+    if (g->recipe) {
+        recipe = (uint8_t *)g->recipe;      /* borrowed, not owned */
+        recipe_len = g->recipe_len;
+    } else if (cpack_recipe_seg(v, g->recipe_ino, &recipe, &recipe_len) != 0) {
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: recipe seg read failed (ino=%llu)\n", (unsigned long long)g->recipe_ino);
+        goto out;
+    }
     buf = (uint8_t *)malloc(CPACK_GUARD_CHUNK);
-    if (!buf) goto out;
+    buf2 = (uint8_t *)malloc(CPACK_GUARD_CHUNK);
+    if (!buf || !buf2) goto out;
     for (gi = 0; gi < n_ents; gi++) {
         uint64_t done = 0;
         while (done < ents[gi].len) {
@@ -3929,8 +4077,9 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
                 if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: serve failed ent=%zu off=%llu\n", gi, (unsigned long long)(ents[gi].orig_off + done));
                 goto out;
             }
-            if (memcmp(buf, full + (size_t)ents[gi].orig_off + (size_t)done,
-                       clen) != 0) {
+            if (cpack_guard_ref(v, g,
+                                ents[gi].orig_off + done, buf2, clen) != 0 ||
+                memcmp(buf, buf2, clen) != 0) {
                 if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] guard: memcmp failed ent=%zu off=%llu len=%zu\n", gi, (unsigned long long)(ents[gi].orig_off + done), clen);
                 goto out;
             }
@@ -3940,8 +4089,9 @@ static int cpack_map_guard(invfs_volume *v, const char *name,
     rc = 0;
 out:
     free(moff);
-    free(recipe);
+    if (!g->recipe) free(recipe);    /* a borrowed recipe is the caller's */
     free(buf);
+    free(buf2);
     return rc;
 }
 
@@ -4458,6 +4608,80 @@ void cpack_rollback_commit(invfs_volume *v, uint64_t newino,
  * Overridable for a slower or faster host than the one measured on:
  * INVFS_CPACK_BATCH_MAX_BYTES. 0 disables chunking (one call for the whole
  * table), which is correct only when the whole table fits the ceiling. */
+/* Open a member's scratch file and announce its size. NULL = unreadable. */
+static FILE *cpack_member_openf(const char *pmdir, uint32_t idx,
+                               uint64_t *size)
+{
+    char pm[256];
+    struct stat st;
+    FILE *f;
+
+    snprintf(pm, sizeof pm, "%s/%u", pmdir, idx);
+    f = fopen(pm, "rb");
+    if (!f) return NULL;
+    if (fstat(fileno(f), &st) != 0) { fclose(f); return NULL; }
+    *size = (uint64_t)st.st_size;
+    return f;
+}
+
+/* Copy `len` bytes of `src` into the blob session at `dst_off`, in windows.
+ * 0 = ok. `src` is left at len. */
+static int cpack_blob_slice(invfs_wsession *ws, uint64_t dst_off, FILE *src,
+                            uint64_t len, uint8_t *win, size_t wcap)
+{
+    uint64_t off = 0;
+
+    while (off < len) {
+        size_t want = (len - off > wcap) ? wcap : (size_t)(len - off);
+        if (fread(win, 1, want, src) != want) return -1;
+        if (vol_write_range(ws, dst_off + off, win, want) != 0) return -1;
+        off += want;
+    }
+    return 0;
+}
+
+/* ---- streaming member commit (ADR-015, scope item 3) --------------------
+ *
+ * The commit used to slurp each extracted member whole -- one malloc of the
+ * member's size, then one write -- and a member bigger than the process could
+ * allocate aborted the ENTIRE container. For the guest images this project
+ * exists for that is the common case, not the corner: a 100 GiB disk's second
+ * partition is a member bigger than any RAM the sweep will ever be given.
+ *
+ * So: members at or below CPACK_COMMIT_SLURP_MAX keep the single read + single
+ * write (it is the fast path, and it is what the leaf sniff wants in hand
+ * anyway); anything larger is copied in CPACK_COMMIT_CHUNK windows straight
+ * from the scratch file into the volume. Peak RAM is then one window,
+ * whatever the member's size, and the bytes are identical -- the same read,
+ * the same write, split into pieces. */
+
+/* Commit a member as its own inode without ever holding it whole.
+ * 1 = ok, 0 = failed (and the caller aborts the container). */
+static int cpack_member_inode_stream(invfs_volume *v, const char *mn,
+                                     FILE *src, uint64_t len,
+                                     uint8_t *win, size_t wcap)
+{
+    invfs_wsession *ws = NULL;
+    uint64_t off = 0;
+
+    if (!vol_create_file(v, mn, NULL, 0)) return 0;
+    if (!vol_write_begin(v, mn, 1, &ws) || !ws) return 0;
+    while (off < len) {
+        size_t want = (len - off > wcap) ? wcap : (size_t)(len - off);
+        if (fread(win, 1, want, src) != want) { vol_write_abort(ws); return 0; }
+        if (vol_write_range(ws, off, win, want) != 0) {
+            vol_write_abort(ws);
+            return 0;
+        }
+        off += want;
+    }
+    if (vol_write_truncate(ws, len) != 0 || vol_write_commit(ws) != 0) {
+        vol_write_abort(ws);
+        return 0;
+    }
+    return 1;
+}
+
 static uint64_t cpack_batch_max_bytes(void)
 {
     const char *e = getenv("INVFS_CPACK_BATCH_MAX_BYTES");
@@ -4610,34 +4834,77 @@ static void cpack_munmap_ro(const uint8_t *p, size_t len)
 }
 #endif
 
-/* Streaming rebuild-verify: chunked memcmp of a mapped image against a
- * host file. 0 = identical, nonzero = differ or unreadable (fail closed
- * exactly like the whole-file memcmp it replaces). */
-static int cpack_cmp_mapped(const uint8_t *base, size_t len,
-                            const char *path)
+/* Streaming rebuild-verify: chunked memcmp of a rebuilt image against the
+ * container's own bytes. 0 = identical, nonzero = differ or unreadable (fail
+ * closed exactly like the whole-file memcmp it replaces).
+ *
+ * The reference is either `base` (the pin, mmapped -- WP641) or, when there is
+ * no pin because the pack read the container through host I/O (ADR-015,
+ * ref_ino != 0), the container read back from the volume in the same windows.
+ * Same bar: every byte of the rebuild is compared with every byte of the
+ * original. */
+static int cpack_cmp_mapped(invfs_volume *v, const uint8_t *base,
+                            uint64_t ref_ino, size_t len, const char *path)
 {
     FILE *o;
-    uint8_t *buf;
+    uint8_t *buf, *ref = NULL;
     size_t off = 0;
     int rc = -1;
     if (!path) return -1;
     if (len == 0) return 0;
-    if (!base) return -1;
+    if (!base && !ref_ino) return -1;
     o = fopen(path, "rb");
     if (!o) return -1;
     buf = (uint8_t *)malloc(CPACK_STREAM_CHUNK);
-    if (!buf) { fclose(o); return -1; }
+    ref = (uint8_t *)malloc(base ? 1 : CPACK_STREAM_CHUNK);
+    if (!buf || !ref) { free(buf); free(ref); fclose(o); return -1; }
     while (off < len) {
         size_t want = (len - off > CPACK_STREAM_CHUNK) ?
                       CPACK_STREAM_CHUNK : (len - off);
+        const uint8_t *have;
         if (fread(buf, 1, want, o) != want) break;
-        if (memcmp(base + off, buf, want) != 0) { rc = 1; break; }
+        if (base) {
+            have = base + off;
+        } else {
+            if (cpack_container_read(v, NULL, ref_ino, off, ref, want) != 0)
+                break;
+            have = ref;
+        }
+        if (memcmp(have, buf, want) != 0) { rc = 1; break; }
         off += want;
     }
     if (off == len) rc = 0;
     free(buf);
+    free(ref);
     fclose(o);
     return rc;
+}
+
+/* ---- solid refusals, counted for the sweep report -----------------------
+ *
+ * ADR-015 decision 7: a solid archive is REFUSED, not decomposed -- its
+ * members are not addressable in the stored bytes, so per-member
+ * decomposition would store the archive twice and pay a full unpack to do it.
+ * The pack says so with IVPACK_RC_DECLINE_SOLID (a decline with a reason, not
+ * a generic failure), the core stamps INVFS_CLASS_GENERIC_SOLID so the verdict
+ * is not re-derived every sweep, and the run reports the total. Per-file the
+ * line is on stderr as it happens; this is the aggregate the operator sees
+ * next to the batching lines. */
+static uint64_t g_solid_files;
+static uint64_t g_solid_bytes;
+
+static void cpack_solid_note(uint64_t bytes)
+{
+    g_solid_files++;
+    g_solid_bytes += bytes;
+}
+
+void cpack_solid_take(uint64_t *files, uint64_t *bytes)
+{
+    if (files) *files = g_solid_files;
+    if (bytes) *bytes = g_solid_bytes;
+    g_solid_files = 0;
+    g_solid_bytes = 0;
 }
 
 /* WP16a sweep attempt: decompose one RAW container through a container
@@ -4659,6 +4926,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          pmap[128], pmdir[192];
     uint8_t *table = NULL, *recipe = NULL, *outb = NULL;
     size_t table_len = 0, recipe_len = 0, out_len = 0;
+    /* ABI v3 host I/O (ADR-015): when set, the container is never written to
+     * scratch and every pack command that reads it gets `io` instead of a
+     * path -- so the operand handed to the pack commands is NULL. */
+    int use_io = 0;
+    const char *in_operand = NULL;
     /* WP16b: the pack's map (a seekable container), parsed + validated */
     uint8_t *mapb = NULL;
     size_t map_len = 0;
@@ -4704,19 +4976,50 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         def ? def->decomp_gen : -1, pc->generation);
     if (!def || !def->is_container) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] not-a-container-def\n"); return 0; }
     if (strlen(name) + CPACK_NAME_RESERVE > INVFS_MAX_NAME) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] name too long\n"); return 0; }
+    /* ADR-015: when the pack can be handed the container's BYTES instead of a
+     * path, the pin does not exist. That is the whole change: the pin was
+     * `full_len` bytes of scratch written once, read three times (pin, strip,
+     * guard) and thrown away, and on a 100 GiB guest image it is the reason a
+     * decomposition needs twice the image somewhere before it can start.
+     *
+     * The gate is the pack's own declaration (cpack_hostio_pack_supported:
+     * lib<name>.so present, descriptor api_version >= 3, IVPACK_F_HOST_IO) --
+     * so a v1/v2 pack, a CLI-only pack and every pack that did not opt in keep
+     * the exact flow they have today, pin included. An estimated pack is
+     * excluded because `estimate {in}` answers from a path, and a pack that
+     * cannot answer without one must not be handed a NULL.
+     *
+     * Nothing else is skipped: strip, map, extract/batch, the size guard, the
+     * bit-exactness guard and the commit all run, in the same order (the one
+     * ordering difference is documented at the guard). */
+    if (cpack_hostio_pack_supported(pc) && (!def->estimate || def->map) &&
+        cpack_hostio_begin(v, inode_id, (uint64_t)full_len) == 0) {
+        use_io = 1;
+        if (getenv("INVFS_DEBUG_PACKS"))
+            fprintf(stderr, "[cpack] host_io admission: %llu bytes, no pin "
+                            "(ABI v3 callbacks)\n",
+                    (unsigned long long)full_len);
+    }
     /* Phase 1 of the scratch decision: the PIN is the one file whose size
      * is known before the pack has been asked anything, so the scratch is
      * sized for it here. The member total only becomes known after
      * `enumerate`, and the extraction below is what actually costs the
-     * memory, so there is a phase 2 after the table is parsed. */
-    if (tool_tmpdir(dir, sizeof dir, (uint64_t)full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tmpdir failed\n"); return 0; }
+     * memory, so there is a phase 2 after the table is parsed.
+     * Under host I/O there is no pin, so phase 1 has no fixed demand to
+     * price: the members are the whole scratch cost and phase 2 prices them. */
+    if (tool_tmpdir(dir, sizeof dir, use_io ? 0 : (uint64_t)full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tmpdir failed\n"); return 0; }
     snprintf(pin, sizeof pin, "%s/in", dir);
     snprintf(ptable, sizeof ptable, "%s/table", dir);
     snprintf(precipe, sizeof precipe, "%s/recipe", dir);
     snprintf(pout, sizeof pout, "%s/out", dir);
     snprintf(pmap, sizeof pmap, "%s/map", dir);
     snprintf(pmdir, sizeof pmdir, "%s/mbr", dir);
-    if (fbuf) {
+    if (use_io) {
+        /* no pin: there is no file for the pack to read, and no copy for the
+         * guard to compare against -- both come from the container itself
+         * (see the guard below). */
+        in_operand = NULL;
+    } else if (fbuf) {
         if (tool_write(pin, fbuf, full_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] tool_write pin failed\n"); goto out; }
     } else {
         /* WP641 streaming admission (NULL full): pin with ranged reads,
@@ -4762,6 +5065,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * (vol_read_file) by the caller; now both paths take their copy before
      * anything is deleted, and a streamed container is purged only once the
      * bytes are on disk in scratch -- where a purge cannot reach them. */
+    if (!use_io) in_operand = pin;
     {
         char tn[288];
         snprintf(tn, sizeof tn, "%s!mbrt", name);
@@ -4775,9 +5079,41 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * table that is corrupt or truncated, and a container that is simply
      * bigger than the member cap. The last one is a number the operator can
      * act on, so it names the container's real member count and the limit. */
-    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, pin, NULL,
-                             NULL, NULL, ptable) != 0)
-        { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed: %s could not enumerate the container (tool absent, or the container is not in a form it reads)\n", pc->name); goto out; }
+    {
+        int erc = invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_ENUMERATE, in_operand,
+                                       NULL, NULL, NULL, ptable);
+        /* ABI v3, additive decline reason (ADR-015 decision 7): the pack READ
+         * the container and it is SOLID -- its members are not addressable in
+         * the stored bytes, so decomposing it would store the archive twice
+         * and pay a full unpack to do it. Stamp that verdict instead of
+         * re-deriving it every sweep, and say it out loud, because it is a
+         * permanent fact about this file. INVFS_CPACK_SOLID=1 is the
+         * operator's explicit "pay for it anyway": the verdict then reads as
+         * a plain decline and the generic floor keeps the bytes. */
+        if (erc == IVPACK_RC_DECLINE_SOLID) {
+            const char *opt = getenv("INVFS_CPACK_SOLID");
+            if (opt && *opt == '1') {
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] %s: %s is solid; "
+                                    "INVFS_CPACK_SOLID=1 is set, so this "
+                                    "declines as a plain refusal\n",
+                            pc->name, name);
+            } else {
+                vol_stamp_class(v, inode_id, INVFS_CLASS_GENERIC_SOLID,
+                                (uint8_t)pc->algo, pc->generation);
+                fprintf(stderr, "sweep: %s: %s: solid archive (%llu bytes), "
+                                "not decomposed -- members are not addressable "
+                                "in the stored bytes; set INVFS_CPACK_SOLID=1 "
+                                "to pay for a full unpack\n",
+                        pc->name, name, (unsigned long long)full_len);
+                cpack_solid_note(full_len);
+                goto out;
+            }
+        } else if (erc != 0) {
+            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] enumerate failed: %s could not enumerate the container (tool absent, or the container is not in a form it reads)\n", pc->name);
+            goto out;
+        }
+    }
     if (slurp_file(ptable, &table, &table_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] table slurp failed: %s wrote no readable member table\n", pc->name); goto out; }
     {
         int prc = cpack_parse_table(table, table_len, &mem, &nmem, &sum_usize);
@@ -4805,16 +5141,28 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
      * rather than discovering it one ENOSPC'd extract at a time. */
     {
         scratch_file carried[2];
+        uint64_t need;
+        int ncarried = 0;
 
-        carried[0].name = "in";
-        carried[0].data = fbuf;
-        carried[0].len = full_len;
-        carried[1].name = "table";
-        carried[1].data = table;
-        carried[1].len = table_len;
-        if (tool_scratch_grow(dir, sizeof dir,
-                              (uint64_t)full_len + sum_usize,
-                              carried, 2) != 0) {
+        /* Under host I/O the pin does not exist, so the demand is the member
+         * total alone and there is no "in" file to carry across a migration
+         * (tool_scratch_grow rewrites every carried file into the new root,
+         * and a zero-length one would just be debris). */
+        if (!use_io) {
+            carried[ncarried].name = "in";
+            carried[ncarried].data = fbuf;
+            carried[ncarried].len = full_len;
+            ncarried++;
+            need = (uint64_t)full_len + sum_usize;
+        } else {
+            need = sum_usize;
+        }
+        carried[ncarried].name = "table";
+        carried[ncarried].data = table;
+        carried[ncarried].len = table_len;
+        ncarried++;
+        if (tool_scratch_grow(dir, sizeof dir, need,
+                              carried, ncarried) != 0) {
             if (getenv("INVFS_DEBUG_PACKS"))
                 fprintf(stderr, "[cpack] scratch refused for %s\n", name);
             goto out;
@@ -4905,7 +5253,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     }
 
     /* 3. strip: the recipe (original minus member payloads, pack-owned) */
-    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, pin, NULL,
+    if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_STRIP, in_operand, NULL,
                              NULL, NULL, precipe) != 0)
         { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] strip failed\n"); goto out; }
     /* 3b. WP641 recipe admission (INVFS_CPACK_RECIPE_MAX, MiB; UNSET = no
@@ -4987,8 +5335,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         snprintf(pmslash, sizeof pmslash, "%s/", pmdir);
         for (i = 0; i < nmem; i++) {
             if (acc && acc + mem[i].usize > cpack_batch_max_bytes()) {
-                if (cpack_batch_run(pc, table, table_len, start, i, pin,
-                                    ptable, pmslash) != 0)
+                if (cpack_batch_run(pc, table, table_len, start, i,
+                                    in_operand, ptable, pmslash) != 0)
                     { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract_batch [%zu,%zu) failed\n", start, i); goto out; }
                 batch_calls++;
                 start = i;
@@ -4998,8 +5346,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         }
         /* the tail, plus the whole table when nmem is 1 or the total fits */
         if (start < nmem) {
-            if (cpack_batch_run(pc, table, table_len, start, nmem, pin,
-                                ptable, pmslash) != 0)
+            if (cpack_batch_run(pc, table, table_len, start, nmem,
+                                in_operand, ptable, pmslash) != 0)
                 { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract_batch [%zu,%zu) failed\n", start, nmem); goto out; }
             batch_calls++;
         }
@@ -5013,8 +5361,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (!def->batch) {
             snprintf(idxbuf, sizeof idxbuf, "%u", mem[i].idx);
             snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
-            if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, pin, idxbuf,
-                                     NULL, NULL, pm) != 0)
+            if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_EXTRACT, in_operand,
+                                     idxbuf, NULL, NULL, pm) != 0)
                 { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] extract idx=%u failed\n", mem[i].idx); goto out; }
         }
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
@@ -5063,7 +5411,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * the image, it emits a map numbering recipe bytes the recipe does
          * not contain, and cpack_map_validate rejects it with a message that
          * blames the container rather than the manifest. See WP107. */
-        if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, pin, NULL,
+        if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_MAP, in_operand, NULL,
                                  pmdir, precipe, pmap) != 0)
             { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map cmd failed\n"); goto out; }
         if (slurp_file(pmap, &mapb, &map_len) != 0) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] map slurp failed\n"); goto out; }
@@ -5126,7 +5474,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         if (invfs_codec_pack_cmd(pc, INVFS_PACK_CMD_REBUILD, NULL, NULL,
                                  pmdir, precipe, pout) != 0)
             goto out;
-        if (!streaming) {
+        if (!streaming && !use_io) {
             if (slurp_file(pout, &outb, &out_len) != 0 ||
                 out_len != full_len ||
                 (full_len && memcmp(outb, fbuf, full_len) != 0)) {
@@ -5139,8 +5487,11 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         } else {
             /* WP641 streaming verify: chunked memcmp of the rebuilt file
              * against the mapped pin (no whole-file malloc on either
-             * side). Identical bar, streaming reads. */
-            if (cpack_cmp_mapped(fbuf, full_len, pout) != 0) {
+             * side). Identical bar, streaming reads. ADR-015: with host I/O
+             * there is no pin, and the reference is the container read back
+             * from the volume -- ref_ino -- chunk for chunk. */
+            if (cpack_cmp_mapped(v, fbuf, use_io ? inode_id : 0, full_len,
+                                 pout) != 0) {
                 fprintf(stderr, "sweep: %s: %s: rebuild guard refused, "
                         "decomposition abandoned\n", pc->name, name);
                 goto out;
@@ -5221,31 +5572,64 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         for (i = 0; i < nmem && !bad; i++) {
             const cpack_member *m = &msort[i];
             char pm[256], mn[320];
-            uint8_t *mb = NULL;
+            uint8_t *mb = NULL, *win = NULL;
+            FILE *mf = NULL;
             size_t mlen = 0;
             int leaf = 1;
 
             snprintf(pm, sizeof pm, "%s/%u", pmdir, m->idx);
-            if (slurp_file(pm, &mb, &mlen) != 0 ||
-                mlen != (size_t)m->usize) {
-                free(mb);
-                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", m->idx);
-                bad = 1;
-                break;
+            mlen = (size_t)m->usize;
+            if (mlen <= CPACK_COMMIT_SLURP_MAX) {
+                /* fast path: the member is in RAM in one read, which is what
+                 * the leaf sniff needs anyway */
+                if (slurp_file(pm, &mb, &mlen) != 0 ||
+                    mlen != (size_t)m->usize) {
+                    free(mb);
+                    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", m->idx);
+                    bad = 1;
+                    break;
+                }
+            } else {
+                /* big member: stream it. One 4 MiB window, whatever its size:
+                 * this is the leg that used to die on the malloc and abort
+                 * the whole container. */
+                mf = cpack_member_openf(pmdir, m->idx, &mlen);
+                win = (uint8_t *)malloc(CPACK_COMMIT_CHUNK);
+                if (!mf || !win || mlen != (size_t)m->usize) {
+                    free(win);
+                    if (mf) fclose(mf);
+                    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u stream/size fail\n", m->idx);
+                    bad = 1;
+                    break;
+                }
             }
             if (cpack_leaf_mode() && m->usize >= CPACK_LEAF_MIN_USIZE) {
                 size_t hlen = mlen < CPACK_LEAF_HEAD ? mlen
                                                     : (size_t)CPACK_LEAF_HEAD;
-                if (hlen) memcpy(head, mb, hlen);
+                if (mf) {
+                    if (hlen && fread(head, 1, hlen, mf) != hlen) {
+                        free(mb); free(win); fclose(mf);
+                        bad = 1;
+                        break;
+                    }
+                    rewind(mf);
+                } else if (hlen) {
+                    memcpy(head, mb, hlen);
+                }
                 leaf = !cpack_member_is_container(head, hlen, m->sname);
             }
             if (!leaf) {
-                /* a container in its own right: keep the inode */
+                /* a container in its own right: keep the inode (streamed too:
+                 * a nested image is exactly the kind of member that does not
+                 * fit in RAM) */
                 cpack_mbr_name(mn, sizeof mn, name, m->idx, m->sname);
-                if (!vol_create_file(v, mn, mb, mlen)) {
+                if (mf ? !cpack_member_inode_stream(v, mn, mf, mlen, win,
+                                                    CPACK_COMMIT_CHUNK)
+                       : !vol_create_file(v, mn, mb, mlen)) {
                     fprintf(stderr, "sweep: %s: member inode failed for %s\n",
                             pc->name, mn);
-                    free(mb);
+                    free(mb); free(win);
+                    if (mf) fclose(mf);
                     bad = 1;
                     break;
                 }
@@ -5256,7 +5640,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                     mm.target[0] = 0;
                     vol_apply_meta(v, mn, &mm);
                 }
-                free(mb);
+                free(mb); free(win);
+                if (mf) fclose(mf);
                 continue;
             }
             if (!wss) {
@@ -5264,13 +5649,17 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                     !vol_write_begin(v, bn, 1, &wss)) {
                     fprintf(stderr, "sweep: %s: payload session failed (%s)\n",
                             pc->name, bn);
-                    free(mb);
+                    free(mb); free(win);
+                    if (mf) fclose(mf);
                     bad = 1;
                     break;
                 }
             }
-            if ((mlen && vol_write_range(wss, total, mb, mlen) != 0)) {
-                free(mb);
+            if (mlen && (mf ? cpack_blob_slice(wss, total, mf, mlen, win,
+                                               CPACK_COMMIT_CHUNK)
+                            : vol_write_range(wss, total, mb, mlen)) != 0) {
+                free(mb); free(win);
+                if (mf) fclose(mf);
                 bad = 1;
                 break;
             }
@@ -5278,6 +5667,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             total += mlen;
             nleaf++;
             free(mb);
+            free(win);
+            if (mf) fclose(mf);
         }
         if (!bad && wss) {
             if (vol_write_truncate(wss, total) != 0 ||
@@ -5334,15 +5725,32 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         size_t mlen = 0;
         uint64_t pino;
         snprintf(pm, sizeof pm, "%s/%u", pmdir, mem[i].idx);
-        if (slurp_file(pm, &mb, &mlen) != 0 || mlen != (size_t)mem[i].usize) {
-            free(mb);
-            if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", mem[i].idx);
-            vol_transcode_abort(v, name);
-            goto out;
-        }
+        mlen = (size_t)mem[i].usize;
         cpack_mbr_name(mn, sizeof mn, name, mem[i].idx, mem[i].sname);
-        pino = vol_create_file(v, mn, mb, mlen);
-        free(mb);
+        if (mlen > CPACK_COMMIT_SLURP_MAX) {
+            /* streamed: see the note over CPACK_COMMIT_CHUNK. The size check
+             * is the same one the slurp path makes -- the pack must have
+             * produced exactly the announced byte count -- done on the file
+             * the copy loop reads. */
+            FILE *mf = cpack_member_openf(pmdir, mem[i].idx, &mlen);
+            uint8_t *win = (uint8_t *)malloc(CPACK_COMMIT_CHUNK);
+            int ok = mf && win && mlen == (size_t)mem[i].usize &&
+                     cpack_member_inode_stream(v, mn, mf, mlen, win,
+                                               CPACK_COMMIT_CHUNK);
+            free(win);
+            if (mf) fclose(mf);
+            pino = ok ? vol_find(v, mn) : 0;
+        } else {
+            if (slurp_file(pm, &mb, &mlen) != 0 ||
+                mlen != (size_t)mem[i].usize) {
+                free(mb);
+                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] commit: member idx=%u slurp/size fail\n", mem[i].idx);
+                vol_transcode_abort(v, name);
+                goto out;
+            }
+            pino = vol_create_file(v, mn, mb, mlen);
+            free(mb);
+        }
         if (!pino) {
             fprintf(stderr, "sweep: %s: member inode failed for %s\n",
                     pc->name, mn);
@@ -5378,10 +5786,48 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * fall back to the pack's rebuild exec (or fail loudly with the
          * pack absent), never serve an unguarded map. A guard/write
          * failure rolls the name back onto the untouched old record and
-         * purges the siblings, like a rebuild-guard refusal. */
+         * purges the siblings, like a rebuild-guard refusal.
+         *
+         * ABI v3 host I/O moves ONE of those steps (ADR-015): the map guard
+         * runs BEFORE the recipe record is created, because its reference --
+         * the container's own bytes -- is reachable through the name that the
+         * create replaces. The order is preserved for every other pack, which
+         * has a pinned copy and therefore no reason to move. The guard's proof
+         * is the same either way; see struct cpack_guard. */
         char mbn[288];
         uint64_t newino, old_pos = 0, old_ctime = 0;
+        struct cpack_guard gd;
         (void)old_pos; (void)old_ctime;
+
+        memset(&gd, 0, sizeof gd);
+        if (use_io) {
+            /* ADR-015. With no pin, the guard's two inputs have to come from
+             * somewhere other than a scratch copy, and both do:
+             *   reference -- the container read back from the volume through
+             *     the SAME ranged path the pack's io->pread used, which is
+             *     only possible while the record under this name is still the
+             *     container (vol_create_blob_file flips it in place);
+             *   recipe    -- the bytes just striped out, handed over as they
+             *     are. Serving from byte-identical sources gives
+             *     byte-identical output, so this is the same bar; the one
+             *     fact it cannot see (that the recipe the volume STORES is
+             *     the recipe handed over) is checked right after the create
+             *     against the stored recipe segment, through the same
+             *     CRC-checked reader every later read uses.
+             * Nothing has been published at that point, so a refusal needs no
+             * rollback: the name never moved. */
+            gd.full = NULL;
+            gd.ref_ino = inode_id;
+            gd.recipe = recipe;
+            gd.recipe_len = recipe_len;
+            if (cpack_map_guard(v, name, &gd, full_len,
+                                ments, nments, mem_sorted, nmem) != 0) {
+                fprintf(stderr, "sweep: %s: %s: map guard refused, "
+                                "decomposition abandoned\n", pc->name, name);
+                vol_transcode_abort(v, name);
+                goto out;
+            }
+        }
 
         newino = vol_create_blob_file(v, name, recipe, recipe_len,
                                       (uint64_t)full_len, pc->algo);
@@ -5394,13 +5840,36 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_transcode_abort(v, name);
             goto out;
         }
-        if (cpack_map_guard(v, name, newino, fbuf, full_len,
-                            ments, nments, mem_sorted, nmem) != 0) {
-            fprintf(stderr, "sweep: %s: %s: map guard refused, "
-                            "decomposition abandoned\n", pc->name, name);
-            cpack_rollback_commit(v, newino, inode_id, name, old_pos,
-                                  (uint64_t)full_len, old_ctime);
-            goto out;
+        if (use_io) {
+            /* The stored recipe must be the recipe we proved above. Read it
+             * back the way every later read does: the recipe segment, CRC
+             * checked, zstd frame decoded when the writer compressed it. */
+            uint8_t *rchk = NULL;
+            size_t rchk_len = 0;
+            int rok = cpack_recipe_seg(v, newino, &rchk, &rchk_len) == 0 &&
+                      rchk_len == recipe_len &&
+                      (recipe_len == 0 || memcmp(rchk, recipe, recipe_len) == 0);
+            free(rchk);
+            if (!rok) {
+                fprintf(stderr, "sweep: %s: %s: stored recipe differs from "
+                                "the guarded one, decomposition abandoned\n",
+                        pc->name, name);
+                cpack_rollback_commit(v, newino, inode_id, name, old_pos,
+                                      (uint64_t)full_len, old_ctime);
+                goto out;
+            }
+        } else {
+            memset(&gd, 0, sizeof gd);
+            gd.full = fbuf;
+            gd.recipe_ino = newino;
+            if (cpack_map_guard(v, name, &gd, full_len,
+                                ments, nments, mem_sorted, nmem) != 0) {
+                fprintf(stderr, "sweep: %s: %s: map guard refused, "
+                                "decomposition abandoned\n", pc->name, name);
+                cpack_rollback_commit(v, newino, inode_id, name, old_pos,
+                                      (uint64_t)full_len, old_ctime);
+                goto out;
+            }
         }
         snprintf(mbn, sizeof mbn, "%s!mbrmap", name);
         if (!vol_create_file(v, mbn, mapb, map_len)) {
@@ -5520,11 +5989,19 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
 after_member_defer:
     rc = 100 + (int)pc->algo;   /* the WP13 pack rc convention */
 out:
+    if (use_io) cpack_hostio_end();
     if (streaming) cpack_munmap_ro(fbuf, fmap_len);
     /* scratch cleanup (member temps are named by the parsed idx set) */
     tool_rm(dir, "in");
     tool_rm(dir, "table");
     tool_rm(dir, "recipe");
+    /* The pack's optional classification rides beside the recipe
+     * ("<recipe>.cls", ext4fs strip). Nothing in the core reads it yet, so it
+     * is scratch debris like the pin: a 4 KiB file plus the directory that
+     * could not then be rmdir'd, left behind on EVERY decomposition. Under
+     * host I/O the scratch is supposed to end empty, which is what made it
+     * visible. */
+    tool_rm(dir, "recipe.cls");
     tool_rm(dir, "out");
     tool_rm(dir, "map");
     if (mem) {
