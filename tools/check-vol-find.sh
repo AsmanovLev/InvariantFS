@@ -120,15 +120,15 @@ src/core/vol_cpack.c:4354:SKIP   # map load: the payload-sibling probe moved ABO
 src/core/vol_cpack.c:4474:SKIP   # map-gen probe: miss means no map (gen 0)
 src/core/vol_cpack.c:4475:SKIP   # map-gen probe: unreadable map degrades to gen 0
 src/core/vol_cpack.c:5072:SKIP   # leftover-sibling check: absent means nothing to purge (moved below the pin copy: the streamed read must not race the purge it precedes)
-src/core/vol_cpack.c:5954:SKIP   # member sniff: miss skips the member
-src/core/vol_cpack.c:6063:SKIP   # re-decompose identity guard: mismatch declines
-src/core/vol_cpack.c:6078:SKIP   # nested purge probe: absent/unreadable skips the purge
-src/core/vol_cpack.c:6079:SKIP   # nested purge probe: same lookup for the read
-src/core/vol_cpack.c:6083:SKIP   # nested purge per member: absent means nothing to purge
-src/core/vol_cpack.c:6104:SKIP   # size pre-scan: miss fails the read, skips the total
-src/core/vol_cpack.c:6162:ACTS   # member table: miss aborts with error
-src/core/vol_cpack.c:6190:SKIP   # rebuild layout probe: absent blob means per-member inodes
-src/core/vol_cpack.c:6233:ACTS   # member rebuild: miss aborts with error
+src/core/vol_cpack.c:5961:SKIP   # member sniff: miss skips the member
+src/core/vol_cpack.c:6070:SKIP   # re-decompose identity guard: mismatch declines
+src/core/vol_cpack.c:6085:SKIP   # nested purge probe: absent/unreadable skips the purge
+src/core/vol_cpack.c:6086:SKIP   # nested purge probe: same lookup for the read
+src/core/vol_cpack.c:6090:SKIP   # nested purge per member: absent means nothing to purge
+src/core/vol_cpack.c:6111:SKIP   # size pre-scan: miss fails the read, skips the total
+src/core/vol_cpack.c:6169:ACTS   # member table: miss aborts with error
+src/core/vol_cpack.c:6197:SKIP   # rebuild layout probe: absent blob means per-member inodes
+src/core/vol_cpack.c:6240:ACTS   # member rebuild: miss aborts with error
 src/core/vol_cpack.c:5742:SKIP   # member commit (streamed): the member inode is looked up after vol_write_commit(), which does not hand its id back, so a miss means the commit failed and the container is abandoned
 src/core/vol_exer.c:267:ACTS
 src/core/vol_heat.c:799:SKIP
