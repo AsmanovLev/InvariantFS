@@ -387,10 +387,39 @@ rm -f /tmp/swapfile 2>/dev/null || true
 umount /mnt/tmp 2>/dev/null || true
 umount /mnt/var/tmp 2>/dev/null || true
 umount /mnt/boot 2>/dev/null || true
-fuser -km /mnt 2>/dev/null || true
-sleep 1
 umount -R /mnt 2>/dev/null || umount /mnt || exit 1
 udevadm settle 2>/dev/null || sleep 2
+
+# A FUSE daemon is not a mount: `umount` detaches the mount point and returns,
+# the invf-fuse that served it exits a moment later, and until it does it still
+# holds the volume's flock -- vol_open() then answers
+#     "image is in use by another process (flock: Resource temporarily unavailable)"
+# This setup carried `fuser -km /mnt` + `sleep 1` BEFORE the umount and it was
+# not enough: engine-ci 2026-11-23 13:48:41, installation-iso-nixos, the fsck
+# three lines below this block was still refused with exactly that message.
+# (The other six setups had no wait at all -- see the same block in
+# iso-guest-{void,arch,debian,gentoo,alpine,fedora}-setup.sh.)
+#
+# Kill it by NAME and wait for it to go: after a successful umount the mount
+# point is detached, so `fuser` no longer attributes the daemon's open files to
+# /mnt and finds nothing -- checked locally, a live process named invf-fuse
+# survives `fuser -km` on a path it does not hold open. Not a fixed sleep
+# either: the runner's load decides how long the exit takes.
+pkill -x invf-fuse 2>/dev/null || true
+for _i in $(seq 1 10); do
+    pgrep -x invf-fuse >/dev/null 2>&1 || break
+    sleep 0.2
+done
+if pgrep -x invf-fuse >/dev/null 2>&1; then
+    pkill -9 -x invf-fuse 2>/dev/null || true
+    for _i in $(seq 1 10); do
+        pgrep -x invf-fuse >/dev/null 2>&1 || break
+        sleep 0.2
+    done
+fi
+if pgrep -x invf-fuse >/dev/null 2>&1; then
+    say "invf-fuse survived SIGTERM and SIGKILL: $(pgrep -x invf-fuse | tr '\n' ' ')"
+fi
 
 say "verifying root filesystem with invf-fsck..."
 invf-fsck "$P2" || exit 1

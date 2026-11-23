@@ -14,7 +14,14 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK="${WORK:?set WORK to a scratch dir}"
 
 ISO_VER="3.24.4"
-ISO_URL="https://dl-cdn.alpinelinux.org/alpine/.24/releases/x86_64/alpine-virt-$ISO_VER-x86_64.iso"
+# The branch directory is v<major>.<minor>, and the URL had it as `.24` -- a
+# missing `v3` made every ISO job 404 at the download step (engine-ci
+# 2026-11-23, installation-iso-alpine: "curl: (22) The requested URL returned
+# error: 404"), so the install never started and the job read as an engine
+# failure. Derive the branch from ISO_VER instead of restating it: a point
+# release inside the branch then needs no second edit, and the only thing that
+# still needs one is a branch move (3.24 -> 3.26).
+ISO_URL="https://dl-cdn.alpinelinux.org/alpine/v${ISO_VER%.*}/releases/x86_64/alpine-virt-$ISO_VER-x86_64.iso"
 ISO_KERNEL="boot/vmlinuz-virt"
 ISO_INITRD="boot/initramfs-virt"
 PORT="${INVFS_ISO_PORT:-8003}"
