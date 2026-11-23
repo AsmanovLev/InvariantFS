@@ -101,6 +101,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <pthread.h>
+#include <unistd.h>     /* dup/dup2 for the stderr capture   */
 
 #include "volume_internal.h"
 /* only for the TYPES of the stubs below -- none of these headers is needed
@@ -142,9 +143,96 @@ void cpack_map_cache_reset(invfs_volume *v);
 #define CCONT_SIZE   4096u
 #define CHALF        2048u
 #define CPACK_REcipe 4096u          /* the recipe blob's length */
-#define NCONT        40             /* distinct container names */
+#define NCONT        40             /* containers the concurrency legs use */
+#define NALL         48             /* + the WP-CPACK kind/magic shapes */
 #define MEMBER_PAT(c)  ((uint8_t)(0x50 + (c)))
+#define BLOB_PAT(c)    ((uint8_t)(0x60 + (c)))
 #define RECIPE_PAT(c)  ((uint8_t)(0xA0 + (c)))
+
+/* ---- WP-CPACK-MAP-CONSOLIDATION: the shapes -----------------------------
+ *
+ * "Where does member idx's byte live" used to be answered by three files plus
+ * the mere PRESENCE of a fourth (the "!mbrleaf" list). These shapes are that
+ * question written out in full, one container per answer, so every leg below
+ * can be stated as bytes rather than as a call graph:
+ *
+ *   32 LEGACY_LEAF   kind 1 + a "!mbrleaf" list  -- the layout that exists on
+ *                    every volume written before kind 4. THE RED CONTROL:
+ *                    it must read exactly as it does today.
+ *   33 KIND4         kind 4, no leaf list at all   -- one file says where
+ *   34 KIND34        kind 4 + kind 3 + recipe      -- "accepted together"
+ *   35 ZERO_BASE     kind 3 under the OLD magic    -- existing volumes
+ *   36 KIND4_BASE    kind 4 under the OLD magic    -- old magic still accepted
+ *
+ * 40..47 are the refusals. They are deliberately ABOVE NCONT so the
+ * concurrency legs (which read every container 0..NCONT-1 and expect the
+ * right bytes) never touch them.
+ *
+ * The patterns differ ON PURPOSE: a member inode serves MEMBER_PAT, the
+ * payload sibling serves BLOB_PAT. A serve path that reads the wrong source
+ * returns success with plausible bytes -- that is exactly how the kind-3
+ * incident stayed invisible for a day -- so the bytes have to disagree.
+ * ---------------------------------------------------------------------- */
+enum {
+    SH_PLAIN = 0,       /* 0..31: kind 1 + kind 0, no blob, no leaf list */
+    SH_LEGACY_LEAF = 1,
+    SH_KIND4 = 2,
+    SH_KIND34 = 3,
+    SH_ZERO_BASE = 4,
+    SH_KIND4_BASE = 5,
+    /* refusable, 40.. */
+    SH_BAD4_PAST = 16,      /* src_off + len runs past the sibling */
+    SH_BAD4_NOIDX = 17,     /* names a member the table does not have */
+    SH_BAD4_OVERLAP = 18,   /* two entries name the same payload bytes */
+    SH_BAD4_NOBLOB = 19,    /* names a sibling the volume does not have */
+    SH_MIX_1_4 = 20,        /* one member named by kind 1 AND kind 4 */
+    SH_BAD_KIND_DECL = 21,  /* kind 5 under MRK2: the DECLARED refusal */
+    SH_BAD_KIND_NODECL = 22,/* kind 5 under MRM2: the undeclared refusal */
+    SH_BAD_MAGIC = 23       /* a magic no build knows */
+};
+
+static int shape_of(int c)
+{
+    switch (c) {
+    case 32: return SH_LEGACY_LEAF;
+    case 33: return SH_KIND4;
+    case 34: return SH_KIND34;
+    case 35: return SH_ZERO_BASE;
+    case 36: return SH_KIND4_BASE;
+    case 40: return SH_BAD4_PAST;
+    case 41: return SH_BAD4_NOIDX;
+    case 42: return SH_BAD4_OVERLAP;
+    case 43: return SH_BAD4_NOBLOB;
+    case 44: return SH_MIX_1_4;
+    case 45: return SH_BAD_KIND_DECL;
+    case 46: return SH_BAD_KIND_NODECL;
+    case 47: return SH_BAD_MAGIC;
+    default: return SH_PLAIN;
+    }
+}
+
+/* The payload sibling's length, or 0 when this container has none. 4096 for
+ * the whole-member shapes (member 0 is 4096 bytes), 1024 for the ones whose
+ * kind-4 entry covers only a quarter of it, and the two short ones that exist
+ * to be run off the end. */
+static uint64_t blob_size_of(int c)
+{
+    switch (shape_of(c)) {
+    case SH_LEGACY_LEAF:
+    case SH_KIND4:
+    case SH_KIND4_BASE:
+    case SH_BAD4_OVERLAP:
+        return CCONT_SIZE;
+    case SH_KIND34:
+    case SH_BAD4_NOIDX:
+        return 1024;
+    case SH_BAD4_PAST:
+    case SH_MIX_1_4:
+        return 2048;
+    default:
+        return 0;
+    }
+}
 
 static int failures;
 
@@ -178,13 +266,29 @@ static int sid_cont(uint64_t id) { return (int)((id >> 8) & 0xffff); }
 
 /* ---- the bytes each container must read back as -------------------- */
 
+static uint8_t want_byte(int c, size_t off)
+{
+    switch (shape_of(c)) {
+    case SH_LEGACY_LEAF:            /* the leaf list puts member 0 in the blob */
+    case SH_KIND4:
+    case SH_KIND4_BASE:
+        return off < CHALF ? BLOB_PAT(c) : RECIPE_PAT(c);
+    case SH_KIND34:
+        if (off < 1024) return BLOB_PAT(c);
+        if (off < CHALF) return 0;   /* kind 3 */
+        return RECIPE_PAT(c);
+    case SH_ZERO_BASE:
+        return off < CHALF ? RECIPE_PAT(c) : 0;   /* kind 0 then kind 3 */
+    default:
+        return off < CHALF ? MEMBER_PAT(c) : RECIPE_PAT(c);
+    }
+}
+
 static int check_bytes(int c, const uint8_t *got, size_t len)
 {
     size_t i;
-    for (i = 0; i < len; i++) {
-        uint8_t want = i < CHALF ? MEMBER_PAT(c) : RECIPE_PAT(c);
-        if (got[i] != want) return 0;
-    }
+    for (i = 0; i < len; i++)
+        if (got[i] != want_byte(c, i)) return 0;
     return 1;
 }
 
@@ -539,10 +643,237 @@ static void leg_planned_free(void)
     freevol(v);
 }
 
+/* ================================================================== */
+/* leg 4: THE LAYOUT. kind 4 = "the bytes live in the payload sibling". */
+/*                                                                    */
+/* One invariant used to have four encodings: the member table, the    */
+/* "!mbrleaf" list, the map's kinds, and the mere PRESENCE of the leaf */
+/* list. This leg fixes the map as the ONE answer and pins the two     */
+/* legacy answers where they were.                                    */
+/* ================================================================== */
+
+static int64_t read_container(invfs_volume *v, int c, uint8_t *buf, size_t cap)
+{
+    char nm[32];
+    cont_name(nm, sizeof nm, c);
+    return cpack_map_read(v, nm, sid(c, 0), CCONT_SIZE, 0, buf, cap);
+}
+
+/* Capture what the code says while it refuses. The REASON is half of the
+ * contract (a refusal nobody can act on is the incident this WP exists for),
+ * so the legs assert on the sentence, not just on the -1. */
+static int g_saved_stderr = -1;
+
+static FILE *cap_stderr_begin(void)
+{
+    FILE *f = tmpfile();
+    if (!f) return NULL;
+    fflush(stderr);
+    g_saved_stderr = dup(2);
+    if (g_saved_stderr < 0 || dup2(fileno(f), 2) < 0) {
+        if (g_saved_stderr >= 0) close(g_saved_stderr);
+        g_saved_stderr = -1;
+        fclose(f);
+        return NULL;
+    }
+    return f;
+}
+
+static void cap_stderr_end(FILE *f, char *out, size_t cap)
+{
+    size_t n;
+    out[0] = 0;
+    fflush(stderr);
+    if (g_saved_stderr >= 0) {
+        dup2(g_saved_stderr, 2);
+        close(g_saved_stderr);
+        g_saved_stderr = -1;
+    }
+    rewind(f);
+    n = fread(out, 1, cap - 1, f);
+    out[n] = 0;
+    fclose(f);
+}
+
+static void leg_layout(void)
+{
+    invfs_volume *v;
+    uint8_t buf[CCONT_SIZE];
+    int64_t got;
+    static const struct { int c; const char *why; const char *what; } bad[] = {
+        { 40, "runs past the payload sibling",
+              "kind 4 whose src_off+len runs past the sibling is REJECTED" },
+        { 41, "names a member that does not exist",
+              "kind 4 naming a member the table does not have is REJECTED" },
+        { 42, "name the same payload bytes",
+              "two kind-4 entries covering one payload range is REJECTED" },
+        { 43, "names the payload sibling, and this container has none",
+              "kind 4 in a volume with no payload sibling is REJECTED" },
+        { 44, "both a kind-1 and a kind-4",
+              "one member named by kind 1 AND kind 4 is REJECTED" },
+        { 45, "DECLARES map kinds this build does not know",
+              "a DECLARED magic with an unknown kind is REFUSED, naming it" },
+        { 46, "does not declare it",
+              "an undeclared magic with an unknown kind is REFUSED, naming it" },
+        { 47, "does not start with a magic this build knows",
+              "an unknown magic is REFUSED, naming the magics it knows" },
+    };
+    size_t i;
+    int ok_all = 1;
+
+    printf("== layout leg: kind 4 is the one place a member's location lives ==\n");
+    v = mkvol();
+    if (!v) { ok(0, "mkvol"); return; }
+
+    /* --- the legacy answers must not move --------------------------- */
+    got = read_container(v, 32, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(32, buf, CCONT_SIZE),
+       "c032 LEGACY leaf list + kind 1 still serves the payload sibling, "
+       "bit for bit (red control)");
+    ok(vol_find(v, "c032!mbrleaf") != 0,
+       "c032 HAS a leaf list (so the leg above really exercised it)");
+
+    got = read_container(v, 0, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(0, buf, CCONT_SIZE),
+       "c000 per-inode layout (no blob, no leaf list) still reads as today");
+
+    got = read_container(v, 35, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(35, buf, CCONT_SIZE),
+       "c035 kind 3 under the OLD magic (MRM2) still reads -- existing "
+       "kind-3 volumes are untouched");
+
+    /* --- and kind 4 carries the same answer, alone ------------------ */
+    got = read_container(v, 33, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(33, buf, CCONT_SIZE),
+       "c033 kind 4 (MRK2, NO leaf list) serves the payload sibling");
+    ok(vol_find(v, "c033!mbrleaf") == 0,
+       "c033 has NO leaf list: the map alone located every byte");
+    ok(got == (int64_t)CCONT_SIZE && buf[0] == BLOB_PAT(33),
+       "...and the bytes came OUT OF THE SIBLING, not out of member 0's "
+       "inode (the two patterns differ on purpose)");
+
+    got = read_container(v, 36, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(36, buf, CCONT_SIZE),
+       "c036 kind 4 under the OLD magic (MRM2) is accepted: the old magic "
+       "keeps working");
+
+    got = read_container(v, 34, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(34, buf, CCONT_SIZE),
+       "c034 kind 3 and kind 4 in ONE map are accepted together and serve "
+       "zeros and payload bytes in the right places");
+
+    /* --- the refusals ----------------------------------------------- */
+    setenv("INVFS_DEBUG_PACKS", "1", 1);
+    for (i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        char said[4096];
+        FILE *f = cap_stderr_begin();
+        got = read_container(v, bad[i].c, buf, sizeof buf);
+        if (f) cap_stderr_end(f, said, sizeof said);
+        else said[0] = 0;
+        if (got != -1) {
+            ok_all = 0;
+            printf("FAIL %s (returned %lld)\n", bad[i].what,
+                   (long long)got);
+            failures++;
+            continue;
+        }
+        if (!strstr(said, bad[i].why)) {
+            ok_all = 0;
+            printf("FAIL %s: the refusal did not say '%s'; it said:\n%s\n",
+                   bad[i].what, bad[i].why, said);
+            failures++;
+        } else {
+            /* Print what the operator would see. The SENTENCE is part of the
+             * contract, so it is shown, not just matched. */
+            char first[512];
+            size_t k = 0;
+            while (said[k] && said[k] != '\n' && k < sizeof first - 1) {
+                first[k] = said[k];
+                k++;
+            }
+            first[k] = 0;
+            printf("     said: %s\n", first);
+        }
+    }
+    unsetenv("INVFS_DEBUG_PACKS");
+    ok(ok_all, "every malformed map is REJECTED with the reason named");
+
+    /* A refusal is per-container: the cache must not be left poisoned. */
+    got = read_container(v, 33, buf, sizeof buf);
+    ok(got == (int64_t)CCONT_SIZE && check_bytes(33, buf, CCONT_SIZE),
+       "a good container still reads after the refusals");
+
+    freevol(v);
+}
+
+/* ================================================================== */
+/* leg 5: LAYOUT IS A PROPERTY OF THE VOLUME, NOT OF THE ENVIRONMENT. */
+/* ================================================================== */
+
+static void leg_env_independent(void)
+{
+    static const int cs[] = { 0, 32, 33, 34, 36 };
+    uint8_t ref[sizeof cs / sizeof cs[0]][CCONT_SIZE];
+    uint8_t got[CCONT_SIZE];
+    size_t i;
+    int bad = 0;
+
+    printf("== env leg: INVFS_CPACK_BLOB / INVFS_CPACK_LEAF are WRITE policy ==\n");
+
+    /* WP task 3. These two variables choose which layout the SWEEP produces;
+     * they never choose how a stored volume is READ. The read path probes the
+     * volume's own siblings ("<name>!mbrblob", the map's kinds), so a reader
+     * with no such variables in its environment -- every reader that is not
+     * the sweep -- sees the layout the volume actually has. This leg reads the
+     * same containers under both settings and demands the same bytes. */
+    unsetenv("INVFS_CPACK_LEAF");
+    unsetenv("INVFS_CPACK_BLOB");
+    {
+        invfs_volume *v = mkvol();
+        if (!v) { ok(0, "mkvol"); return; }
+        for (i = 0; i < sizeof cs / sizeof cs[0]; i++) {
+            int64_t r = read_container(v, cs[i], ref[i], CCONT_SIZE);
+            if (r != (int64_t)CCONT_SIZE){
+                printf("FAIL env leg: c%03d unreadable with no flags\n", cs[i]);
+                failures++;
+                freevol(v);
+                return;
+            }
+        }
+        freevol(v);
+    }
+
+#define ENV_PASS(leaf, blob, label)                                          \
+    do {                                                                     \
+        invfs_volume *v = mkvol();                                           \
+        setenv("INVFS_CPACK_LEAF", (leaf), 1);                               \
+        setenv("INVFS_CPACK_BLOB", (blob), 1);                               \
+        if (!v) { ok(0, "mkvol"); break; }                                   \
+        for (i = 0; i < sizeof cs / sizeof cs[0]; i++) {                     \
+            int64_t r = read_container(v, cs[i], got, CCONT_SIZE);           \
+            if (r != (int64_t)CCONT_SIZE ||                                  \
+                memcmp(got, ref[i], CCONT_SIZE) != 0) {                      \
+                printf("FAIL env leg: c%03d differs with %s\n", cs[i], label); \
+                bad = 1;                                                     \
+            }                                                                \
+        }                                                                    \
+        freevol(v);                                                          \
+    } while (0)
+
+    ENV_PASS("1", "1", "LEAF=1 BLOB=1");
+    ENV_PASS("0", "0", "LEAF=0 BLOB=0");
+    ENV_PASS("1", "0", "LEAF=1 BLOB=0");
+    ENV_PASS("0", "1", "LEAF=0 BLOB=1");
+#undef ENV_PASS
+    unsetenv("INVFS_CPACK_LEAF");
+    unsetenv("INVFS_CPACK_BLOB");
+    ok(!bad, "all four flag settings read the same volume byte-for-byte");
+}
+
 int main(void)
 {
     const char *leg = getenv("INVFS_CPACK_SAN_LEG");
-    int do_struct = 1, do_realloc = 0, do_free = 0;
+    int do_struct = 1, do_realloc = 0, do_free = 0, do_layout = 0;
     /* line-buffered, so a run that dies under a sanitizer still shows which
      * leg it died in rather than losing the last block to the stdio buffer */
     setvbuf(stdout, NULL, _IOLBF, 0);
@@ -551,8 +882,10 @@ int main(void)
             do_struct = 0; do_realloc = 1;
         } else if (!strcmp(leg, "planned_free")) {
             do_struct = 0; do_free = 1;
+        } else if (!strcmp(leg, "layout")) {
+            do_struct = 0; do_layout = 1;
         } else if (!strcmp(leg, "all")) {
-            do_realloc = do_free = 1;
+            do_realloc = do_free = 1; do_layout = 1;
         } else if (!strcmp(leg, "structure")) {
             do_struct = 1;
         }
@@ -560,6 +893,10 @@ int main(void)
     if (do_struct)  leg_structure();
     if (do_realloc) leg_planned_realloc();
     if (do_free)    leg_planned_free();
+    if (do_layout) {
+        leg_layout();
+        leg_env_independent();
+    }
     printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;
 }
@@ -573,33 +910,53 @@ int main(void)
 /* load, validate and serve paths.                                      */
 /* ================================================================== */
 
-int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
-                   size_t len, void *buf)
-{
-    int c = sid_cont(inode_id);
-    (void)v;
-    if (c < 0 || c >= NCONT || offset + len > CCONT_SIZE) return -1;
-    memset(buf, MEMBER_PAT(c), len);
-    return (int)len;
-}
-
-/* "!mbrt", "!mbrmap" and "!mbr<idx>" get distinct ids, so vol_read_file
- * below can tell the member TABLE from the MAP blob without a name. */
+/* the sibling roles an inode id can carry (see find_id below) */
 #define SUB_RECIPE 0
 #define SUB_TABLE  1
 #define SUB_MAP    2
 #define SUB_MEMBER 3
+#define SUB_BLOB   4
+#define SUB_LEAF   5
+
+int vol_read_range(invfs_volume *v, uint64_t inode_id, uint64_t offset,
+                   size_t len, void *buf)
+{
+    int c = sid_cont(inode_id);
+    unsigned sub = (unsigned)(inode_id & 0xff);
+    uint64_t limit;
+    (void)v;
+    if (c < 0 || c >= NALL) return -1;
+    if (sub == SUB_BLOB)
+        limit = blob_size_of(c);
+    else if (sub == SUB_MEMBER)
+        limit = CCONT_SIZE;
+    else
+        return -1;
+    if (offset + len > limit) return -1;
+    memset(buf, sub == SUB_BLOB ? BLOB_PAT(c) : MEMBER_PAT(c), len);
+    return (int)len;
+}
+
 
 static uint64_t find_id(const char *name)
 {
     int c = cont_of(name);
     size_t n;
-    if (c < 0 || c >= NCONT || !name) return 0;
+    if (c < 0 || c >= NALL || !name) return 0;
     n = strlen(name);
     if (n == 4)                                  return sid(c, SUB_RECIPE);
     if (n > 4 && !strcmp(name + 4, "!mbrt"))     return sid(c, SUB_TABLE);
     if (n > 4 && !strcmp(name + 4, "!mbrmap"))   return sid(c, SUB_MAP);
     if (n > 4 && !strcmp(name + 4, "!mbr0000"))  return sid(c, SUB_MEMBER);
+    /* The payload sibling and the leaf list are NOT members: they exist only
+     * for the shapes that declare them, which is what makes the two layouts
+     * distinguishable from the VOLUME (the read path probes the names) and
+     * not from an environment variable. */
+    if (n > 4 && !strcmp(name + 4, "!mbrblob") && blob_size_of(c))
+        return sid(c, SUB_BLOB);
+    if (n > 4 && !strcmp(name + 4, "!mbrleaf") &&
+        shape_of(c) == SH_LEGACY_LEAF)
+        return sid(c, SUB_LEAF);
     return 0;
 }
 
@@ -609,12 +966,105 @@ uint64_t vol_find(invfs_volume *v, const char *name)
     return find_id(name);
 }
 
+/* one map entry, v2 wire (40 B): orig_off, len, kind, idx, src_off, pad */
+static void put_ent(uint8_t *p, uint64_t orig_off, uint64_t len, uint8_t kind,
+                    uint32_t idx, uint64_t src_off)
+{
+    memset(p, 0, 40);
+    memcpy(p, &orig_off, 8);
+    memcpy(p + 8, &len, 8);
+    p[16] = kind;
+    memcpy(p + 17, &idx, 4);
+    memcpy(p + 21, &src_off, 8);
+}
+
+/* Build the map the container's shape calls for. `magic` is the SHAPE's, not
+ * a global: 36 carries kind 4 under the OLD magic on purpose (the old magic
+ * must keep being accepted), and 35 carries kind 3 under it too.
+ * Returns the entry count; the caller adds the header. */
+static uint32_t build_map(int c, uint8_t *ents, const char **magic)
+{
+    switch (shape_of(c)) {
+    case SH_LEGACY_LEAF:
+    case SH_PLAIN:
+        *magic = "MRM2";
+        put_ent(ents, 0, CHALF, 1, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_KIND4:
+        *magic = "MRK2";
+        put_ent(ents, 0, CHALF, 4, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_KIND4_BASE:
+        *magic = "MRM2";      /* the old magic, carrying kind 4 */
+        put_ent(ents, 0, CHALF, 4, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_KIND34:
+        *magic = "MRK2";
+        put_ent(ents, 0, 1024, 4, 0, 0);
+        put_ent(ents + 40, 1024, 1024, 3, 0, 0);
+        put_ent(ents + 80, CHALF, CHALF, 0, 0, 0);
+        return 3;
+    case SH_ZERO_BASE:
+        *magic = "MRM2";      /* kind 3 as every existing volume writes it */
+        put_ent(ents, 0, CHALF, 0, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 3, 0, 0);
+        return 2;
+    case SH_BAD4_PAST:        /* blob is 2048: 2048 + 2048 > 2048 */
+        *magic = "MRK2";
+        put_ent(ents, 0, CHALF, 4, 0, CHALF);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_BAD4_NOIDX:       /* the table has member 0 only */
+        *magic = "MRK2";
+        put_ent(ents, 0, CHALF, 4, 7, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_BAD4_OVERLAP:     /* both name payload [0, 1024) */
+        *magic = "MRK2";
+        put_ent(ents, 0, 1024, 4, 0, 0);
+        put_ent(ents + 40, 1024, 1024, 4, 0, 0);
+        put_ent(ents + 80, CHALF, CHALF, 0, 0, 0);
+        return 3;
+    case SH_BAD4_NOBLOB:      /* well-formed map, no payload sibling */
+        *magic = "MRK2";
+        put_ent(ents, 0, CHALF, 4, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_MIX_1_4:          /* member 0 in BOTH layouts */
+        *magic = "MRK2";
+        put_ent(ents, 0, 1024, 1, 0, 0);
+        put_ent(ents + 40, 1024, 1024, 4, 0, 1024);
+        put_ent(ents + 80, CHALF, CHALF, 0, 0, 0);
+        return 3;
+    case SH_BAD_KIND_DECL:
+        *magic = "MRK2";
+        put_ent(ents, 0, CHALF, 5, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_BAD_KIND_NODECL:
+        *magic = "MRM2";
+        put_ent(ents, 0, CHALF, 5, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    case SH_BAD_MAGIC:
+        *magic = "MRQ9";
+        put_ent(ents, 0, CHALF, 1, 0, 0);
+        put_ent(ents + 40, CHALF, CHALF, 0, 0, 0);
+        return 2;
+    }
+    *magic = "MRM2";
+    return 0;
+}
+
 int vol_read_file(invfs_volume *v, uint64_t inode, uint8_t **out, size_t *out_len)
 {
     int c = sid_cont(inode);
     unsigned sub = (unsigned)(inode & 0xff);
     (void)v;
-    if (c < 0 || c >= NCONT || !out || !out_len) return -1;
+    if (c < 0 || c >= NALL || !out || !out_len) return -1;
     if (sub == SUB_TABLE) {
         /* "idx<TAB>empty sname<TAB>usize" -- an empty sname makes the
          * member sibling exactly "cNNN!mbr0000" (cpack_mbr_name:1839). */
@@ -625,35 +1075,49 @@ int vol_read_file(invfs_volume *v, uint64_t inode, uint8_t **out, size_t *out_le
         *out = b; *out_len = sizeof row - 1;
         return 0;
     }
-    if (sub == SUB_MAP) {
-        /* a v2 map (MRM2): 12-byte header + two 40-byte entries. */
-        uint32_t count = 2, gen = 1, idx;
-        uint64_t z, l, o, so;
-        uint8_t *b = (uint8_t *)malloc(12 + 2 * 40), *e;
+    if (sub == SUB_LEAF) {
+        /* "idx<TAB>blob_off" -- member 0 lives at offset 0 of the sibling.
+         * This is the LEGACY index: no shape written by the current commit
+         * emits one, and 32 exists to prove it still decides the layout. */
+        static const char lrow[] = "0\t0\n";
+        uint8_t *b = (uint8_t *)malloc(sizeof lrow - 1);
         if (!b) return -1;
-        memcpy(b, "MRM2", 4);
+        memcpy(b, lrow, sizeof lrow - 1);
+        *out = b; *out_len = sizeof lrow - 1;
+        return 0;
+    }
+    if (sub == SUB_MAP) {
+        uint8_t ents[3 * 40];
+        const char *mag = NULL;
+        uint32_t count = build_map(c, ents, &mag), gen = 1;
+        uint8_t *b = (uint8_t *)malloc(12 + 3 * 40);
+        if (!b) return -1;
+        memcpy(b, mag, 4);
         memcpy(b + 4, &count, 4);
         memcpy(b + 8, &gen, 4);
-        e = b + 12;
-        /* e0: [0,2048) MEMBER, member idx 0, src_off 0 */
-        memset(e, 0, 40);
-        z = 0;   memcpy(e, &z, 8);
-        l = CHALF; memcpy(e + 8, &l, 8);
-        e[16] = 1;
-        idx = 0; memcpy(e + 17, &idx, 4);
-        so = 0;  memcpy(e + 21, &so, 8);
-        /* e1: [2048,4096) RECIPE, src_off 0 */
-        memset(e + 40, 0, 40);
-        o = CHALF; memcpy(e + 40, &o, 8);
-        l = CCONT_SIZE - CHALF; memcpy(e + 48, &l, 8);
-        e[40 + 16] = 0;
-        idx = 0; memcpy(e + 40 + 17, &idx, 4);
-        so = 0;  memcpy(e + 40 + 21, &so, 8);
-        (void)c;
-        *out = b; *out_len = 12 + 2 * 40;
+        memcpy(b + 12, ents, (size_t)count * 40);
+        *out = b; *out_len = 12 + (size_t)count * 40;
         return 0;
     }
     return -1;
+}
+
+/* The ONE new stub this WP needs. cpack_map_get asks for the payload
+ * sibling's LENGTH before it validates a map, because a kind-4 entry bounds
+ * itself against that length and not against the member's. Off the map path
+ * this keeps the old "everything is a no" answer. */
+int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out,
+                  uint64_t *size_out, uint64_t *ctime_out)
+{
+    uint64_t id;
+    (void)v;
+    if (!name) return -1;
+    id = find_id(name);
+    if (!id || (unsigned)(id & 0xff) != SUB_BLOB) return -1;
+    if (id_out) *id_out = id;
+    if (size_out) *size_out = blob_size_of(sid_cont(id));
+    if (ctime_out) *ctime_out = 0;
+    return 0;
 }
 
 /* cpack_recipe_seg's  branch: vol_inode_get -> vol_recipe_load ->
@@ -662,7 +1126,7 @@ int vol_inode_get(invfs_volume *v, uint64_t inode_id, invfs_inode *out)
 {
     int c = sid_cont(inode_id);
     (void)v;
-    if (c < 0 || c >= NCONT || !out) return -1;
+    if (c < 0 || c >= NALL || !out) return -1;
     memset(out, 0, sizeof *out);
     out->recipe_addr[0] = (uint8_t)c;
     return 1;
@@ -735,7 +1199,7 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
     (void)v; (void)plen; (void)min_csize;
     if (pba < 1000u) return -1;
     c = (int)(pba - 1000u);
-    if (c < 0 || c >= NCONT || !csize_out || !blob_out) return -1;
+    if (c < 0 || c >= NALL || !csize_out || !blob_out) return -1;
     b = (uint8_t *)malloc(CPACK_REcipe);
     if (!b) return -1;
     memset(b, RECIPE_PAT(c), CPACK_REcipe);
@@ -852,10 +1316,8 @@ int vol_get_meta(invfs_volume *v, uint64_t inode_id, invfs_meta_pub *out)
 { (void)v; (void)inode_id; (void)out; return -1; }
 int vol_stamp_class(invfs_volume *v, uint64_t inode_id, uint8_t cls, uint8_t algo, uint16_t gen)
 { (void)v; (void)inode_id; (void)cls; (void)algo; (void)gen; return 0; }
-int vol_stat_full(invfs_volume *v, const char *name, uint64_t *id_out, uint64_t *size_out, uint64_t *ctime_out)
-{ (void)v; (void)name; if (id_out) *id_out = 0; if (size_out) *size_out = 0;
-  if (ctime_out) *ctime_out = 0;
-  return -1; }
+/* (vol_stat_full is NOT ballast any more: the map loader asks it for the
+ * payload sibling's length. It is defined above, next to vol_read_file. */
 uint64_t vol_transcode_abort(invfs_volume *v, const char *name) { (void)v; (void)name; return 0; }
 int vol_free_recipe_blocks(invfs_volume *v, const uint8_t recipe_addr[INVFS_RECIPE_ADDR_LEN], uint64_t keep_pba)
 { (void)v; (void)recipe_addr; (void)keep_pba; return 0; }
