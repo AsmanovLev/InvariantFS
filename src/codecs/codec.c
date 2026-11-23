@@ -1785,6 +1785,7 @@ static void pack_scan_dir(const char *dir, size_t dlen)
     memcpy(path, dir, dlen);
     path[dlen] = '\0';
     d = opendir(path);
+    if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[packdbg] scan dir %s -> %s\n", path, d ? "open" : "FAILED");
     if (!d) return;
     while ((de = readdir(d)) != NULL) {
         size_t nl = strlen(de->d_name);
@@ -1810,7 +1811,7 @@ static void pack_scan_dir(const char *dir, size_t dlen)
         path[dlen] = '/';
         memcpy(path + dlen + 1, de->d_name, nl + 1); /* path = pack dir */
         memcpy(path + plen, "/manifest", 10);
-        if (!parse_manifest(path, &m)) continue;
+        if (!parse_manifest(path, &m)) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[packdbg] manifest parse failed: %s\n", path); continue; }
         path[plen] = '\0';
         pack_register_inner(path, &m, NULL);
     }
@@ -1869,6 +1870,7 @@ static void packs_ensure(void)
 
     if (!packs_built) {
         packs_built = 1;
+        if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[packdbg] packs_ensure INVFS_CODECPACKS=%s%c", getenv("INVFS_CODECPACKS") ? getenv("INVFS_CODECPACKS") : "(unset)", 10);
         pack_scan_all();
     }
     if (!packs_dirty)
