@@ -14,10 +14,19 @@ set -eu
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 WORK="${WORK:?set WORK to a scratch dir}"
 
-# Pinned Debian 13 (Trixie) Live Standard ISO
-ISO_VER="13.7.0"
-ISO_URL="https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid/debian-live-$ISO_VER-amd64-standard.iso"
-ISO_SHA256="040a44f35186321eb6cdaab52a8a2d06224fe6b77f6fbb9f1861ad89c14e17ec  debian-live-$ISO_VER-amd64-standard.iso"
+# Debian's `current-live` is a moving symlink: the POINT RELEASE in it moves
+# (13.7.0 -> 13.8.0, and the pinned 13.7.0 URL now 404s), so a hardcoded
+# version here rots without anything in this repo changing. Resolve the file
+# name and its digest from Debian's own SHA256SUMS, the way
+# iso-gentoo-install.sh resolves its minimal ISO -- and keep
+# INVFS_DEBIAN_ISO_VER as the way to pin one release on purpose.
+DEB_DIR="https://cdimage.debian.org/debian-cd/current-live/amd64/iso-hybrid"
+DEB_SUMS="$(curl -fsSL "$DEB_DIR/SHA256SUMS")" || { echo "iso-debian-install: cannot read $DEB_DIR/SHA256SUMS" >&2; exit 1; }
+ISO_VER="${INVFS_DEBIAN_ISO_VER:-$(printf '%s\n' "$DEB_SUMS" | grep -oE 'debian-live-[0-9.]+-amd64-standard\.iso' | head -1 | sed 's/^debian-live-//; s/-amd64-standard\.iso$//')}"
+[ -n "$ISO_VER" ] || { echo "iso-debian-install: SHA256SUMS names no *-amd64-standard.iso" >&2; exit 1; }
+ISO_URL="$DEB_DIR/debian-live-$ISO_VER-amd64-standard.iso"
+ISO_SHA256="$(printf '%s\n' "$DEB_SUMS" | grep -E " [* ]?debian-live-$ISO_VER-amd64-standard\.iso$" | head -1)"
+[ -n "$ISO_SHA256" ] || { echo "iso-debian-install: no SHA256 line for $ISO_VER" >&2; exit 1; }
 PORT="${INVFS_ISO_PORT:-8005}"
 MEM="${INVFS_ISO_MEM:-4G}"
 TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-120}"
