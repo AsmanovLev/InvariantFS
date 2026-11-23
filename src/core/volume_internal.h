@@ -2259,14 +2259,21 @@ int64_t cpack_map_read(invfs_volume *v, const char *name, uint64_t ino,
 #define CPACK_ZSTD_LANE     19
 #define CPACK_MEMBER_META   1024ull
 #define CPACK_MEMBER_UNBATCHED 256ull
-/* WP-PACKED leaf layout: a member is a (idx, offset) row in
- * "<name>!mbrleaf" plus its table row -- tens of bytes, not a whole inode
+/* WP-PACKED leaf layout: a member that lives in the payload sibling costs
+ * ONE map entry plus its table row -- tens of bytes, not a whole inode
  * with a recipe, a dirent and an index entry. Charging the per-inode price
  * to a packed member refuses decompositions that are a clear win:
  * measured on a 200-member zip (2.34 MB) the guard charged 200 x 1 KiB of
  * members plus the same per-member block rounding and declined, although
- * the packed parts cost 2.12 MB and the leaf rows ~8 KB. */
-#define CPACK_MEMBER_META_PACKED    32ull   /* idx+offset row in !mbrleaf */
+ * the packed parts cost 2.12 MB and the leaf rows ~8 KB.
+ *
+ * The rate is kept at the historical 32 B on purpose, and it now stands for
+ * a kind-4 map entry (40 B, WP-CPACK-MAP-CONSOLIDATION) in place of the
+ * "!mbrleaf" row it replaced (32 B): the two are the same order and moving
+ * the constant would change every size-guard verdict on every corpus for a
+ * difference of 8 B/member. CPACK_MEMBER_META_PACKED is a measured RATE,
+ * not a bound, and the map's real length is charged separately in `fixed`. */
+#define CPACK_MEMBER_META_PACKED    32ull   /* one map entry per member */
 #define CPACK_MEMBER_UNBATCHED_PACKED 0ull  /* one blob: rounding is shared */
 #define CPACK_ZGAIN_MILLE   5ull
 #define CPACK_REPRO_MAX     (4ull << 20)

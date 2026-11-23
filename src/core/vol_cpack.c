@@ -2526,12 +2526,18 @@ out:
  * an FS-OWNED binary format (the pack only renders it), little-endian, all
  * fields read by memcpy like every other on-disk value here:
  *
- *   v1  [4B "MRMP"][u32 count]
+ *   v1  [4B magic][u32 count]
  *       count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off }  (29 B)
- *   v2  [4B "MRM2"][u32 count][u32 decomp_gen]
+ *   v2  [4B magic][u32 count][u32 decomp_gen]
  *       count x { u64 orig_off, u64 len, u8 kind, u32 idx, u64 src_off,
  *                 u32 raw_len, u8 engine, u8 level, u8 mem_level,
  *                 u8 strategy, i8 window_bits, u8 pad[2] }            (40 B)
+ *
+ * THE MAGIC IS A REQUIREMENT, NOT A VERSION (see the four constants below).
+ * A magic says which wire layout the entries are in AND whether the map uses
+ * any kind outside the baseline set -- so a reader too old to parse it can
+ * refuse at byte 0 with a sentence that names what it is missing, instead of
+ * parsing on and blaming the container for an "unknown kind".
  *
  * Entries are sorted by orig_off and must partition [0, container_size)
  * exactly (contiguous, no gaps, no overlaps, len > 0). kind 0 = RECIPE:
@@ -2539,6 +2545,23 @@ out:
  * = MEMBER: bytes are member idx's [src_off, +len) (idx must exist in the
  * member table, src_off+len within its usize). A zero-length member simply
  * has no map entries.
+ *
+ * kind 3 = ZERO: nothing is stored, the bytes are zeros (idx and src_off
+ * must be 0), the pack having PROVEN the region reads back all-zero.
+ *
+ * kind 4 = BLOB: the bytes are member idx's [src_off, +len) and they live in
+ * the payload sibling "<name>!mbrblob" at absolute offset src_off (NOT
+ * within the member). This is what makes the layout of every member
+ * readable from ONE file: without it the blob offsets lived only in the
+ * "<name>!mbrleaf" list, and the mere PRESENCE of that list decided how
+ * every other sibling was read. A kind-4 entry names the same member a
+ * kind-1 entry would (idx must exist in the member table, and a member may
+ * not be named by both kinds), so its src_off+len is bounded by the payload
+ * sibling's SIZE, not by the member's usize; the two kinds are mutually
+ * exclusive per member because a member either is a byte range in the blob
+ * or is its own inode. Disjointness, not tiling: two kind-4 entries may
+ * cover the same container in different members' order, so the check is that
+ * no two of them name the same payload bytes.
  *
  * kind 2 = REPRO (v2 only): the bytes exist NOWHERE -- they are re-encoded on
  * read. `raw_len` bytes are read from member idx at src_off and deflated
@@ -2568,8 +2591,32 @@ out:
                                  * u32 idx + u64 src_off */
 #define CPACK_MAP_ENT_WIRE2 40  /* v2: the above + u32 raw_len + engine,
                                  * level, mem_level, strategy, window_bits */
+/* The four magics: ONE per "a reader older than this cannot parse the map"
+ * step, which is the whole mechanism -- there is deliberately no version
+ * table, no feature bitmap and no per-kind compatibility matrix. The two
+ * baseline magics are the historical ones and must stay readable forever:
+ *
+ *   "MRMP"  v1 wire, baseline kinds 0..2      (pre-dates kinds 3/4)
+ *   "MRM2"  v2 wire, baseline kinds 0..2      (pre-dates kinds 3/4)
+ *   "MRK1"  v1 wire, DECLARES kinds >= 3
+ *   "MRK2"  v2 wire, DECLARES kinds >= 3
+ *
+ * A baseline magic is still ACCEPTED carrying a kind 3, because that is how
+ * every kind-3 map written before this change looks on disk, and a volume
+ * that exists today must not change behaviour. What the declaration buys is
+ * the OTHER direction: a reader that predates a kind sees "MRK1"/"MRK2" at
+ * byte 0 and refuses with the requirement named, instead of parsing entries
+ * it cannot interpret. New maps that carry any kind >= 3 are stamped with
+ * the declared magic at write time (cpack_map_declare_kinds below). */
 #define CPACK_MAP_MAGIC1  "MRMP"
 #define CPACK_MAP_MAGIC2  "MRM2"
+#define CPACK_MAP_MAGIC1K "MRK1"
+#define CPACK_MAP_MAGIC2K "MRK2"
+/* The lowest kind number a map must DECLARE in its magic. Everything below
+ * this is baseline: a reader that knows no other magic parses the map. */
+#define CPACK_MAP_KIND_DECLARED_MIN 3
+#define CPACK_MAP_KIND_RECIPE 0
+#define CPACK_MAP_KIND_MEMBER 1
 #define CPACK_MAP_KIND_REPRO 2
 /* Kind 3: the image bytes here are ZEROS and nothing is stored for them.
  *
@@ -2587,6 +2634,15 @@ out:
  * src_off is meaningless for kind 3 and must be 0; the entries still TILE the
  * container, so the validator's tiling rule is unchanged. */
 #define CPACK_MAP_KIND_ZERO  3
+/* Kind 4: the bytes are member idx's [src_off, +len) and they live in
+ * "<name>!mbrblob" at that offset. See the format comment above.
+ *
+ * This is the entry that retires "<name>!mbrleaf" as the source of truth for
+ * the blob's layout. The leaf list stays readable (volumes written before
+ * this exist), but it is a LEGACY read path: a map with kind-4 entries needs
+ * nothing else to locate a member, and new writes never emit the list. */
+#define CPACK_MAP_KIND_BLOB  4
+#define CPACK_MAP_KIND_MAX   CPACK_MAP_KIND_BLOB
 #define CPACK_MAP_MAX_ENTS (4 * CPACK_MAX_MEMBERS + 4)  /* a member split
 
                                  * into recipe/member runs bounds entries;
@@ -2637,7 +2693,7 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
     cpack_map_ent *ents;
     uint32_t count, i;
     size_t ent_wire, base;
-    int v2;
+    int v2, declared = 0;
 
     *out = NULL;
     *n_out = 0;
@@ -2647,16 +2703,28 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
         if (why) *why = "the map blob is shorter than a header";
         return -1;
     }
-    if (memcmp(blob, CPACK_MAP_MAGIC2, 4) == 0) {
+    if (memcmp(blob, CPACK_MAP_MAGIC2, 4) == 0 ||
+        memcmp(blob, CPACK_MAP_MAGIC2K, 4) == 0) {
         v2 = 1;
+        declared = !memcmp(blob, CPACK_MAP_MAGIC2K, 4);
         ent_wire = CPACK_MAP_ENT_WIRE2;
         base = 12;
-    } else if (memcmp(blob, CPACK_MAP_MAGIC1, 4) == 0) {
+    } else if (memcmp(blob, CPACK_MAP_MAGIC1, 4) == 0 ||
+               memcmp(blob, CPACK_MAP_MAGIC1K, 4) == 0) {
         v2 = 0;
+        declared = !memcmp(blob, CPACK_MAP_MAGIC1K, 4);
         ent_wire = CPACK_MAP_ENT_WIRE;
         base = 8;
     } else {
-        if (why) *why = "the map blob does not start with MRMP/MRM2";
+        /* A magic this build does not know is the CASE THE DECLARATION
+         * EXISTS FOR: refuse at byte 0, name the four magics this build can
+         * read and what they mean, so the operator can tell "newer core"
+         * from "corrupt blob" without a hexdump. */
+        if (why) *why = "the map does not start with a magic this build knows "
+                        "(MRMP/MRM2 = map kinds 0..2, MRK1/MRK2 = map kinds "
+                        "0..4) -- it was written by a newer core, or this "
+                        "blob is not a map; read the volume with the build "
+                        "that wrote it";
         return -1;
     }
     memcpy(&count, blob + 4, 4);   /* LE by the host convention (invarifs.h) */
@@ -2701,16 +2769,29 @@ static int cpack_map_parse(const uint8_t *blob, size_t blob_len,
          * so it needs nothing a v2 header would carry. An older core that
          * predates it refuses the map and abandons the decomposition, which is
          * the safe direction -- it never reads zeros as if they were bytes. */
-        if (ents[i].kind > CPACK_MAP_KIND_ZERO) {
+        if (ents[i].kind > CPACK_MAP_KIND_MAX) {
             /* The one refusal a reader can hit on a map that is PERFECTLY
              * VALID for a newer build, so it is worth its own sentence: the
              * map is FS-owned (the wire format lives in this file, not in the
              * pack), so a new kind is an ABI step, and a downgraded reader
-             * must say what it is missing instead of blaming the container. */
-            if (why) *why = "an entry names a kind this build does not know "
-                            "(a map written by a newer core; this one knows "
-                            "kinds 0..3 -- upgrade, or read with the build "
-                            "that wrote the volume)";
+             * must say what it is missing instead of blaming the container.
+             *
+             * Two sentences, because the two cases have different fixes. A
+             * DECLARED magic means the map TOLD us it needs a newer reader
+             * and we ignored that until now: that is a downgrade, and the
+             * answer is the build that wrote the volume. A baseline magic
+             * carrying an unknown kind is a map whose writer did not declare
+             * it, so the same answer but a different provenance. */
+            if (why) *why = declared
+                ? "the map DECLARES map kinds this build does not know "
+                  "(MRK1/MRK2 = a reader that knows kinds 0..4: 3 = zeros, "
+                  "4 = the bytes live in <name>!mbrblob); it was written by "
+                  "a newer core -- upgrade, or read the volume with the "
+                  "build that wrote it"
+                : "an entry names a kind this build does not know, and the "
+                  "map's magic does not declare it (a map written by a newer "
+                  "core; this one knows kinds 0..4 -- upgrade, or read the "
+                  "volume with the build that wrote it)";
             free(ents);
             return -1;
         }
@@ -2727,7 +2808,6 @@ static int cpack_member_idx_cmp(const void *a, const void *b)
     uint32_t ib = ((const cpack_member *)b)->idx;
     return ia < ib ? -1 : ia > ib;
 }
-
 
 /* a copy of the parsed member table sorted by idx (uniqueness was enforced
  * by the parse), for binary search in validate/serve */
@@ -2751,6 +2831,99 @@ static const cpack_member *cpack_member_find(const cpack_member *mem,
         if (mem[mid].idx < idx) lo = mid + 1; else hi = mid;
     }
     return NULL;
+}
+
+
+/* Write-time, step 1: DECLARE what the map needs.
+ *
+ * The magics above are one per "a reader older than this cannot parse the
+ * map" step, and this is the only place the decision is taken: if any entry
+ * carries a kind >= CPACK_MAP_KIND_DECLARED_MIN the magic is rewritten to the
+ * DECLARING variant of the same wire version. Nothing else about the map
+ * changes -- same header length, same entry size, same fields -- so the cost
+ * is four bytes, and a map that stays inside the baseline kinds keeps saying
+ * nothing.
+ *
+ * Called on the blob the pack rendered, AFTER the layout rewrite below (a
+ * kind 1 promoted to kind 4 is an extension kind too) and BEFORE the guard, so
+ * the map that is proved bit-exact is byte-for-byte the map that is stored.
+ * Returns 1 when the magic was upgraded. */
+static int cpack_map_declare_kinds(uint8_t *blob, size_t blob_len,
+                                   const cpack_map_ent *e, size_t n)
+{
+    size_t i;
+    if (!blob || blob_len < 8) return 0;
+    for (i = 0; i < n; i++)
+        if (e[i].kind >= CPACK_MAP_KIND_DECLARED_MIN) break;
+    if (i == n) return 0;              /* baseline kinds only: say nothing */
+    if (memcmp(blob, CPACK_MAP_MAGIC2, 4) == 0) {
+        memcpy(blob, CPACK_MAP_MAGIC2K, 4);
+        return 1;
+    }
+    if (memcmp(blob, CPACK_MAP_MAGIC1, 4) == 0) {
+        memcpy(blob, CPACK_MAP_MAGIC1K, 4);
+        return 1;
+    }
+    return 0;                          /* already declaring */
+}
+
+
+/* Write-time, step 2: write the layout the commit chose into the map.
+ *
+ * In the packed layout a leaf member's payload goes into "<name>!mbrblob" and
+ * its offset is decided HERE -- by the running append in the commit loop --
+ * not by the pack and not by any other file. So the commit rewrites that half
+ * of the pack's map: kind 1 ("member idx's bytes at src_off") becomes kind 4
+ * ("member idx's bytes at that offset of the payload sibling", see kind 4's
+ * comment). A member split into several runs gets every one of its entries
+ * converted; a member that stayed its own inode keeps kind 1 untouched.
+ *
+ * `loff` is parallel to the idx-sorted member array, UINT64_MAX for a member
+ * that is not in the blob. Returns the number of entries converted; 0 means
+ * "this map describes a per-inode layout" and nothing was touched.
+ *
+ * BOTH representations move: the parsed `e[]` the guard serves from, and the
+ * WIRE bytes in `mapb` that are about to be stored. Patching only the parsed
+ * array would pass the guard -- which reads the array -- and store the pack's
+ * original kind-1 map, i.e. a volume whose guard proved one layout and whose
+ * readers used another. Measured the hard way: the first version of this
+ * helper did exactly that, the round trip still worked (the leaf list was
+ * gone, so nothing read the blob) and the stored map had no kind-4 entry at
+ * all. The map on disk is what readers use, so the map on disk is what the
+ * guard must prove. */
+static size_t cpack_map_to_blob_layout(uint8_t *mapb, size_t map_len,
+                                       cpack_map_ent *e, size_t n,
+                                       const cpack_member *msort, size_t nmem,
+                                       const uint64_t *loff)
+{
+    size_t i, conv = 0, base, ent_wire;
+
+    if (!mapb || !e || !msort || !loff || map_len < 8) return 0;
+    /* the wire geometry, from the magic (the parse has already accepted it) */
+    if (memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0 ||
+        memcmp(mapb, CPACK_MAP_MAGIC2K, 4) == 0) {
+        base = 12; ent_wire = CPACK_MAP_ENT_WIRE2;
+    } else {
+        base = 8;  ent_wire = CPACK_MAP_ENT_WIRE;
+    }
+    if (map_len != base + n * ent_wire) return 0;   /* not this blob's map */
+    for (i = 0; i < n; i++) {
+        const cpack_member *mm;
+        uint8_t *p;
+        size_t mp;
+        if (e[i].kind != CPACK_MAP_KIND_MEMBER) continue;
+        mm = cpack_member_find(msort, nmem, e[i].idx);
+        if (!mm) continue;
+        mp = (size_t)(mm - msort);
+        if (loff[mp] == UINT64_MAX) continue;   /* still its own inode */
+        e[i].kind = CPACK_MAP_KIND_BLOB;
+        e[i].src_off += loff[mp];
+        p = mapb + base + i * ent_wire;
+        p[16] = CPACK_MAP_KIND_BLOB;            /* kind */
+        memcpy(p + 21, &e[i].src_off, 8);       /* src_off: the blob offset */
+        conv++;
+    }
+    return conv;
 }
 
 
@@ -2856,6 +3029,20 @@ static int cpack_blob_mode(void)
         on = (e && *e == '1') || cpack_leaf_mode();
     }
     return on;
+}
+
+/* The packed layout AS THE COMMIT WILL APPLY IT.
+ *
+ * The environment says whether packed is WANTED; a pack with no map command
+ * cannot have it, because since WP-CPACK-MAP-CONSOLIDATION the map is the only
+ * place a blob's layout can live -- no "<name>!mbrleaf" is written any more,
+ * and storing a payload sibling that nothing can address is worse than
+ * storing the members as inodes (which is the historical layout and is
+ * readable by every build). One predicate, so the price (cpack_project), the
+ * commit and the batching deferral cannot disagree about which shape ran. */
+static int cpack_packed_layout(const invfs_pack_def *def)
+{
+    return def && def->map && cpack_blob_mode();
 }
 
 static void cpack_blob_name(char *dst, size_t cap, const char *name)
@@ -2975,21 +3162,48 @@ static uint64_t cpack_off_of(const cpack_member *sorted, const uint64_t *moff,
 }
 
 
+/* One kind-4 entry's payload range, for the disjointness check. */
+typedef struct {
+    uint64_t off;
+    uint64_t len;
+} cpack_blob_range;
+
+
 /* Validate a parsed map against the container's shape: entries must exactly
  * partition [0, container_size) (sorted, contiguous, no overlap), RECIPE
  * ranges must fit the recipe blob, MEMBER ranges must fit their member's
- * announced usize. mem_sorted is idx-sorted. 0 = valid. */
+ * announced usize, BLOB (kind 4) ranges must fit the payload sibling and
+ * must not name the same payload bytes twice. mem_sorted is idx-sorted.
+ * blob_size is the length of "<name>!mbrblob", or 0 when this container has
+ * no payload sibling (then a kind-4 entry is a map that describes a sibling
+ * which is not there -- the map is not wrong in itself, the volume is).
+ * 0 = valid. */
 static int cpack_map_validate(const cpack_map_ent *e, size_t n,
                               uint64_t container_size, uint64_t recipe_len,
                               const cpack_member *mem_sorted, size_t nmem,
-                              const char **why)
+                              uint64_t blob_size, const char **why)
 {
     uint64_t pos = 0;
     size_t i;
+    uint8_t *seen = NULL;   /* per member: 1 = kind 1, 2 = kind 4 */
+    cpack_blob_range *br = NULL;               /* the kind-4 ranges */
+    size_t nbr = 0;
+    int rc = -1;
 
-#define MV_FAIL(why_str) do { if (why) *why = (why_str); return -1; } while (0)
+#define MV_FAIL(why_str) do { if (why) *why = (why_str); goto out; } while (0)
     if (why) *why = NULL;
     if (!n) MV_FAIL("the map is empty");
+    /* Two scratch allocations, both only needed by kind 4 and both sized by
+     * the member table, so a map that uses no kind-4 entry pays NOTHING for
+     * the checks below -- which matters because this runs at every cache
+     * load, i.e. once per container per mount. */
+    if (nmem) {
+        seen = (uint8_t *)calloc(nmem, 1);
+        if (!seen) MV_FAIL("no memory to validate the map");
+    }
+    /* worst case every entry is kind 4, so the array is sized by n */
+    br = (cpack_blob_range *)calloc(n ? n : 1, sizeof *br);
+    if (!br) MV_FAIL("no memory to validate the map");
     for (i = 0; i < n; i++) {
         if (e[i].orig_off != pos)
             MV_FAIL("the entries do not tile the container in order");
@@ -3004,6 +3218,36 @@ static int cpack_map_validate(const cpack_map_ent *e, size_t n,
             if (e[i].src_off > recipe_len ||
                 e[i].len > recipe_len - e[i].src_off)
                 MV_FAIL("a recipe entry runs past the recipe blob");
+        } else if (e[i].kind == CPACK_MAP_KIND_BLOB) {
+            /* kind 4: member idx's bytes, at an ABSOLUTE offset in the
+             * payload sibling. The bounds are the sibling's, not the
+             * member's: src_off is not a member-relative offset. */
+            const cpack_member *mm = cpack_member_find(mem_sorted, nmem,
+                                                       e[i].idx);
+            size_t mp;
+            if (!blob_size)
+                MV_FAIL("a kind-4 entry names the payload sibling, and this "
+                        "container has none");
+            if (!mm) MV_FAIL("a kind-4 entry names a member that does not "
+                             "exist");
+            mp = (size_t)(mm - mem_sorted);
+            if (e[i].src_off > blob_size ||
+                e[i].len > blob_size - e[i].src_off)
+                MV_FAIL("a kind-4 entry runs past the payload sibling");
+            if (e[i].len > mm->usize)
+                MV_FAIL("a kind-4 entry covers more bytes than its member");
+            /* One layout per member: it is a byte range in the blob OR it is
+             * its own inode, never both. Two producers disagreeing about that
+             * is exactly the class of defect this consolidation exists for, so
+             * it is refused here instead of being resolved by whichever entry
+             * the serve path happens to reach first. */
+            if (seen[mp] == 1)
+                MV_FAIL("a member is named by both a kind-1 and a kind-4 "
+                        "entry");
+            seen[mp] = 2;
+            br[nbr].off = e[i].src_off;
+            br[nbr].len = e[i].len;
+            nbr++;
         } else {                             /* MEMBER / REPRO */
             const cpack_member *mm = cpack_member_find(mem_sorted, nmem,
                                                        e[i].idx);
@@ -3040,16 +3284,44 @@ static int cpack_map_validate(const cpack_map_ent *e, size_t n,
                     MV_FAIL("a kind-2 entry re-deflates more than the read "
                             "path bounds");
             } else {
+                size_t mp = (size_t)(mm - mem_sorted);
                 if (e[i].src_off > mm->usize ||
                     e[i].len > mm->usize - e[i].src_off)
                     MV_FAIL("an entry runs past its member");
+                if (seen[mp] == 2)
+                    MV_FAIL("a member is named by both a kind-1 and a kind-4 "
+                            "entry");
+                seen[mp] = 1;
             }
         }
         pos += e[i].len;
     }
-    if (pos != container_size) { if (why) *why = "the entries stop short of the container"; return -1; }
+    if (pos != container_size) { if (why) *why = "the entries stop short of the container"; goto out; }
+    /* Disjointness of the payload ranges. The writer concatenates the members
+     * in idx order, so two entries naming the same blob bytes would mean two
+     * members share a range -- and a serve would hand one member's bytes back
+     * for another's container offset. Sorted by offset, an adjacent overlap is
+     * the whole test. */
+    if (nbr > 1) {
+        size_t a, b;
+        for (a = 1; a < nbr; a++) {          /* insertion sort: nbr is small
+                                              * (a leaf count), and this runs
+                                              * once per load */
+            cpack_blob_range t = br[a];
+            b = a;
+            while (b > 0 && br[b - 1].off > t.off) { br[b] = br[b - 1]; b--; }
+            br[b] = t;
+        }
+        for (a = 1; a < nbr; a++)
+            if (br[a].off < br[a - 1].off + br[a - 1].len)
+                MV_FAIL("two kind-4 entries name the same payload bytes");
+    }
+    rc = 0;
+out:
+    free(seen);
+    free(br);
 #undef MV_FAIL
-    return 0;
+    return rc;
 }
 
 
@@ -3226,7 +3498,7 @@ uint64_t cpack_member_data_cost(uint64_t projected_len)
  * Returns 0, or -1 when a member cannot be read (the caller abandons). */
 static int cpack_project(const cpack_member *mem, size_t nmem,
                          const char *pmdir, uint64_t orig_len, uint64_t fixed,
-                         uint64_t sum_usize, cpack_size_proj *out)
+                         uint64_t sum_usize, int packed, cpack_size_proj *out)
 {
     size_t i;
 
@@ -3240,9 +3512,8 @@ static int cpack_project(const cpack_member *mem, size_t nmem,
      * to packed members refused decompositions that clearly pay -- see the
      * constants in volume_internal.h. */
     out->member_cost = (uint64_t)nmem *
-        (cpack_blob_mode() ? (CPACK_MEMBER_META_PACKED +
-                              CPACK_MEMBER_UNBATCHED_PACKED)
-                           : (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED));
+        (packed ? (CPACK_MEMBER_META_PACKED + CPACK_MEMBER_UNBATCHED_PACKED)
+                : (CPACK_MEMBER_META + CPACK_MEMBER_UNBATCHED));
     /* The per-member metadata alone already eats the container: no need
      * to read a single payload to know this decomposition is a loss. The
      * verdict rests on the LOW side of the projection (content >= 0), which
@@ -3418,10 +3689,29 @@ static int cpack_recipe_seg(invfs_volume *v, uint64_t ino,
 /* One member source read, chunked so no single vol_read_range call exceeds
  * what its int return can carry. The member is read through its CURRENT
  * stored form (the real read path -- batched, generic, or itself a nested
- * container); a short read is a corrupt member, and corrupt is LOUD. */
+ * container); a short read is a corrupt member, and corrupt is LOUD.
+ *
+ * THE FUNNEL. Every reader that needs member PAYLOAD BYTES goes through this
+ * function: the seekable serve path (kinds 1/2 and now 4), the map guard, and
+ * the rebuild materializer. It was already described as "the single funnel"
+ * while the rebuild materializer read "<name>!mbrblob" itself, so there were
+ * two answers to "where do these bytes live" -- and tools/test-cpack-map-
+ * consolidation.sh now greps for vol_read_range() in this file and fails if a
+ * third appears. Keep it that way: the layout has one reader, or the two
+ * copies drift the way the strip/map guards already did.
+ *
+ * `blob_base` is how the two blob layouts are told apart WITHOUT looking at
+ * the leaf list:
+ *   UINT64_MAX  -- the legacy leaf list (`moff`) decides whether member idx
+ *                  is a range in the payload sibling or an inode of its own;
+ *   otherwise   -- a kind-4 map entry already named the ABSOLUTE blob offset
+ *                  of this range, so no list is consulted at all.
+ * `src_off` is member-relative in the first case and container-slice-relative
+ * in both (the caller adds the slice's own `rel`). */
 static int cpack_member_read(invfs_volume *v, const char *name,
                              const cpack_member *mem, size_t nmem,
                              const uint64_t *moff, uint64_t blob_ino,
+                             uint64_t blob_base,
                              uint32_t idx, uint64_t src_off,
                              uint8_t *dst, size_t len)
 {
@@ -3431,10 +3721,27 @@ static int cpack_member_read(invfs_volume *v, const char *name,
     size_t done = 0;
 
     if (!mm) return -1;
+    if (blob_base != UINT64_MAX) {
+        /* kind 4: the map named the range, so the payload sibling IS the
+         * source. A map that names the sibling while the volume has none is
+         * a refusal at validation time; this is the belt to that braces
+         * (the sibling can be retired between the load and the serve, and
+         * reading it as "member idx's own inode" instead would serve the
+         * wrong bytes -- if that inode even exists). */
+        if (!blob_ino) {
+            if (getenv("INVFS_DEBUG_PACKS"))
+                fprintf(stderr, "[cpack] read %s: kind-4 entry for member %u "
+                                "but no payload sibling\n", name, idx);
+            return -1;
+        }
+        pino = blob_ino;
+        base = blob_base + src_off;
+        goto have_source;
+    }
     if (blob_ino && moff) {
-        /* packed layout: the leaf list says whether this member is a range
-         * inside the payload sibling or a file of its own (the leaf list is
-         * the layout, see CPACK_LEAF_SUFFIX) */
+        /* legacy leaf layout: the leaf list says whether this member is a
+         * range inside the payload sibling or a file of its own (the leaf
+         * list is the layout, see CPACK_LEAF_SUFFIX) */
         base = cpack_off_of(mem, moff, nmem, idx);
         if (base != UINT64_MAX) {
             pino = blob_ino;
@@ -3510,7 +3817,7 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
             int rrc = -1;
             if (!raw) return -1;
             if (cpack_member_read(v, name, mem, nmem, moff, blob_ino,
-                                  en->idx, en->src_off,
+                                  UINT64_MAX, en->idx, en->src_off,
                                   raw, en->raw_len) != 0)
                 { free(raw); return -1; }
             memset(&dp, 0, sizeof dp);
@@ -3536,7 +3843,25 @@ static int cpack_map_serve(invfs_volume *v, const char *name,
                             (unsigned long long)en->len);
                 return -1;
             }
+        } else if (en->kind == CPACK_MAP_KIND_BLOB) {
+            /* kind 4: the payload sibling at the ABSOLUTE offset the map
+             * named. The funnel takes the base explicitly, so nothing here
+             * consults the leaf list -- which is the point: this range's
+             * location is written in ONE place, the map. */
+            if (cpack_member_read(v, name, mem, nmem, moff, blob_ino,
+                                  en->src_off, en->idx, rel,
+                                  dst + done, take) != 0) {
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] serve %s: kind-4 read failed "
+                                    "(idx=%u blob_off=%llu rel=%llu "
+                                    "take=%zu blob_ino=%llu)\n", name,
+                            en->idx, (unsigned long long)en->src_off,
+                            (unsigned long long)rel, take,
+                            (unsigned long long)blob_ino);
+                return -1;
+            }
         } else if (cpack_member_read(v, name, mem, nmem, moff, blob_ino,
+                                     UINT64_MAX,
                                      en->idx, en->src_off + rel,
                                      dst + done, take) != 0) {
             if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] serve %s: member read failed (idx=%u src_off=%llu rel=%llu take=%zu blob_ino=%llu moff=%s)\n", name, en->idx, (unsigned long long)en->src_off, (unsigned long long)rel, take, (unsigned long long)blob_ino, moff ? "yes" : "no");
@@ -3801,7 +4126,7 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
     size_t table_len = 0, map_len = 0, recipe_len = 0;
     cpack_member *mem = NULL;
     cpack_map_ent *ents = NULL;
-    uint64_t *moff = NULL, blob_ino = 0;
+    uint64_t *moff = NULL, blob_ino = 0, blob_size = 0;
     size_t nmem = 0, nents = 0, i;
     uint64_t tino, mino;
     uint32_t decomp_gen = 0;
@@ -3864,15 +4189,50 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
         if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: recipe seg read failed (ino=%llu)\n", name, (unsigned long long)ino);
         goto fail;
     }
+    /* The payload sibling, its SIZE and (legacy) its leaf list, BEFORE the
+     * validator. Both of the things this changes are load-bearing:
+     *   * a kind-4 entry bounds itself against the sibling's LENGTH, so the
+     *     validator cannot check it without that number; and
+     *   * resolving the sibling is what tells this code whether the container
+     *     is packed at all, and it used to happen AFTER the validate, so a
+     *     map naming a sibling that is not there validated clean and then
+     *     failed at serve time with a short read.
+     * Neither lookup runs under cpacks_mu -- that lock is a leaf. */
+    {
+        char bn[288];
+        cpack_blob_name(bn, sizeof bn, name);
+        blob_ino = vol_find(v, bn);
+        if (blob_ino) {
+            if (vol_stat_full(v, bn, NULL, &blob_size, NULL) != 0) {
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] map_get %s: '%s' present but "
+                                    "cannot be stat'd\n", name, bn);
+                goto fail;
+            }
+            moff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *moff);
+            if (!moff) goto fail;
+            if (cpack_leaf_parse(v, name, mem, nmem, moff) < 0) {
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] map_get %s: leaf list does not "
+                                    "match the member table\n", name);
+                goto fail;
+            }
+        }
+    }
     if (cpack_map_validate(ents, nents, container_size,
-                           (uint64_t)recipe_len, mem, nmem, NULL) != 0) {
+                           (uint64_t)recipe_len, mem, nmem, blob_size,
+                           NULL) != 0) {
         if (getenv("INVFS_DEBUG_PACKS")) { const char *why = NULL; char wb[160];
             cpack_map_validate(ents, nents, container_size,
-                               (uint64_t)recipe_len, mem, nmem, &why);
+                               (uint64_t)recipe_len, mem, nmem, blob_size,
+                               &why);
             fprintf(stderr, "[cpack] map_get %s: map does not validate: %s"
-                    " (container_size=%llu recipe_len=%zu n_ents=%zu nmem=%zu)\n",
+                    " (container_size=%llu recipe_len=%zu n_ents=%zu nmem=%zu "
+                    "blob_ino=%llu blob_size=%llu)\n",
                     name, why ? why : "(no reason)",
-                    (unsigned long long)container_size, recipe_len, nents, nmem);
+                    (unsigned long long)container_size, recipe_len, nents, nmem,
+                    (unsigned long long)blob_ino,
+                    (unsigned long long)blob_size);
             (void)wb; }
         goto fail;
     }
@@ -3908,24 +4268,9 @@ static int cpack_map_get(invfs_volume *v, const char *name, uint64_t ino,
     e->n_ents = nents;
     e->mem = mem;
     e->nmem = nmem;
-    /* packed layout: resolve the payload sibling once, here, so every read
-     * serves from one inode by offset instead of vol_find per member */
-    {
-        char bn[288];
-        cpack_blob_name(bn, sizeof bn, name);
-        blob_ino = vol_find(v, bn);
-        if (blob_ino) {
-            moff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *moff);
-            if (!moff) { free(e); pthread_mutex_unlock(&v->cpacks_mu);
-                         goto fail_recipe; }
-            if (cpack_leaf_parse(v, name, mem, nmem, moff) < 0) {
-                if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr, "[cpack] map_get %s: leaf list does not match the member table\n", name);
-                free(moff); moff = NULL;
-                free(e); pthread_mutex_unlock(&v->cpacks_mu);
-                goto fail_recipe;
-            }
-        }
-    }
+    /* The payload sibling was resolved (and its leaf list parsed) before the
+     * validate above, because a kind-4 entry cannot be checked without its
+     * length. Publishing it is all that is left to do here. */
     e->moff = moff;
     e->blob_ino = blob_ino;
     e->recipe = recipe;
@@ -3948,8 +4293,13 @@ drop_ours:
     return 1;
 
 fail_recipe:
-    free(recipe);
 fail:
+    /* `recipe` is freed HERE and only here: it is allocated before the
+     * payload-sibling lookup and the validate, so every failure below that
+     * point used to drop it -- a 4 KiB leak per refused container, invisible
+     * until the map-refusal legs started exercising those paths (ASan found
+     * it: 5 refusals, 5 x 4096 bytes). */
+    free(recipe);
     free(table);
     free(mapb);
     free(mem);
@@ -3974,7 +4324,8 @@ uint32_t cpack_map_decomp_gen(invfs_volume *v, const char *name)
     if (!vol_find(v, mn)) return 0;
     if (vol_read_file(v, vol_find(v, mn), &mapb, &map_len) != 0 || !mapb)
         return 0;
-    if (map_len >= 12 && memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0)
+    if (map_len >= 12 && (memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0 ||
+                          memcmp(mapb, CPACK_MAP_MAGIC2K, 4) == 0))
         memcpy(&gen, mapb + 8, 4);
     free(mapb);
     return gen;
@@ -4688,7 +5039,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
     CPACK_T("guard-inputs ready");
     if (cpack_project(mem, nmem, pmdir, (uint64_t)full_len,
                       (uint64_t)recipe_len + (uint64_t)table_len,
-                      sum_usize, &proj) != 0) {
+                      sum_usize, cpack_packed_layout(def), &proj) != 0) {
         if (getenv("INVFS_DEBUG_PACKS"))
             fprintf(stderr, "[cpack] size guard: member payload unreadable\n");
         goto out;
@@ -4721,7 +5072,8 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * a later sweep can tell a current decomposition from a stale one (and
          * migrate the stale one from the reconstructed stream). */
         if (def->decomp_gen && map_len >= 12 &&
-            memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0) {
+            (memcmp(mapb, CPACK_MAP_MAGIC2, 4) == 0 ||
+             memcmp(mapb, CPACK_MAP_MAGIC2K, 4) == 0)) {
             uint32_t g = pc->generation;
             memcpy(mapb + 8, &g, 4);
         }
@@ -4741,8 +5093,14 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * bury it. */
         mem_sorted = cpack_members_sorted(mem, nmem);
         if (!mem_sorted) { if (getenv("INVFS_DEBUG_PACKS")) fprintf(stderr,"[cpack] members_sorted alloc failed\n"); goto out; }
+        /* blob_size = 0: the pack's map CANNOT name the payload sibling.
+         * "<name>!mbrblob" does not exist yet (it is created by the commit
+         * below), and the blob's offsets are decided by that commit, not by
+         * the pack -- a pack that emits kind 4 is describing a file it has
+         * never seen. A kind-4 entry here is therefore refused by the
+         * validator with its own sentence, before anything reaches disk. */
         if (cpack_map_validate(ments, nments, (uint64_t)full_len,
-                               (uint64_t)recipe_len, mem_sorted, nmem,
+                               (uint64_t)recipe_len, mem_sorted, nmem, 0,
                                &map_why) != 0) {
             fprintf(stderr, "sweep: %s: %s: map does not partition the "
                             "container (%s), decomposition abandoned\n",
@@ -4822,34 +5180,44 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             vol_inode_get(v, pid, &old_in) == 1)
             memcpy(old_addr, old_in.recipe_addr, sizeof old_addr);
     }
-    if (cpack_blob_mode()) {
+    if (cpack_packed_layout(def)) {
         /* Packed / leaf layout. Walk the members in IDX order so the blob is
          * laid out idx-ascending and an offset is just the running total:
          *   0) classify each part -- leaves go into the payload sibling,
          *      parts that a loaded container pack sniffs as its own stay
          *      real inodes so the NEXT sweep can still decompose them;
-         *   1) write the leaf list "idx<TAB>off", which is what makes the
+         *   1) write each leaf's offset into THE MAP, as a kind-4 entry
+         *      (cpack_map_to_blob_layout below), which is what makes the
          *      layout self-describing for every reader.
          * No member is ever held in memory beyond its own payload: the
-         * payload goes straight into a ranged write session. */
-        char bn[288], lfn[288];
+         * payload goes straight into a ranged write session.
+         *
+         * No "<name>!mbrleaf" list is written any more. It used to be the
+         * blob's index, and its mere PRESENCE decided how every other sibling
+         * was read -- one invariant with two encodings, and the reason a
+         * reader that lost the list read a packed container as if every member
+         * were an inode. The offsets now live in the map and nowhere else; the
+         * list stays a READ path for volumes written before this, so those
+         * volumes do not change behaviour and need no migration. */
+        char bn[288];
         cpack_member *msort = cpack_members_sorted(mem, nmem);
         uint8_t *head = (uint8_t *)malloc(CPACK_LEAF_HEAD);
-        char *list = NULL;
-        size_t list_len = 0, list_cap = 0, nleaf = 0;
+        uint64_t *loff = NULL;      /* blob offset per idx-sorted member */
+        size_t nleaf = 0;
         uint64_t total = 0;
         invfs_wsession *wss = NULL;
         int bad = 0;
 
-        if (!msort || !head) {
+        loff = (uint64_t *)malloc((nmem ? nmem : 1) * sizeof *loff);
+        if (!msort || !head || !loff) {
             fprintf(stderr, "sweep: %s: member layout alloc failed\n",
                     pc->name);
-            free(msort); free(head);
+            free(msort); free(head); free(loff);
             vol_transcode_abort(v, name);
             goto out;
         }
+        for (i = 0; i < nmem; i++) loff[i] = UINT64_MAX;
         cpack_blob_name(bn, sizeof bn, name);
-        cpack_leaf_name(lfn, sizeof lfn, name);
         for (i = 0; i < nmem && !bad; i++) {
             const cpack_member *m = &msort[i];
             char pm[256], mn[320];
@@ -4906,16 +5274,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
                 bad = 1;
                 break;
             }
-            if (list_len + 48 > list_cap) {
-                size_t nc = list_cap ? list_cap * 2 : 4096;
-                char *nl = (char *)realloc(list, nc);
-                if (!nl) { free(mb); bad = 1; break; }
-                list = nl;
-                list_cap = nc;
-            }
-            list_len += (size_t)snprintf(list + list_len, list_cap - list_len,
-                                         "%u\t%llu\n", m->idx,
-                                         (unsigned long long)total);
+            loff[i] = total;
             total += mlen;
             nleaf++;
             free(mb);
@@ -4926,11 +5285,31 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
             wss = NULL;
         }
         if (wss) vol_write_abort(wss);
-        if (!bad && nleaf &&
-            !vol_create_file(v, lfn, (const uint8_t *)list, list_len)) {
-            fprintf(stderr, "sweep: %s: leaf list inode failed (%s)\n",
-                    pc->name, lfn);
-            bad = 1;
+        /* The blob is on disk, so its offsets are facts: write them into the
+         * map now, BEFORE the map guard reads a single byte back. The guard
+         * therefore proves exactly the map that is going to be stored, not a
+         * pre-layout draft of it. A pack with no map has nothing to rewrite
+         * (its decomposition is the rebuild-exec shape, which has no
+         * "where" to record). */
+        if (!bad && nleaf && def->map && ments) {
+            size_t conv = cpack_map_to_blob_layout(mapb, map_len, ments,
+                                                   nments, msort, nmem, loff);
+            if (!conv) {
+                /* every leaf member must appear in the map; otherwise the
+                 * blob is unreachable from the map and only the (now unwritten)
+                 * leaf list could have found it -- refuse now rather than
+                 * store a container whose layout is lost. */
+                fprintf(stderr, "sweep: %s: %s: the map names none of the "
+                                "%zu payload member(s), decomposition "
+                                "abandoned\n", pc->name, name, nleaf);
+                bad = 1;
+            } else {
+                cpack_map_declare_kinds(mapb, map_len, ments, nments);
+                if (getenv("INVFS_DEBUG_PACKS"))
+                    fprintf(stderr, "[cpack] %s: %zu member range(s) written "
+                                    "into the map as kind 4, magic %.4s\n",
+                            name, conv, (const char *)mapb);
+            }
         }
         if (!bad && nleaf && have_keep) {
             invfs_meta_pub mm = keep;
@@ -4941,7 +5320,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
         }
         free(msort);
         free(head);
-        free(list);
+        free(loff);
         if (bad) {
             fprintf(stderr, "sweep: %s: packed layout failed (%s)\n",
                     pc->name, bn);
@@ -5100,7 +5479,7 @@ int vol_containerpack_sweep(invfs_volume *v, uint64_t inode_id,
          * made per member. The blob takes the generic lane as a whole on a
          * later pass, which is both simpler and the right unit: it is ONE
          * stream of payload bytes. */
-        if (cpack_blob_mode()) goto after_member_defer;
+        if (cpack_packed_layout(def)) goto after_member_defer;
     }
     {
         int n_bin = 0, n_text = 0;
@@ -5358,19 +5737,23 @@ int pack_container_rebuild(invfs_volume *v, const invfs_codec *pc,
              * payload sibling and let the pack's own rebuild exec assemble
              * it, so this needs no pack change at all. A member that is not
              * in the leaf list is one of the container inodes and is read
-             * below, exactly as before. */
-            uint64_t off = cpack_off_of(msort, moff, nmem, mem[i].idx);
+             * below, exactly as before.
+             *
+             * The read itself goes through cpack_member_read -- the funnel
+             * that owns the answer to "where do member idx's bytes live" --
+             * rather than walking the blob inode here. This file used to keep
+             * its own copy of that walk, which is a second place the layout
+             * has to be right: a change to it (a kind-4 map, say) would have
+             * left this path reading the wrong bytes with no error. */
             uint8_t *buf = NULL;
-            size_t need = (size_t)mem[i].usize, got = 0;
+            size_t need = (size_t)mem[i].usize;
             buf = (uint8_t *)malloc(need ? need : 1);
             if (!buf) goto out;
-            while (got < need) {
-                size_t want = need - got;
-                int g;
-                if (want > (16u << 20)) want = 16u << 20;
-                g = vol_read_range(v, blob_ino, off + got, want, buf + got);
-                if (g != (int)want) { free(buf); goto out; }
-                got += want;
+            if (cpack_member_read(v, name, msort, nmem, moff, blob_ino,
+                                  UINT64_MAX, mem[i].idx, 0,
+                                  buf, need) != 0) {
+                free(buf);
+                goto out;
             }
             mb = buf;
             mlen = need;
