@@ -239,7 +239,7 @@ fi
 # virtio_blk cannot load at all and the guest sees no disk. Skipped when the
 # kernel built them in (no .ko in the tree), which is the Debian case below.
 mkdir -p lib/modules
-for mod in virtio virtio_ring virtio_pci virtio_blk failover net_failover virtio_net; do
+for mod in virtio virtio_ring virtio_pci_legacy_dev virtio_pci_modern_dev virtio_pci virtio_blk failover net_failover virtio_net; do
     src=$(find "/lib/modules/$KVER/kernel" -name "$mod.ko.*" 2>/dev/null | head -1 || true)
     [ -n "$src" ] || continue
     case "$(file -b "$src")" in

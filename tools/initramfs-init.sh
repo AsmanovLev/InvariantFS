@@ -71,7 +71,13 @@ done
 # found on any block device". insmod resolves no symbols, so the dependency has to
 # be a separate, earlier entry. Missing files are skipped, so a kernel with them
 # builtin is unaffected.
+# the two virtio_pci halves ride between virtio_ring and virtio_pci:
+# vp_legacy_*/vp_modern_* live in them, and virtio_pci fails to load
+# ("Unknown symbol vp_legacy_get_features") without both. Measured on nixos
+# 2026-11-24, right after virtio/virtio_ring were staged.
 for p in /lib/modules/virtio.ko /lib/modules/virtio_ring.ko \
+         /lib/modules/virtio_pci_legacy_dev.ko \
+         /lib/modules/virtio_pci_modern_dev.ko \
          /lib/modules/virtio_pci.ko /lib/modules/virtio_blk.ko \
          /lib/modules/failover.ko /lib/modules/net_failover.ko \
          /lib/modules/virtio_net.ko; do

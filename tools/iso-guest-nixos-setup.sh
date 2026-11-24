@@ -365,7 +365,7 @@ if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; t
             esac
             say "injected fuse.ko into initramfs ($FUSE_SRC)"
         fi
-        for mod in virtio virtio_ring virtio_pci virtio_blk virtio_net failover net_failover; do
+        for mod in virtio virtio_ring virtio_pci_legacy_dev virtio_pci_modern_dev virtio_pci virtio_blk virtio_net failover net_failover; do
             MSRC=$(kmod_find "$mod" 2>/dev/null)
             [ -n "$MSRC" ] || MSRC=$(find /mnt/nix/store -name "$mod.ko*" 2>/dev/null | head -1)
             [ -n "$MSRC" ] || MSRC=$(find /lib/modules -name "$mod.ko*" 2>/dev/null | head -1)
