@@ -128,7 +128,19 @@ PY
 
 # expected deferral counts: every corpus member in one class
 ELF_N=$(ls "$WORK/orig" | grep -cE '^elf[0-9]+$|^lib[0-9]+\.so$' || true)
-BIN_N=$((ELF_N + 3))          # + a64.bin, i386.bin, macho.bin
+# + a64.bin, i386.bin, macho.bin, and tiny.elf.
+#
+# tiny.elf is 2 KiB, i.e. BELOW one 4 KiB block, and since 93b9fa6 the sub-block
+# lane defers every non-text, non-sibling file under a block to the shared ZSTD
+# batch (src/core/vol_sweep.c:585-588) -- printing the same
+# "binary -> ZSTD batch" line a full-sized deferral prints. The comment on the
+# fixture still says "below the classifier's size gate -> generic path", which
+# described the code before that lane existed, and the count here has been one
+# short ever since: measured 2026-11-24, 128 expected / 129 seen in CI and
+# 199 / 200 here (the host's ELF count differs, the +1 does not).
+# The file is still covered, and better: the lane that now claims it is the one
+# whose ordering matters, and it is asserted by name rather than by arithmetic.
+BIN_N=$((ELF_N + 4))          # + a64.bin, i386.bin, macho.bin, tiny.elf
 TEXT_N=3                      # a.c, b.py, notes.txt
 echo "expect: $BIN_N binary deferrals ($ELF_N host ELF + 3 synthetic), $TEXT_N text"
 
@@ -215,8 +227,15 @@ for f in $FILES; do
     a64.bin|macho.bin)
         # non-x86 binary family: batched, plain ZSTD payload (algo 1)
         stamp_is "$C" "cls=8 algo=1" || { echo "FAIL: $f: want BATCHED_BIN{ZSTD} (got $C)"; exit 1; } ;;
-    tiny.elf|rand.bin)
-        # below the 4KB gate / incompressible: never batched
+    tiny.elf)
+        # 2 KiB, i.e. below one 4 KiB block: the sub-block lane defers it to the
+        # shared ZSTD batch (93b9fa6, src/core/vol_sweep.c:585-588) with family
+        # 0, so it is BATCHED_BIN carrying plain ZSTD -- not the BCJ prefilter
+        # the full-sized x86 ELFs above get. This case used to demand "never
+        # batched", which was true before that lane existed.
+        stamp_is "$C" "cls=8 algo=1" || { echo "FAIL: $f: want BATCHED_BIN{ZSTD, sub-block lane} (got $C)"; exit 1; } ;;
+    rand.bin)
+        # 300 KiB, no magic, incompressible: the generic path, never batched
         case "$C" in cls=8*) echo "FAIL: $f must not be batched"; exit 1;; esac ;;
     elf*|lib*.so|i386.bin)
         # x86/x86-64: batched with the BCJ prefilter (algo 14)
