@@ -414,6 +414,16 @@ jobs:
           timeout 5400 bash tools/run-e2e.sh tools/test-flakey.sh && rc=0 || rc=$?
           echo "soak rc=$rc (informational; pre-war reds tracked, not gating)"
           echo "SOAK_RC=$rc" >> "$GITHUB_ENV"
+          # This job is continue-on-error by design (pre-war reds, D-state hang
+          # modes that need a human), so its `success` says nothing about the
+          # soak. Without this annotation the only trace of a red run is a line
+          # in the middle of the log, and a report that lists this job among the
+          # green gates is then misleading -- measured 2026-11-24: the soak
+          # failed with "FAIL: present but unreadable: s30.bin" under a green
+          # job. Annotate so the run page carries it.
+          if [ "$rc" != 0 ]; then
+            echo "::warning::soak-flakey FAILED (rc=$rc) and is not gating: the job is continue-on-error by design. See the soak log and INCIDENTS.md; this is not a green."
+          fi
           exit 0
       # The leg4 silent-MISMATCH incident (INCIDENTS.md) can only be
       # dissected with a failure artifact; stage it when the soak is red
@@ -779,6 +789,16 @@ jobs:
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_nixos == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    # Boot verification is skipped BY NAME, and for two reasons the log states:
+    # the installed root freezes mid-boot on InvFS (INCIDENTS.md, "an installed
+    # root hangs mid-boot on InvFS"), and this harness's own initramfs cannot
+    # load virtio_blk -- the guest prints "no InvariantFS volume found on any
+    # block device" and drops to the repair shell (measured 2026-11-24). Until
+    # that run the check was GREEN anyway, because it grepped the whole serial
+    # log for "invfs|fuse"; tools/bootprobe.sh makes that impossible, so this is
+    # a named skip rather than a false pass. INVFS_ISO_BOOT_VERIFY=auto runs it.
+    env:
+      INVFS_ISO_BOOT_VERIFY: skip
     steps:
       - uses: actions/checkout@v7
         with:

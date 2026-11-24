@@ -218,16 +218,21 @@ serial_send "printf 'PROBE%s\n' _M1; head -3 /proc/mounts"
 serial_send "printf 'PROBE%s\n' _M2; dd if=/dev/zero of=/tmp/invfs-probe bs=1k count=1 2>/dev/null"
 serial_send "printf 'PROBE%s\n' _M3; wc -c </tmp/invfs-probe"
 serial_send "printf 'PROBE%s\n' _MDONE"
+# The final word on the root mount comes from the shared probe, not from
+# "invfs|fuse appears somewhere in this log" (see tools/bootprobe.sh).
+. "$(dirname "$0")/bootprobe.sh"
+bootprobe_send serial_send
 serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
 if ! serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 120; then
     fail "root check timed out; probe markers reached:$(for m in M0 M1 M2 M3 MDONE; do grep -q "^PROBE_$m" "$SER" 2>/dev/null && printf ' %s' "$m"; done)  (first missing marker is the step that hung)"
 fi
 
-if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
-    note "FUSE root confirmed mounted!"
-else
-    fail "root is not InvariantFS / FUSE"
-fi
+bootprobe_assert "$SER"
+case $? in
+0) note "root confirmed on InvariantFS (${BOOTPROBE_SEEN})" ;;
+1) fail "the guest reported its root did not come up (no InvariantFS volume found) -- this is NOT a boot" ;;
+*) fail "root is not InvariantFS / FUSE; /proc/mounts said '${BOOTPROBE_SEEN:-nothing}'" ;;
+esac
 
 note "triggering clean guest shutdown..."
 serial_send "poweroff -f"

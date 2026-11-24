@@ -129,15 +129,21 @@ serial_send ""
 sleep 0.5
 
 note "verifying FUSE root mount..."
-serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
+# See tools/bootprobe.sh: this used to grep the WHOLE serial log for
+# "invfs|fuse", which the kernel's own `fuse: init` line and our rescue banner
+# both satisfy -- measured green on a guest that printed "no InvariantFS volume
+# found on any block device".
+. "$(dirname "$0")/bootprobe.sh"
+bootprobe_send serial_send
 serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
 serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || fail "root check timed out"
 
-if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
-    note "FUSE root confirmed mounted!"
-else
-    fail "root is not InvariantFS / FUSE"
-fi
+bootprobe_assert "$SER"
+case $? in
+0) note "root confirmed on InvariantFS (${BOOTPROBE_SEEN})" ;;
+1) fail "the guest reported its root did not come up (no InvariantFS volume found) -- this is NOT a boot" ;;
+*) fail "root is not InvariantFS / FUSE; /proc/mounts said '${BOOTPROBE_SEEN:-nothing}'" ;;
+esac
 
 note "triggering clean guest shutdown..."
 serial_send "poweroff -f"

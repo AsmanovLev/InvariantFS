@@ -3523,3 +3523,69 @@ freeze, get a task dump rather than another silent timeout — SysRq-w over the
 serial console, or `info registers` on the QEMU monitor to separate "all vCPUs
 idle" (a lost wakeup) from "a vCPU spinning". WSL on this box has no
 `/dev/kvm`, so the repro needs the bare-metal/KVM host.
+
+## OPEN (2026-11-24) — the NixOS install harness reports a boot PASS for a guest that never found its volume, and the probe that allowed it is now shared
+
+**Status:** OPEN for the harness (the guest really does not boot), and CLOSED for
+the false green, which is the dangerous half.
+
+`installation-iso-nixos`, engine-ci run 45337773685 (green job), guest serial:
+
+```
+[    3.483862] virtio_blk: Unknown symbol register_virtio_driver (err -2)
+...
+ERROR: no InvariantFS volume found on any block device
+InvariantFS root did not come up. This initramfs carries the repair tools,
+so the volume can be inspected and fixed from here -- no rescue media needed.
+...
+rootfs / rootfs rw 0 0                    <- what the mount probe actually printed
+```
+
+and two lines later the harness printed `FUSE root confirmed mounted!` and
+`NixOS post-install UEFI boot verification: PASS`.
+
+The check was `grep -q -E 'invfs|fuse' "$SER"` over the WHOLE serial log. Both
+words are in a failed boot: the kernel itself prints `fuse: init (API version
+7.39)`, and our own rescue banner says InvariantFS twice. So the assertion was
+satisfied by the failure text it was supposed to detect -- the same class the
+repo polices elsewhere ("an observation that can be satisfied by the observer is
+not an observation"). It is not new: the 2026-11-11 run has the identical
+`rootfs / rootfs` probe output under the same green check.
+
+What changed: tools/bootprobe.sh is now the single probe for nixos, gentoo, arch
+and alpine. It makes the guest print `INVFSROOT<fstype>` only for the
+/proc/mounts line whose mountpoint is `/`, with printf's format split from its
+argument so the token cannot match the echoed command, and it fails the probe
+outright when the guest says `no InvariantFS volume found` or
+`InvariantFS root did not come up`. Result on the same guest: probe returns
+"unknown" (`INVFSROOTrootfs`), i.e. the check now fails and the distro joins the
+named-skip set instead of passing.
+
+Still open for whoever picks it up: WHY virtio_blk cannot resolve its symbols in
+this image (the initrd built by `nixos-generate` in the guest carries a module
+built against a different kernel, or the export set differs). The other five
+distros load it, so it is specific to the NixOS initramfs build in this harness.
+
+## OPEN (2026-11-24) — soak leg5: "present but unreadable" after a torn write, and the job that tolerates it
+
+**Status:** OPEN. Informational by design in CI, which is exactly why it needs
+this entry: `soak-flakey` is `continue-on-error: true` and its step ends in
+`exit 0`, so the job's `success` carries no signal about the soak at all.
+
+engine-ci run 45337773685, `soak-flakey` (green job), the soak's own output:
+
+```
+FAIL: present but unreadable: s30.bin
+FAIL[leg5-soak]: soak rc=1
+soak rc=1 (informational; pre-war reds tracked, not gating)
+```
+
+i.e. a file that exists in the namespace could not be read back -- the durability
+class this project claims first ("what you write comes back byte-identical"), in
+the power-loss/chaos leg. The existing leg5 entries in this file cover the GHOST
+resurrection (WP605) and the use-after-free (WP607), not this shape.
+
+The workflow now emits `::warning::soak-flakey FAILED ... this is not a green`
+when the step ends non-zero, so the run page carries it instead of leaving it in
+the middle of a log, and any report listing this job among the green gates has to
+say what its green means. Tracking and reproducing the read failure is open work.

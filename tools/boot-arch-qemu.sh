@@ -163,12 +163,16 @@ if [ "$BOOTLOADER" = 1 ]; then
     sleep 0.5
 
     echo "verifying FUSE root mount..."
-    serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
+    # See tools/bootprobe.sh: the old form grepped the whole serial log for
+    # "invfs|fuse", which the kernel's own fuse line satisfies.
+    . "$(dirname "$0")/bootprobe.sh"
+    bootprobe_send serial_send
     serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
     serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || { echo "FAIL: root check timed out" >&2; exit 1; }
 
-    if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
-        echo "FUSE root confirmed mounted on InvariantFS!"
+    bootprobe_assert "$SER"
+    if [ $? -eq 0 ]; then
+        echo "root confirmed on InvariantFS (${BOOTPROBE_SEEN})!"
     else
         echo "FAIL: root is not InvariantFS / FUSE" >&2
         exit 1
