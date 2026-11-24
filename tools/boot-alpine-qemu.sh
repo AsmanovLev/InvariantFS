@@ -207,13 +207,20 @@ note "verifying FUSE root mount..."
 # never returned -- every one of those leaves the same empty tail. Each step now
 # announces itself, so the next freeze names the operation:
 #   M0 shell alive   M1 read /proc/mounts   M2 write to the root   M3 read back
-serial_send "echo INVFS_PROBE_M0; id"
-serial_send "echo INVFS_PROBE_M1; head -3 /proc/mounts"
-serial_send "echo INVFS_PROBE_M2; dd if=/dev/zero of=/tmp/invfs-probe bs=1k count=1 2>/dev/null; sync"
-serial_send "echo INVFS_PROBE_M3; wc -c </tmp/invfs-probe; rm -f /tmp/invfs-probe"
+# The marker is SPLIT in the command and whole in the output (`printf 'PROBE%s'
+# _M0` prints PROBE_M0, while the command text holds `PROBE%s` and `_M0` apart):
+# the guest's terminal echoes every command it receives, so a marker whose
+# literal text appears in the command matches its own echo and proves nothing. Measured on the first version of this probe: it reported "M0 reached"
+# for a guest that had printed nothing but the echoed line.
+serial_send "printf 'PROBE%s\n' _M0"
+serial_send "id"
+serial_send "printf 'PROBE%s\n' _M1; head -3 /proc/mounts"
+serial_send "printf 'PROBE%s\n' _M2; dd if=/dev/zero of=/tmp/invfs-probe bs=1k count=1 2>/dev/null"
+serial_send "printf 'PROBE%s\n' _M3; wc -c </tmp/invfs-probe"
+serial_send "printf 'PROBE%s\n' _MDONE"
 serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
 if ! serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 120; then
-    fail "root check timed out; probe markers reached:$(for m in M0 M1 M2 M3; do grep -q "INVFS_PROBE_$m" "$SER" 2>/dev/null && printf ' %s' "$m"; done)  (first missing marker is the step that hung)"
+    fail "root check timed out; probe markers reached:$(for m in M0 M1 M2 M3 MDONE; do grep -q "^PROBE_$m" "$SER" 2>/dev/null && printf ' %s' "$m"; done)  (first missing marker is the step that hung)"
 fi
 
 if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
