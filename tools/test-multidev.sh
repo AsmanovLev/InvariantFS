@@ -166,7 +166,7 @@ TC=$($B/invf-stats "$D0" | sed -n 's/.*tier (dev0 copies): \([0-9]*\) live.*/\1/
 # v2-only, with a byte-scan fallback for , because the two WP25 indexes were
 # persisted through v2 owner records and wp25_index_load_one() read them back
 # with meta_read_record_by_id() -- a v2 record-stream lookup that finds nothing
-# on Meta, so both indexes were RAM-only across a reopen. On  the owner is
+# on Meta, so both indexes were RAM-only across a reopen. On v3 the owner is
 # a hidden file whose content IS the index (a recipe blob whose AST entries
 # carry each copy's pba and block count), published with
 # vol_publish_blob_inode and read back with vol_read_file. So invf-stats --

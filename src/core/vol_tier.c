@@ -268,7 +268,7 @@ static int wp25_owner_write(invfs_volume *v, uint64_t *owner_slot,
                             uint64_t *ext_slot, const char *name,
                             const wp25_ent *ents, size_t n)
 {
-    /* On  the owner is a recipe blob + inode row. The v2 alternative
+    /* On v3 the owner is a recipe blob + inode row. The v2 alternative
      * appended [INOD][DELT] into the inode area and re-keyed the owner's
      * L2P mappings. */
     (void)ext_slot;
