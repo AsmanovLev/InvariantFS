@@ -331,7 +331,30 @@ if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; t
     (
         cd "$TMOD"
         gzip -dc /mnt/boot/initramfs.img | $CPIO_BIN -idm 2>/dev/null
-        FUSE_SRC=$(find /mnt/nix/store -name "fuse.ko*" 2>/dev/null | head -1)
+        # WHICH KERNEL'S MODULES. The old search was
+        #   find /mnt/nix/store -name "virtio_blk.ko*" | head -1
+        # i.e. the lexically FIRST module in the whole store, which is any
+        # kernel generation that happens to sort first -- not the kernel this
+        # initrd boots. Measured 2026-11-24, installation-iso-nixos: the guest
+        # died with
+        #   virtio_blk: Unknown symbol register_virtio_driver (err -2)
+        #   initramfs: could not load /lib/modules/virtio_blk.ko
+        #   ERROR: no InvariantFS volume found on any block device
+        # and dropped to the repair shell, so the whole boot check was green on
+        # a guest that never saw a disk. The modules must come from the INSTALLED
+        # system's kernel tree, and the version is printed so the log says which.
+        KMOD_ROOT=$(readlink -f /mnt/nix/var/nix/profiles/system/kernel-modules 2>/dev/null || true)
+        if [ -z "$KMOD_ROOT" ] || [ ! -d "$KMOD_ROOT" ]; then
+            KMOD_ROOT=$(ls -d /mnt/nix/store/*-linux-*-modules 2>/dev/null | tail -1)
+        fi
+        KVER=$(basename "$(ls -d "$KMOD_ROOT"/lib/modules/* 2>/dev/null | head -1)" 2>/dev/null)
+        say "kernel modules: root=$KMOD_ROOT version=${KVER:-unknown}"
+        kmod_find() {   # $1 = module basename -> first match under the installed kernel
+            [ -n "$KMOD_ROOT" ] || return 1
+            find "$KMOD_ROOT/lib/modules/${KVER:-/}" -name "$1.ko*" 2>/dev/null | head -1
+        }
+        FUSE_SRC=$(kmod_find fuse 2>/dev/null)
+        [ -n "$FUSE_SRC" ] || FUSE_SRC=$(find /mnt/nix/store -name "fuse.ko*" 2>/dev/null | head -1)
         [ -n "$FUSE_SRC" ] || FUSE_SRC=$(find /lib/modules -name "fuse.ko*" 2>/dev/null | head -1)
         if [ -n "$FUSE_SRC" ]; then
             case "$FUSE_SRC" in
@@ -343,8 +366,12 @@ if curl -fsSL "$SRV/initramfs.cpio.gz" -o /mnt/boot/initramfs.img 2>/dev/null; t
             say "injected fuse.ko into initramfs ($FUSE_SRC)"
         fi
         for mod in virtio_blk virtio_pci virtio_net failover net_failover; do
-            MSRC=$(find /mnt/nix/store -name "$mod.ko*" 2>/dev/null | head -1)
+            MSRC=$(kmod_find "$mod" 2>/dev/null)
+            [ -n "$MSRC" ] || MSRC=$(find /mnt/nix/store -name "$mod.ko*" 2>/dev/null | head -1)
             [ -n "$MSRC" ] || MSRC=$(find /lib/modules -name "$mod.ko*" 2>/dev/null | head -1)
+            if [ -z "$MSRC" ]; then
+                say "WARNING: no $mod.ko for kernel ${KVER:-unknown}; the initrd will not find a block device"
+            fi
             if [ -n "$MSRC" ]; then
                 mkdir -p lib/modules
                 case "$MSRC" in

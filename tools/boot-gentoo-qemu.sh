@@ -149,31 +149,36 @@ if [ "$BOOTLOADER" = 1 ]; then
     }
 
     log "waiting for Gentoo boot / login trigger..."
-    serial_wait_match "login:|Entering runlevel: 3|gentoo" "$TIMEOUT_SEC" || die "login prompt or runlevel 3 never appeared (see $SER)"
-
-    if ! grep -q -a "login:" "$SER" 2>/dev/null; then
-        serial_wait_match "login:" 15 || true
-    fi
-
+    # A LOGIN PROMPT, not "the word gentoo appeared". The old pattern was
+    # `login:|Entering runlevel: 3|gentoo`, and "gentoo" is on screen seconds into
+    # the boot, so the harness typed into a guest that was still starting OpenRC:
+    # measured 2026-11-24, installation-iso-gentoo, the "root" and the probe went
+    # in while the console was printing "* Seeding random number generator ...
+    # [ ok ]", nothing consumed them, and the probe failed 30 s later with
+    # "root is not InvariantFS / FUSE" -- a verdict about the harness, not the
+    # boot. (That is also why the pre-probe check "passed" for years: the
+    # INVFS_TRIGGER_ROOT_CHECK_DONE marker matched its own echoed input.)
+    serial_wait_match "login:" "${TIMEOUT_SEC}" || die "no login prompt within ${TIMEOUT_SEC}s (see $SER)"
+    sleep 2
     serial_send ""
     sleep 1
-    if grep -q -a "login:" "$SER" 2>/dev/null; then
-        serial_send "root"
-        sleep 1
-    fi
     serial_send "root"
+    # and a REAL shell prompt before anything is typed at it
+    serial_wait_match "# |Password:" 60 || die "no shell prompt after login (see $SER)"
     sleep 1
     serial_send ""
+    sleep 1
 
     log "verifying FUSE root mount..."
     # See tools/bootprobe.sh: the old form grepped the whole serial log for
     # "invfs|fuse", which the kernel's own fuse line satisfies.
     . "$(dirname "$0")/bootprobe.sh"
     bootprobe_send serial_send
-    serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
-    serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || die "root check timed out"
-
-    bootprobe_wait "$SER" 30 || true
+    # No INVFS_TRIGGER_ROOT_CHECK_DONE marker: the tty echoes what is typed, so a
+    # marker whose text is in the command matches its own echo and returns
+    # immediately -- measured on alpine's probe, same trap. bootprobe_wait polls
+    # for the TOKEN the guest prints, which cannot be in the command.
+    bootprobe_wait "$SER" 60 || true
     bootprobe_assert "$SER" && BOOT_RC=0 || BOOT_RC=$?
     if [ "$BOOT_RC" -eq 0 ]; then
         log "root confirmed on InvariantFS (${BOOTPROBE_SEEN})!"

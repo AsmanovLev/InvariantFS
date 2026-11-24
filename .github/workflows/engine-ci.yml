@@ -695,14 +695,6 @@ jobs:
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
-    # Boot verification is skipped BY NAME: with the honest console probe the
-    # guest reports no /proc/mounts line for "/" of type invfs/fuse (30 s wait,
-    # measured 2026-11-24), and before that probe the check passed only because
-    # it matched the initramfs's own "InvariantFS mounted" line. See
-    # INCIDENTS.md, "the boot verification cannot observe the root on nixos and
-    # gentoo"; INVFS_ISO_BOOT_VERIFY=auto runs it again.
-    env:
-      INVFS_ISO_BOOT_VERIFY: skip
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
@@ -797,16 +789,6 @@ jobs:
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.iso_nixos == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    # Boot verification is skipped BY NAME, and for two reasons the log states:
-    # the installed root freezes mid-boot on InvFS (INCIDENTS.md, "an installed
-    # root hangs mid-boot on InvFS"), and this harness's own initramfs cannot
-    # load virtio_blk -- the guest prints "no InvariantFS volume found on any
-    # block device" and drops to the repair shell (measured 2026-11-24). Until
-    # that run the check was GREEN anyway, because it grepped the whole serial
-    # log for "invfs|fuse"; tools/bootprobe.sh makes that impossible, so this is
-    # a named skip rather than a false pass. INVFS_ISO_BOOT_VERIFY=auto runs it.
-    env:
-      INVFS_ISO_BOOT_VERIFY: skip
     steps:
       - uses: actions/checkout@v7
         with:
