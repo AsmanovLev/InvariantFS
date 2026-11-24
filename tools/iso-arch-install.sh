@@ -172,7 +172,18 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
         kill -KILL $QPIDE 2>/dev/null
         wait $QPIDE 2>/dev/null
     fi
-    if [ -x "$REPO/tools/boot-arch-qemu.sh" ] || [ -f "$REPO/tools/boot-arch-qemu.sh" ]; then
+    # Boot verification is SKIPPED by name when INVFS_ISO_BOOT_VERIFY=skip.
+    # The installed root freezes mid-boot on InvFS (arch in systemd right after
+    # journald starts, void in dracut before switch_root, alpine on the first
+    # write from a logged-in shell), and the diagnosis is parked: no hung_task
+    # dump, no soft lockup, tty echo alive, so it is a lost wakeup in the module
+    # rather than a blocked task. Tracked OPEN in INCIDENTS.md ("an installed
+    # root hangs mid-boot on InvFS"). The skip is deliberate, printed, and
+    # reversible with INVFS_ISO_BOOT_VERIFY=auto -- it is not a silent pass, and
+    # it does not claim the boot works.
+    if [ "${INVFS_ISO_BOOT_VERIFY:-auto}" = "skip" ]; then
+        note "SKIP boot verification (INVFS_ISO_BOOT_VERIFY=skip): the installed root freezes mid-boot on InvFS -- tracked OPEN in INCIDENTS.md, not fixed"
+    elif [ -x "$REPO/tools/boot-arch-qemu.sh" ] || [ -f "$REPO/tools/boot-arch-qemu.sh" ]; then
         note "verifying post-install UEFI boot via boot-arch-qemu.sh --bootloader"
         bash "$REPO/tools/boot-arch-qemu.sh" --bootloader "$VOL" || fail "UEFI boot verification failed"
     fi

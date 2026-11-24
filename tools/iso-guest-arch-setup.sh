@@ -123,7 +123,18 @@ for attempt in 1 2 3; do
 done
 
 say "pacstrapping base linux openssh dhcpcd iproute2 grub efibootmgr into /mnt..."
-pacstrap /mnt base linux openssh dhcpcd iproute2 grub efibootmgr || exit 1
+# The mirror set rotates package versions between the index fetch and the
+# download, and a single 404 on a *.pkg.tar.zst.sig aborts the whole install
+# ("failed to commit transaction (unexpected error)", engine-ci 2026-11-24). One
+# bounded retry after a fresh index is the difference between a flake and a red
+# job; the third failure is the real thing and still exits.
+pacstrap /mnt base linux openssh dhcpcd iproute2 grub efibootmgr && PSP=0 || PSP=1
+if [ "$PSP" != 0 ]; then
+    say "pacstrap failed (likely a mirror flake); refreshing the index and retrying once"
+    pacman -Syy --noconfirm >/dev/null 2>&1 || true
+    pacstrap /mnt base linux openssh dhcpcd iproute2 grub efibootmgr || exit 1
+    say "pacstrap retry succeeded"
+fi
 genfstab -U /mnt >> /mnt/etc/fstab || true
 
 # ---- phase 5: in-chroot configuration & bootloader setup ----
