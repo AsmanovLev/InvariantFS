@@ -294,19 +294,25 @@ jobs:
 
   # Full FUSE e2e gate: every `make e2e` suite (the list is extracted from
   # the Makefile, so it cannot drift), plus the multidev chaos leg (not in
-  # `make e2e`). Skipped, with reasons: the two known-reds (test-resize A6
-  # pre-war, test-qcow2-zlib stale expectation -- both tracked, neither
-  # caused by this tree), test-packaging (covered natively by the five
-  # packaging jobs; would need debhelper too), and the cjxl-version-pinned
-  # lanes (jxl/pngflac/rawimg/exercarve/sandbox: noble ships cjxl 0.7,
-  # the lanes are built against 0.11 -- they gate locally; follow-up is a
-  # cached libjxl build). This job builds the tree itself: the suites are
-  # white-box on build products (build/core_objs.txt, cc-built fixtures),
-  # so a bins-only artifact cannot feed them. Per-suite timeout so one
-  # wedged suite cannot eat the job.
+  # `make e2e`). Skipped BY NAME, visibly, in the step below: the two
+  # known-reds (test-resize A6 pre-war, test-qcow2-zlib stale expectation --
+  # both tracked, neither caused by this tree), test-packaging (covered
+  # natively by the five packaging jobs; would need debhelper too), and the
+  # cjxl-version-pinned lanes (jxl/pngflac/rawimg/exercarve/sandbox: noble
+  # ships cjxl 0.7, the lanes are built against 0.11 -- they gate locally;
+  # follow-up is a cached libjxl build). This job builds the tree itself: the
+  # suites are white-box on build products (build/core_objs.txt, cc-built
+  # fixtures), so a bins-only artifact cannot feed them. Per-suite timeout so
+  # one wedged suite cannot eat the job.
+  #
+  # It was `if: false && ...` until 2026-11-23, i.e. the whole tier ran on no
+  # push at all: the named skips above already did the job that the disabled
+  # gate was supposedly protecting against, and the cost of being off was that
+  # ~25 suites had no CI coverage. Enabled; if an unnamed red appears the step
+  # names the suite, which is the same information the skip list encodes.
   e2e-full:
     needs: [scope, engine]
-    if: false && needs.scope.outputs.full == 'true'
+    if: needs.scope.outputs.full == 'true'
     # 24.04, not 22.04: libjxl-tools (cjxl/djxl, hard-required by the
     # jxl/exercarve/pngflac/rawimg lanes) is not installable on the 22.04
     # image. The version split is coverage, not drift: engine still gates
