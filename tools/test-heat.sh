@@ -159,17 +159,23 @@ echo
 # read-heat seeding (INVFS_HEAT_INIT) and the write-heat carry on a rewrite
 # both go through heat_ext_merge(), which builds the INO2 ext blob -- and
 # invfs_inode_row has no ext field (WP-M7 kept only the fixed 114-byte row
-# plus xattr bytes), so on  the value is computed and then dropped. Read heat
+# plus xattr bytes), so on a v3 volume the value is computed and then dropped. Read heat
 # survives because WP78 moved it to the invfs.heat named xattr, which is why
 # leg 1 runs here. Until the write path persists heat through the xattr too,
 # this leg can only assert anything on a v2 volume -- so say so loudly instead
 # of failing on a feature the format does not have.
-vol_is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:       v0"; }
+# The format probe. This grepped fsck's output for "format:       v0", the
+# spelling of the generation BEFORE the metadata store; fsck has printed
+# "format:       v1 (metadata base tree)" for a long time, so the probe answered
+# "not meta" for every volume, leg 2 ran, and it failed on a feature the format
+# deliberately does not have (e2e-full 2026-11-24: `INVFS_HEAT_INIT did not
+# seed (rheat=0)`). Match the format fsck actually names, not the one it used to.
+vol_is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:.*metadata"; }
 if vol_is_meta "$IMG"; then
-    echo "== leg 2: SKIP () -- write-heat + INVFS_HEAT_INIT are not persisted =="
-    echo "   both are carried in the INO2 ext blob; the  inode row has no ext"
+    echo "== leg 2: SKIP (v3) -- write-heat + INVFS_HEAT_INIT are not persisted =="
+    echo "   both are carried in the INO2 ext blob; the v3 inode row has no ext"
     echo "   field, so the value is dropped at commit. Read heat (leg 1) works:"
-    echo "   WP78 moved it to the invfs.heat xattr. Gap tracked for a  fix."
+    echo "   WP78 moved it to the invfs.heat xattr. Gap tracked for a v3 fix."
     SKIP_LEG2=1
 else
     SKIP_LEG2=0
