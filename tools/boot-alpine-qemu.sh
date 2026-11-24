@@ -199,9 +199,22 @@ serial_send ""
 sleep 1
 
 note "verifying FUSE root mount..."
-serial_send "grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount"
+# Markers, not one compound command. The previous form was
+#   grep ' / ' /proc/mounts > /tmp/root_mount && cat /tmp/root_mount
+# and when the guest froze (engine-ci 2026-11-23, installation-iso-alpine: booted
+# to a login prompt, then 30 s of silence) the log could not say whether the READ
+# of /proc/mounts, the REDIRECT into /tmp, or the shell itself was the one that
+# never returned -- every one of those leaves the same empty tail. Each step now
+# announces itself, so the next freeze names the operation:
+#   M0 shell alive   M1 read /proc/mounts   M2 write to the root   M3 read back
+serial_send "echo INVFS_PROBE_M0; id"
+serial_send "echo INVFS_PROBE_M1; head -3 /proc/mounts"
+serial_send "echo INVFS_PROBE_M2; dd if=/dev/zero of=/tmp/invfs-probe bs=1k count=1 2>/dev/null; sync"
+serial_send "echo INVFS_PROBE_M3; wc -c </tmp/invfs-probe; rm -f /tmp/invfs-probe"
 serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
-serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || fail "root check timed out"
+if ! serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 120; then
+    fail "root check timed out; probe markers reached:$(for m in M0 M1 M2 M3; do grep -q "INVFS_PROBE_$m" "$SER" 2>/dev/null && printf ' %s' "$m"; done)  (first missing marker is the step that hung)"
+fi
 
 if grep -q -E 'invfs|fuse' "$SER" 2>/dev/null; then
     note "FUSE root confirmed mounted!"
