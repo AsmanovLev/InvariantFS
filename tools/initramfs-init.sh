@@ -63,8 +63,18 @@ done
 # order by the builder; a failure is reported rather than swallowed, because a
 # rescue medium that silently cannot see the disk is the worst possible
 # failure mode for this script.
-for p in /lib/modules/virtio_blk.ko /lib/modules/failover.ko \
-         /lib/modules/net_failover.ko /lib/modules/virtio_net.ko; do
+# virtio.ko and virtio_ring.ko come FIRST. They are =y on the Debian kernel the
+# original list was written against, so staging them was unnecessary there -- and
+# on NixOS's kernel they are =m, which is why that guest printed
+#   virtio_blk: Unknown symbol register_virtio_driver (err -2)
+# (register_virtio_driver lives in virtio.ko) and then "no InvariantFS volume
+# found on any block device". insmod resolves no symbols, so the dependency has to
+# be a separate, earlier entry. Missing files are skipped, so a kernel with them
+# builtin is unaffected.
+for p in /lib/modules/virtio.ko /lib/modules/virtio_ring.ko \
+         /lib/modules/virtio_pci.ko /lib/modules/virtio_blk.ko \
+         /lib/modules/failover.ko /lib/modules/net_failover.ko \
+         /lib/modules/virtio_net.ko; do
     if [ -f "$p" ]; then
         if ! busybox insmod "$p" 2>/dev/null; then
             echo "initramfs: could not load $p" >&2
