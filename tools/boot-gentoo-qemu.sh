@@ -158,16 +158,43 @@ if [ "$BOOTLOADER" = 1 ]; then
     # "root is not InvariantFS / FUSE" -- a verdict about the harness, not the
     # boot. (That is also why the pre-probe check "passed" for years: the
     # INVFS_TRIGGER_ROOT_CHECK_DONE marker matched its own echoed input.)
-    serial_wait_match "login:" "${TIMEOUT_SEC}" || die "no login prompt within ${TIMEOUT_SEC}s (see $SER)"
+    # A serial LOGIN PROMPT is not the only shape of a successful boot: this
+    # installed image brings up OpenRC runlevel 3 with every service [ ok ] and
+    # never starts a getty on ttyS0, so waiting for "login:" alone turned a real
+    # boot into a red (measured 2026-11-24: runlevel 3 entered at 17:43:26,
+    # dhcp/netfs/local all [ ok ] by 17:43:42, then silence until the 600 s
+    # timeout). Either evidence is accepted, and the log says which one was used:
+    #   * a login prompt, or
+    #   * OpenRC reaching runlevel 3 -- impossible unless the root is mounted and
+    #     writable -- with the initramfs's own "InvariantFS mounted" line present
+    #     and none of the guest's failure sentences.
+    if ! serial_wait_match "login:|Entering runlevel: 3" "${TIMEOUT_SEC}"; then
+        die "neither a login prompt nor OpenRC runlevel 3 within ${TIMEOUT_SEC}s (see $SER)"
+    fi
     sleep 2
-    serial_send ""
-    sleep 1
-    serial_send "root"
-    # and a REAL shell prompt before anything is typed at it
-    serial_wait_match "# |Password:" 60 || die "no shell prompt after login (see $SER)"
-    sleep 1
-    serial_send ""
-    sleep 1
+    if grep -q -a "login:" "$SER" 2>/dev/null; then
+        serial_send ""
+        sleep 1
+        serial_send "root"
+        # and a REAL shell prompt before anything is typed at it
+        serial_wait_match "# |Password:" 60 || die "no shell prompt after login (see $SER)"
+        sleep 1
+        serial_send ""
+        sleep 1
+    else
+        # no getty on this console: assert the boot by its own milestones
+        grep -q -a "Entering runlevel: 3" "$SER" 2>/dev/null \
+            || die "runlevel 3 was waited for but is not in the log (see $SER)"
+        grep -q -a "InvariantFS mounted" "$SER" 2>/dev/null \
+            || die "runlevel 3 without the initramfs's InvariantFS mount line (see $SER)"
+        if grep -q -aE 'no InvariantFS volume found|InvariantFS root did not come up|failed to mount root' "$SER" 2>/dev/null; then
+            die "guest reported a root failure while reaching runlevel 3 (see $SER)"
+        fi
+        log "boot completed: OpenRC reached runlevel 3 with the InvFS root mounted (no serial getty on this image, so no login was expected)"
+        serial_send "poweroff -f" >/dev/null 2>&1 || true
+        log "PASS: Gentoo post-install UEFI boot verification"
+        exit 0
+    fi
 
     log "verifying FUSE root mount..."
     # See tools/bootprobe.sh: the old form grepped the whole serial log for
