@@ -22,7 +22,14 @@ ISO_SHA256="684ded26c63240ff4a41e8c25ee84ea6da233f557364821f13d12c2b0a9059a5  ar
 ISO_UUID="2026-10-01-14-49-03-00"
 PORT="${INVFS_ISO_PORT:-8000}"
 MEM="${INVFS_ISO_MEM:-4G}"
-TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-100}"
+# 140, not 100: the guest legitimately needs ~35-50 min for pacstrap, and under
+# runner contention the TCG guest has been seen idle at the marker for the whole
+# window (iso-watch: load 0.3, nothing running) and then time out at 100 with the
+# install unfinished -- twice in a row on 2026-11-24 (runs 45373403314 attempts 1
+# and 2, "timeout waiting for guest setup marker", 12:00 and 14:07). The job's own
+# timeout is 150 min, so this still fails before the runner kills it, and the
+# failure is the harness's own message rather than a cancelled job.
+TIMEOUT_MIN="${INVFS_ISO_TIMEOUT_MIN:-140}"
 ACCEL="${INVFS_ACCEL:-auto}"
 
 ISO="$WORK/archlinux-$ISO_VER-x86_64.iso"
