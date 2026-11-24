@@ -99,7 +99,6 @@ SEALRM_EOF
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealrm" \
     "$WORK/tools/sealrm.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
-    $REPO/build/obj/zlib_stock_*.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 RM="$WORK/tools/sealrm"
 
@@ -300,7 +299,6 @@ RESEAL_EOF
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/reseal" \
     "$WORK/tools/reseal.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
-    $REPO/build/obj/zlib_stock_*.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 RESEAL="$WORK/tools/reseal"
 
@@ -605,7 +603,6 @@ SEALFLIP_EOF
 gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealflip" \
     "$WORK/tools/sealflip.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
-    $REPO/build/obj/zlib_stock_*.o \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 FLIP="$WORK/tools/sealflip"
 
