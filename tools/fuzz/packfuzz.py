@@ -40,6 +40,22 @@ import fuzzutil as fz
 CPACK_MAP_MAX_ENTS = 4 * 65535 + 4
 EST_MARGIN = 64 << 20
 
+# The map's kind vocabulary, from src/core/vol_cpack.c:2635-2663 (one source of
+# truth; the oracle below is only allowed to be as permissive as the engine):
+#   0 RECIPE   bytes of the recipe blob
+#   1 MEMBER   the member's own inode
+#   2 REPRO    re-deflated bytes (WP119)
+#   3 ZERO     nothing stored: the bytes ARE zeros (zero elision, ADR-015/E4RCP)
+#   4 BLOB     member idx's [src_off,+len) inside the payload sibling (ADR-014)
+# CPACK_MAP_KIND_MAX == 4. This oracle used to refuse everything above kind 1,
+# which was true when kinds 0..1 were the whole vocabulary: after zero elision
+# landed, every ext4fs map carries kind 3 and 81 of 100 mutants "failed" for
+# being legal (e2e-full 2026-11-24, `map ent 1 kind 3`). Accepting a kind the
+# engine itself writes is not a looser check; refusing it was a stale one.
+CPACK_MAP_KIND_MAX = 4
+CPACK_MAP_KIND_RECIPE = 0
+CPACK_MAP_KIND_ZERO = 3
+
 
 # ------------------------------------------------------- fixture builders --
 
@@ -375,9 +391,20 @@ def check_map(data, size, pack, mid):
     for i in range(count):
         orig_off, ln, kind, idx, src_off = \
             struct.unpack_from("<QQBIQ", data, 8 + i * 29)
-        if kind > 1:
-            raise PackFailure("%s #%d: map ent %d kind %d"
-                              % (pack, mid, i, kind))
+        if kind > CPACK_MAP_KIND_MAX:
+            raise PackFailure("%s #%d: map ent %d kind %d (max %d)"
+                              % (pack, mid, i, kind, CPACK_MAP_KIND_MAX))
+        # kind 3 (ZERO): nothing is stored and nothing is named -- the engine
+        # REFUSES a zero entry that names a member or points into the recipe
+        # (vol_cpack.c:3233-3236), so a map that does either is broken, not
+        # merely unusual.
+        if kind == CPACK_MAP_KIND_ZERO and (idx != 0 or src_off != 0):
+            raise PackFailure("%s #%d: map ent %d kind 3 names idx=%d "
+                              "src_off=%d (a zero entry stores and names "
+                              "nothing)" % (pack, mid, i, idx, src_off))
+        if kind == CPACK_MAP_KIND_RECIPE and idx != 0:
+            raise PackFailure("%s #%d: map ent %d kind 0 names idx=%d"
+                              % (pack, mid, i, idx))
         if ln == 0:
             raise PackFailure("%s #%d: map ent %d len 0" % (pack, mid, i))
         if orig_off != pos:

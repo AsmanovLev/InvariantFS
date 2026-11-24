@@ -230,6 +230,23 @@ int main(int argc, char **argv)
     mkdir(packdir, 0755);
     setenv("INVFS_CODECPACKS", cases, 1);
 
+    /* The probe stage calls access() over the fuzzer's argv templates, and the
+     * codec probe searches PATH for a bare name. With the caller's PATH that
+     * makes the oracle depend on the HOST: on WSL the inherited PATH carries
+     * hundreds of /mnt/c and /mnt/d entries, every one of them a 9p (drvfs)
+     * round trip, and under load the fuzzer blocked in p9_client_rpc for minutes
+     * at a random case (measured 2026-11-24: wchan=p9_client_rpc, different
+     * case each run, CPU 10 s over 4 min). A fuzz oracle must not depend on what
+     * the machine has installed, so the search path is pinned to a directory
+     * that cannot exist: access() then answers ENOENT immediately and
+     * identically everywhere, which is also what a CI runner sees.
+     *
+     * This does not weaken a check: nothing is executed here (the harness's exec
+     * hooks are stubs) and no assertion reads an access() result except "did not
+     * crash". It removes the only nondeterminism in the stage. */
+    setenv("PATH", "/nonexistent-invfs-fuzz", 1);
+    setenv("INVFS_TOOLS", "/nonexistent-invfs-fuzz", 1);
+
     printf("fuzz_manifest: %u iterations, seed base %#llx\n",
            iterations, (unsigned long long)g_s);
     for (i = 0; i < iterations; i++) {
