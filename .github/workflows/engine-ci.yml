@@ -340,7 +340,11 @@ jobs:
           grep -q "^user_allow_other" /etc/fuse.conf \
             || echo user_allow_other | sudo tee -a /etc/fuse.conf
       - name: build
-        run: make -j"$(nproc)" && make helpers && make test-bins
+        # plugin-so is not optional for this tier: tools/test-cpack-hostio.sh
+        # refuses to run without the plugin half ("build the plugin half first:
+        # make plugin-so"), and that refusal is why e2e-full reported it as a red
+        # on its first run instead of testing ABI v3 at all.
+        run: make -j"$(nproc)" && make helpers && make test-bins && make plugin-so
       - name: full e2e (minus known reds) + multidev
         run: |
           export INVFS_CODECPACKS_SYS=0
