@@ -161,9 +161,27 @@ ns_usable && NS_OK=1
 
 # Suites that must run LOCKED: they need the real uid/root, or they touch
 # shared /tmp paths (not isolated, since worktrees live under /tmp).
+#
+# Two more, by NAME and not by pattern. A FUSE mount is not a
+# namespace-local operation -- ISOLATED runs under `unshare -r -m`, so the
+# daemon starts as a fake root -- but 36 of the suites start one and pass under
+# ISOLATED, so "mentions invf-fuse" would serialise the whole tier on one slot
+# for no measured gain. These two are the ones that actually broke when
+# ISOLATED became available (engine-ci 2026-11-24, the first runner with
+# kernel.apparmor_restrict_unprivileged_userns lowered): both died silently at
+# their first mount section, printing nothing after "== [3] mounted session
+# write past the share ==" (dynzone) and "== [D1] mmap write (RAW file) +
+# msync ==" (writepath). Both pass LOCKED, which is how every earlier run ran
+# them. Add a third by name, after measuring it, not by widening this.
+SUITES_MUST_LOCK="test-dynzone.sh test-writepath.sh"
+
 suite_needs_root() {
     grep -qE '(^|[^[:alnum:]_])(sudo|losetup)([^[:alnum:]_]|$)|id -u|EUID|mount -o loop|/tmp/' \
-        "$1" 2>/dev/null
+        "$1" 2>/dev/null && return 0
+    case " $SUITES_MUST_LOCK " in
+        *" $(basename "$1") "*) return 0 ;;
+    esac
+    return 1
 }
 
 mode_for() {
