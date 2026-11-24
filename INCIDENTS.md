@@ -3495,6 +3495,27 @@ test distinguishes them:
    dracut branch believes it is FUSE — and `rootfstype=invfs` in the grub
    cmdline written by `invf-boot-setup` is the module).
 
+**Sharpened 2026-11-24 by the alpine probe (`c90879e`, `6deb784`).** The
+installed Alpine root boots to `(none) login:`, the harness logs in and gets a
+prompt, and then every probe step is dead: the marker is split
+(`printf 'PROBE%s
+' _M0`) so it cannot match its own echo, and the failure
+line reads
+
+    probe markers reached:  (first missing marker is the step that hung)
+
+-- NOTHING ran, not even a`printf`. Yet the command WAS echoed, and tty echo
+happens in the kernel's tty driver, not in the shell: the kernel is alive and
+servicing interrupts, and userspace is not making progress.
+
+That rules things out. `hung_task_timeout_secs` is a sysctl whose default is
+120 s (and arch's `hung_task_timeout_secs=0` was never honoured: the kernel
+answered "Unknown kernel command line parameters", see 6f2721f), so a task
+blocked in D state for the 900 s the harness waits would have printed its stack.
+Nothing did, and no soft-lockup fired either. So this is NOT a D-state deadlock
+and NOT a spinning CPU: it looks like a **lost wakeup** -- tasks asleep on a
+waitqueue nobody signals, with the module still able to service tty interrupts.
+
 Next step, in this order: reproduce with KVM
 (`WORK=... bash tools/iso-void-install.sh`, then
 `bash tools/boot-void-qemu.sh --bootloader` on the volume it leaves) and, on the

@@ -12,7 +12,7 @@
 #   at the last barriered position, and after a clean close + reopen the
 #   barriered file is present and bit-exact while the un-barriered one is
 #   absent on v2 (complete-or-absent, never silently lost after an ack).
-#   WP80:  is the only format mkfs writes now. Its delta append is
+#   WP80: v3 is the only format mkfs writes now. Its delta append is
 #   itself barriered (see docs/architecture/META.md), so the second
 #   create is durable BEFORE the failing sync; the failure still latches
 #   and refuses later mutations, and the file comes back bit-exact
@@ -121,18 +121,18 @@ static void assert_file(invfs_volume *v, const char *name, size_t len,
     free(buf);
 }
 
-/* WP80: the leg-A post-crash assertion depends on the format. On  the
+/* WP80: the leg-A post-crash assertion depends on the format. On v3 the
  * delta append is barriered, so an un-fsync'd create is already durable;
  * on v2 it is not. Read the on-disk format marker directly. */
 static int img_is_meta(const char *img)
 {
     FILE *f = fopen(img, "rb");
     invfs_superblock sb;
-    int  = 0;
+    int is_meta = 0;
     if (f && fread(&sb, sizeof sb, 1, f) == 1)
-         = (sb.vol_flags & VOLF_META) != 0;
+        is_meta = (sb.vol_flags & VOLF_META) != 0;
     if (f) fclose(f);
-    return ;
+    return is_meta;
 }
 
 static uint64_t create_pattern(invfs_volume *v, const char *name,

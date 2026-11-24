@@ -2,7 +2,7 @@
  *
  * THE DEFECT. invf-rollback is the documented recovery path (AGENTS.md 2.6):
  * "an operator whose sweep mis-clustered data reaches for invf-rollback".
- * On  the restore first runs spt0_data_ok(), which walks every inode row
+ * On v3 the restore first runs spt0_data_ok(), which walks every inode row
  * of the pinned generation and verifies the segments its recipe names
  * (src/core/vol_spt0.c). The walk's callback filtered only recipe_addr == 0,
  * so a symlink -- whose content is its target string, stored

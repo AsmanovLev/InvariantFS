@@ -902,7 +902,7 @@ size_t vol_collect_sweepables(invfs_volume *v, uint64_t *ids, size_t max);
  *
  * (The conservative test a caller may use instead, `n == max`, cannot tell
  * "exactly full" from "overflowing" and costs an extra walk; this does not.)
- * On  the walk STOPS one entry past the cap, so counting costs nothing:
+ * On v3 the walk STOPS one entry past the cap, so counting costs nothing:
  * found is exact in the complete case and a lower bound in the truncated one.
  * On v2 every record is resolved regardless of the cap, so it is always exact.
  *
