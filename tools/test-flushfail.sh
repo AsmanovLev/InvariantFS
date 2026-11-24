@@ -63,16 +63,25 @@ rm -f "$IMG_A" "$IMG_B" "$IMG_C" "$IMG_D" "$IMG_E"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-# WP80: on-disk format probe (format_version byte at 0x90; 0 = v0 generation).
+# WP80: on-disk format probe. VOLF_META in vol_flags (0x88) is the real marker
+# -- invarifs.h is explicit that the format_version byte at 0x90 is
+# INFORMATIONAL ONLY and that VOLF_META decides the layout. This probe asked
+# `0x90 == 0` instead, which was true only for the generation before the
+# metadata store: mkfs has written format_version=1 for a long time, so the
+# guard below never fired, legs D-I ran against a format their machinery does
+# not exist in, and the suite died at `survivor record not found` after a walk
+# that visited nothing (measured 2026-11-24: the walker's own count said
+# `walked 0 record(s)`, and vol_inode_area_start == vol_inode_area_pos on a
+# metadata-tree volume, so there is no legacy record stream to scan).
 img_is_meta() {
     python3 - "$1" <<'PY'
-import sys
+import struct, sys
 try:
     with open(sys.argv[1], "rb") as f:
-        sb = f.read(0x91)
+        sb = f.read(0x8C)
 except OSError:
     sys.exit(1)
-sys.exit(0 if len(sb) >= 0x91 and sb[0x90] == 0 else 1)
+sys.exit(0 if len(sb) >= 0x8C and (struct.unpack_from("<I", sb, 0x88)[0] & 0x10) else 1)
 PY
 }
 
@@ -279,6 +288,7 @@ static int cmd_f2sabotage(const char *img, uint64_t victim_id)
      * live in dynamic mapper extents (WP30). */
     {
         uint64_t pos = vol_inode_area_start(v);
+        unsigned walked = 0;
         for (;;) {
             uint32_t magic, rl;
             uint64_t id, sz;
@@ -286,10 +296,21 @@ static int cmd_f2sabotage(const char *img, uint64_t victim_id)
             uint64_t next = vol_inode_next(v, pos, &magic, &id, &sz,
                                            nm, sizeof nm, &rl);
             if (!next) break;
+            walked++;
+            if (getenv("INVFS_FF_TRACE"))
+                fprintf(stderr, "[walk] pos=%llu magic=0x%08x id=%llu len=%u "
+                        "name='%s'\n", (unsigned long long)pos, magic,
+                        (unsigned long long)id, rl, nm);
             if (magic == INODE_REC_MAGIC && strcmp(nm, "survivorS.bin") == 0)
                 last_pos = pos;
             pos = next;
         }
+        /* A refusal that names nothing is the shape this suite exists to
+         * catch, so the miss says how far the walk got. */
+        if (!last_pos)
+            fprintf(stderr, "walked %u record(s) from inode area start without "
+                    "seeing survivorS.bin (INVFS_FF_TRACE=1 prints every name)\n",
+                    walked);
     }
     vol_close(v);
 
@@ -649,13 +670,13 @@ echo "   survivor bit-exact in-session and after reopen; fsck/verify clean"
 # exercise the retired v2 machinery: the contiguous inode-area record
 # stream and its vol_inode_next walk (D, I), the flat/slotted v2 journal
 # and mid-compaction crash stages (F, G, G2, H), and the CKP0 sweep
-# rename leg (E). None of that exists on a  volume,
+# rename leg (E). None of that exists on a v3 volume,
 # so they cannot run. The  equivalents of rename/retire/fsck honesty are
 # covered by tools/test-meta.sh, test-meta-fold.sh and
 # test-meta-delta.sh. Legs A-C above run on the live format.
 if img_is_meta "$IMG_A"; then
     echo "== legs D-I: SKIP (v2-only machinery retired on Meta; see test-meta*.sh) =="
-    echo "PASS: WP22c (: flush/sync failure latch + rename/retire)"
+    echo "PASS: WP22c (v3: flush/sync failure latch + rename/retire)"
     exit 0
 fi
 
