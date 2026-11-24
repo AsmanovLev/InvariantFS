@@ -173,8 +173,9 @@ if [ "$BOOTLOADER" = 1 ]; then
     serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
     serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || die "root check timed out"
 
-    bootprobe_assert "$SER"
-    if [ $? -eq 0 ]; then
+    bootprobe_wait "$SER" 30 || true
+    bootprobe_assert "$SER" && BOOT_RC=0 || BOOT_RC=$?
+    if [ "$BOOT_RC" -eq 0 ]; then
         log "root confirmed on InvariantFS (${BOOTPROBE_SEEN})!"
     else
         die "root is not InvariantFS / FUSE"

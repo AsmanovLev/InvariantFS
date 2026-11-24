@@ -227,8 +227,9 @@ if ! serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 120; then
     fail "root check timed out; probe markers reached:$(for m in M0 M1 M2 M3 MDONE; do grep -q "^PROBE_$m" "$SER" 2>/dev/null && printf ' %s' "$m"; done)  (first missing marker is the step that hung)"
 fi
 
-bootprobe_assert "$SER"
-case $? in
+bootprobe_wait "$SER" 30 || true
+bootprobe_assert "$SER" && BOOT_RC=0 || BOOT_RC=$?
+case $BOOT_RC in
 0) note "root confirmed on InvariantFS (${BOOTPROBE_SEEN})" ;;
 1) fail "the guest reported its root did not come up (no InvariantFS volume found) -- this is NOT a boot" ;;
 *) fail "root is not InvariantFS / FUSE; /proc/mounts said '${BOOTPROBE_SEEN:-nothing}'" ;;
