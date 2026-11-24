@@ -347,6 +347,14 @@ jobs:
         run: make -j"$(nproc)" && make helpers && make test-bins && make plugin-so
       - name: full e2e (minus known reds) + multidev
         run: |
+          # Ubuntu 24.04 restricts unprivileged user namespaces by default
+          # (kernel.apparmor_restrict_unprivileged_userns=1). run-e2e's ISOLATED
+          # mode and tools/test-cpack-hostio.sh both need one -- that suite's
+          # whole acceptance is mounting a 1 MiB tmpfs as the scratch root -- so
+          # without this the tier reports "cannot mount a tmpfs" and nothing is
+          # tested. The runner is ours; this is a test rig setting, not a
+          # property of the tree.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           export INVFS_CODECPACKS_SYS=0
           export PATH="$PATH:/sbin:/usr/sbin"
           # cjxl 0.7 (noble) vs 0.11 (dev box): the JXL lanes are

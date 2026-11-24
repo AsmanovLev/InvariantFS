@@ -132,8 +132,15 @@ export INVFS_SCRATCH_MARGIN_MB=0
 
 # ---- the 1 MiB scratch root ----------------------------------------------
 mkdir -p "$SCRATCHROOT"
+# The acceptance is this mount: 1 MiB of scratch versus an 8 MiB container.
+# It needs an unprivileged mount namespace, which Ubuntu 24.04 restricts by
+# default (kernel.apparmor_restrict_unprivileged_userns=1) -- that is why
+# engine-ci's first e2e-full run reported this suite red with the message below
+# rather than testing anything. The job now lowers the restriction before the
+# tier; the message names it so a host that forbids it says so instead of
+# looking like a suite bug.
 mount -t tmpfs -o size=1m tmpfs "$SCRATCHROOT" 2>/dev/null \
-    || fail "cannot mount a tmpfs (this leg needs an unprivileged mount ns; run it via tools/run-e2e.sh)"
+    || fail "cannot mount a tmpfs: this leg needs an unprivileged mount ns (run it via tools/run-e2e.sh; on Ubuntu 24.04 also 'sysctl -w kernel.apparmor_restrict_unprivileged_userns=0')"
 echo "== scratch root: $(df -h --output=size "$SCRATCHROOT" | tail -1 | tr -d ' ') tmpfs at $SCRATCHROOT =="
 
 mkvol() {   # mkvol <image>
