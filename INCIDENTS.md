@@ -3589,3 +3589,29 @@ The workflow now emits `::warning::soak-flakey FAILED ... this is not a green`
 when the step ends non-zero, so the run page carries it instead of leaving it in
 the middle of a log, and any report listing this job among the green gates has to
 say what its green means. Tracking and reproducing the read failure is open work.
+
+## OPEN (2026-11-24) — the boot verification cannot observe the root on nixos and gentoo
+
+**Status:** OPEN. Both harnesses now skip the check by name
+(`INVFS_ISO_BOOT_VERIFY=skip`) instead of passing it for the wrong reason.
+
+After tools/bootprobe.sh replaced "grep 'invfs|fuse' over the whole serial log",
+neither guest produced a `/proc/mounts` line for `/` with type invfs/fuse within
+30 s:
+
+* nixos: the guest never gets a block device (`virtio_blk: Unknown symbol
+  register_virtio_driver`), prints "no InvariantFS volume found on any block
+  device" and drops to the repair shell -- the probe returns 1 (rescue);
+* gentoo: the FUSE root IS the boot root (its initramfs prints "InvariantFS
+  mounted: 72381 files", and `[survive_term] ignoring SIGTERM: this mount is the
+  boot root`), but the console probe returned "root is not InvariantFS / FUSE"
+  after a full 30 s wait, i.e. no such line reached the serial log. Before the
+  probe, that check was green because the initramfs's own "InvariantFS mounted"
+  line anywhere in the log satisfied the grep.
+
+What is open: whether the awk never ran on that console (login shell state,
+serial input lost) or the guest's `/proc/mounts` genuinely does not name the
+root that way. The next diagnostic is to print `head -5 /proc/mounts` verbatim
+before the typed probe on gentoo, and to check that the shell the harness logs
+into is the one the marker is typed into. Until that is established, a green here
+would be a claim about a check that cannot fail.

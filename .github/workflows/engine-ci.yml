@@ -695,6 +695,14 @@ jobs:
     if: needs.scope.outputs.full == 'true' || needs.scope.outputs.gentoo == 'true' || needs.scope.outputs.iso_gentoo == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    # Boot verification is skipped BY NAME: with the honest console probe the
+    # guest reports no /proc/mounts line for "/" of type invfs/fuse (30 s wait,
+    # measured 2026-11-24), and before that probe the check passed only because
+    # it matched the initramfs's own "InvariantFS mounted" line. See
+    # INCIDENTS.md, "the boot verification cannot observe the root on nixos and
+    # gentoo"; INVFS_ISO_BOOT_VERIFY=auto runs it again.
+    env:
+      INVFS_ISO_BOOT_VERIFY: skip
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7

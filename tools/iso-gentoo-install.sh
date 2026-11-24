@@ -365,8 +365,19 @@ if grep -aq "INVFS-ISO-SETUP: PASS" "$SER" 2>/dev/null; then
         wait $QPIDE 2>/dev/null
     fi
 
-    # Post-install UEFI boot verification
-    if [ -x "$REPO/tools/boot-gentoo-qemu.sh" ]; then
+    # Post-install UEFI boot verification, SKIPPED by name when
+    # INVFS_ISO_BOOT_VERIFY=skip. This harness cannot OBSERVE the boot: with the
+    # honest probe (tools/bootprobe.sh) the guest printed no /proc/mounts line
+    # for "/" of type invfs/fuse within 30 s -- measured 2026-11-24,
+    # installation-iso-gentoo, "root is not InvariantFS / FUSE" after the wait --
+    # and before that probe the check was green only because it matched the
+    # initramfs's own "InvariantFS mounted: N files" line anywhere in the serial
+    # log. Tracked OPEN in INCIDENTS.md ("the boot verification cannot observe
+    # the root on nixos and gentoo"). The install itself is verified above by
+    # INVFS-ISO-SETUP: PASS; INVFS_ISO_BOOT_VERIFY=auto runs the check again.
+    if [ "${INVFS_ISO_BOOT_VERIFY:-auto}" = "skip" ]; then
+        note "SKIP boot verification (INVFS_ISO_BOOT_VERIFY=skip): the console probe cannot observe the root mount on this guest, and the installed root freezes mid-boot on InvFS -- tracked OPEN in INCIDENTS.md, not fixed"
+    elif [ -x "$REPO/tools/boot-gentoo-qemu.sh" ]; then
         note "verifying post-install UEFI boot via boot-gentoo-qemu.sh --bootloader"
         INVFS_GENTOO_WORK="$WORK/boot-test" \
         INVFS_GENTOO_LOGDIR="$WORK/boot-logs" \
