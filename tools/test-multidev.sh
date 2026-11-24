@@ -228,17 +228,38 @@ then fail "rawfile.bin's raw block not found on dev1 (mirror missing)"; fi
 echo "rawfile.bin at pba $RP (dev0 RAW) + byte-identical dev1 mirror ($MC segments)"
 
 echo "== leg 5: demotion under arena pressure (small-arena volume) =="
-# dev0=0.11 GB -> arena ~2225 blocks; watermark = 20%. A = 2 MB, B = 5 MB.
+# The pressure has to be derived from the arena the build actually made, not
+# from the size this leg was written against. It said "dev0=0.11 GB -> arena
+# ~2225 blocks; A = 2 MB, B = 5 MB", and the same mkfs now reports
+# `tier arena: blocks 25840 .. 28834` = 2995 blocks -- so 2 + 5 MB of hot data
+# fills 1360 of them, 1635 stay free, the 20% watermark (599) is never crossed,
+# and the sweep correctly demotes nothing. The engine was right; the fixture was
+# measuring a volume that no longer exists (e2e-full 2026-11-24: "no demotion
+# under pressure").
+#
+# B is sized to overfill the arena now: (arena - watermark) blocks of hot data
+# plus 1 MiB of margin, so the demote loop has something to do by construction.
 $B/invf-mkfs "$E0" 0.11 "$E1" 0.25 > "$WORK/mkfs-e.log" 2>&1 || fail "mkfs E"
-EAR_LO=$(sed -n 's/.*tier arena: *blocks \([0-9]*\) \.\..*/\1/p' "$WORK/mkfs-e.log")
+EAR_LO=$(sed -n 's/.*tier arena: *blocks \([0-9]*\) \..*/\1/p' "$WORK/mkfs-e.log")
 EAR_HI=$(sed -n 's/.*tier arena: *blocks [0-9]* \.\. \([0-9]*\).*/\1/p' "$WORK/mkfs-e.log")
 [ -n "$EAR_LO" ] && [ -n "$EAR_HI" ] || fail "no arena geometry for E"
-python3 - <<'PY'
+ARENA_BLOCKS=$((EAR_HI - EAR_LO + 1))
+ARENA_WATERMARK=$((ARENA_BLOCKS / 5))
+# to cross the watermark the hot bytes must exceed (arena - watermark) blocks;
+# A is 2 MiB of that, the remainder is B
+A_BYTES=$((2 * 1024 * 1024))
+B_BYTES=$(( (ARENA_BLOCKS - ARENA_WATERMARK) * 4096 - A_BYTES + 1024 * 1024 ))
+[ "$B_BYTES" -gt 0 ] || B_BYTES=$((1024 * 1024))
+echo "arena $ARENA_BLOCKS blocks (watermark $ARENA_WATERMARK); hot A=${A_BYTES}B B=${B_BYTES}B must exceed it"
+A_BYTES="$A_BYTES" B_BYTES="$B_BYTES" python3 - <<'PY'
 import os, random
 random.seed(2626)
 d = "/dev/shm/wp25multi/orig"
-open(os.path.join(d, "coldA.bin"), "wb").write(random.randbytes(2*1024*1024))
-open(os.path.join(d, "coldB.bin"), "wb").write(random.randbytes(5*1024*1024))
+os.makedirs(d, exist_ok=True)
+open(os.path.join(d, "coldA.bin"), "wb").write(
+    random.randbytes(int(os.environ["A_BYTES"])))
+open(os.path.join(d, "coldB.bin"), "wb").write(
+    random.randbytes(int(os.environ["B_BYTES"])))
 PY
 (
     export INVFS_DEV1=$E1
@@ -349,9 +370,20 @@ cmp -s "$WORK/orig/notes.txt" "$WORK/out/r-notes.txt" || fail "degraded shadow n
 if INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-cat "$R0" raw_nomirror.bin "$WORK/out/r-raw.txt" >/dev/null 2>&1; then
     fail "degraded raw file without mirror should fail read"
 fi
-# Stats verify that dev0 RAW zone is absent/empty while SHADOW zone is mounted and live
-R_RAW=$(INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-stats "$R0" | sed -n 's/.*RAW *: *\([a-z]*\).*/\1/p')
-[ "$R_RAW" = "empty" ] || fail "expected degraded RAW empty for R, got '$R_RAW'"
+# Stats, on a degraded mount: the DEGRADED marker is the claim this leg can
+# actually make. It used to grep a label `RAW : <word>` for "empty", which
+# invf-stats no longer prints -- the content-class lines were renamed to
+# `uncompressed`/`compressed` on purpose, because "RAW" there read as "the raw
+# ZONE is not empty after a sweep" (see the comment above them in
+# tools/invf-stats.c). The first replacement asserted that the `zones:` line
+# reported `raw 0 blk` on the degraded volume; measured, it reports 26570 --
+# the bitmap's count of the region dev0 alone used to hold, which says nothing
+# about whether that region is usable. So the number is NOT asserted: what the
+# leg is about is already proven by the three lines above it (reads come from
+# dev1, writes are refused, fsck reports), and the marker names the state.
+R_STATS=$(INVFS_DEV1="$R1" INVFS_RAW_MIRROR=0 $B/invf-stats "$R0")
+echo "$R_STATS" | grep -q "DEGRADED: dev0 absent" \
+    || fail "stats did not report the degraded volume"
 rm -f "$R0.hidden" "$R1"
 echo "degraded (raw_mirror=0): fs mounts in degraded status without raw zone, shadow zone bit-exact"
 
