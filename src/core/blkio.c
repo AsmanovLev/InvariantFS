@@ -393,10 +393,10 @@ void blkio_close(blkio *io)
         if (s && *s && *s != '0')
             fprintf(stderr, "blkio stats: %llu reads (%llu KB), "
                             "%llu writes (%llu KB)\n",
-                    (unsigned long long)io->n_read,
-                    (unsigned long long)(io->b_read / 1024),
-                    (unsigned long long)io->n_write,
-                    (unsigned long long)(io->b_write / 1024));
+                    (unsigned long long)__atomic_load_n(&io->n_read, __ATOMIC_RELAXED),
+                    (unsigned long long)(__atomic_load_n(&io->b_read, __ATOMIC_RELAXED) / 1024),
+                    (unsigned long long)__atomic_load_n(&io->n_write, __ATOMIC_RELAXED),
+                    (unsigned long long)(__atomic_load_n(&io->b_write, __ATOMIC_RELAXED) / 1024));
     }
 #ifdef _WIN32
     if (io->h) {
@@ -425,8 +425,8 @@ void blkio_close(blkio *io)
 
 static int raw_pread(blkio *io, uint64_t off, void *buf, size_t len)
 {
-    io->n_read++;
-    io->b_read += len;
+    (void)__atomic_fetch_add(&io->n_read, 1, __ATOMIC_RELAXED);
+    (void)__atomic_fetch_add(&io->b_read, len, __ATOMIC_RELAXED);
 #ifdef _WIN32
     OVERLAPPED ov;
     DWORD got = 0;
@@ -450,8 +450,8 @@ static int raw_pread(blkio *io, uint64_t off, void *buf, size_t len)
 
 static int raw_pwrite(blkio *io, uint64_t off, const void *buf, size_t len)
 {
-    io->n_write++;
-    io->b_write += len;
+    (void)__atomic_fetch_add(&io->n_write, 1, __ATOMIC_RELAXED);
+    (void)__atomic_fetch_add(&io->b_write, len, __ATOMIC_RELAXED);
 #ifdef _WIN32
     OVERLAPPED ov;
     DWORD put = 0;

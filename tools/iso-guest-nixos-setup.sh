@@ -434,6 +434,20 @@ if [ -n "$VOLINIT" ] && [ ! -x "$VOLINIT" ]; then
     say "  after chmod: $(stat -c '%a %n' "$VOLINIT" 2>/dev/null || echo '?')"
     [ -x "$VOLINIT" ] && say "  chmod through the mount WORKS -- so the install wrote 0444 and the boot can proceed"                        || say "  chmod through the mount did NOT take effect -- that is the defect"
 fi
+# The comparison above uses two different store hashes (the guest's system is
+# rebuilt with its own hostname), so it says the modes differ, not WHY. This is
+# the exact code path instead: nix's own import into the target store, which is
+# what wrote every file on this volume.
+say "  nix-store --add through the InvFS mount (the real write path):"
+printf '#!/bin/sh
+true
+' > /tmp/exec-probe.sh && chmod 0755 /tmp/exec-probe.sh
+addp=$(nix-store --store /mnt --add /tmp/exec-probe.sh 2>&1 | tail -1)
+say "    source: $(stat -c '%a' /tmp/exec-probe.sh)  added as: $addp"
+if [ -e "$addp" ]; then
+    say "    mode in the volume store: $(stat -c '%a %n' "$addp")  (want 555: the source is executable)"
+    [ -x "$addp" ] && say "    nix's import PRESERVED the exec bit"                    || say "    nix's import LOST the exec bit -- that is the defect, and it is in our SETATTR path"
+fi
 if [ -n "${VOLINIT:-}" ] && [ -n "${LIVEINIT:-}" ]; then
     v=$(stat -c '%a' "$VOLINIT" 2>/dev/null); l=$(stat -c '%a' "$LIVEINIT" 2>/dev/null)
     [ "$v" = "$l" ] && say "  modes agree (installer $l, volume $v)"                     || say "  MODES DIFFER: installer $l vs volume $v -- the copy through FUSE lost the bits"

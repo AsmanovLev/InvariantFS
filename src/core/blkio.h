@@ -103,6 +103,13 @@ typedef struct blkio {
        (tens of milliseconds on flash), so the count, not the byte total, is
        what predicts how long a copy takes. Set INVFS_IO_STATS=1 to have
        blkio_close print them. */
+    /* I/O counters. Atomic because the engine really does pread from more than
+     * one thread at a time -- the pba_ref warmup worker (volume.c
+     * pba_warmup_worker) preads while the main thread preads, and a plain ++ lost
+     * updates there (ThreadSanitizer, 2026-11-25, six reports). Plain uint64_t by
+     * the same convention as write_gen/flushed_gen below: only ever touched
+     * through __atomic_* in blkio.c, so <stdatomic.h> stays out of every
+     * includer. Relaxed: these are statistics, nothing orders against them. */
     uint64_t n_read, n_write;   /* transfers issued */
     uint64_t b_read, b_write;   /* bytes moved, including alignment padding */
 

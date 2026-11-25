@@ -36,6 +36,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 /*
  * 1 if THIS call is the one the armed spec selected (and disarms it), else 0.
@@ -47,8 +49,23 @@
  */
 /* Arming state at file scope, so invfs_vol_fault_reload() can reach it.
  * Still exactly ONE copy per translation unit, which is the property that
- * matters: two sites cannot share a countdown. */
-static const char *invfs_fault_seen;
+ * matters: two sites cannot share a countdown.
+ *
+ * THREADS (2026-11-25): this header used to claim "two threads racing through
+ * the init both compute the same values from the same environ; there is
+ * nothing to tear". ThreadSanitizer disagreed, with six reports from one run of
+ * test-put-failure: the countdown is decremented by whichever thread reaches the
+ * site, and two threads can decrement it at once (a lost update means the
+ * injected failure fires twice or not at all -- the suite then proves something
+ * other than what it armed). The armed string was also read while another thread
+ * rewrote it during a reload.
+ *
+ * The state is now either atomic or held under a lock, and the PRODUCTION path
+ * is still one getenv() plus one relaxed load: when INVFS_FAULT is unset the
+ * function returns before touching the lock, so a daemon started without the
+ * variable pays nothing new. */
+static _Atomic(const char *) invfs_fault_seen;
+static pthread_mutex_t invfs_fault_lock = PTHREAD_MUTEX_INITIALIZER;
 static char        invfs_fault_armed[32];
 static long        invfs_fault_countdown;
 
@@ -62,7 +79,8 @@ static long        invfs_fault_countdown;
  */
 static inline void invfs_vol_fault_reload(void)
 {
-    invfs_fault_seen = (const char *)(intptr_t)-1;  /* never a getenv value */
+    atomic_store_explicit(&invfs_fault_seen, (const char *)(intptr_t)-1,
+                          memory_order_release);    /* never a getenv value */
 }
 
 /* The reload above reaches only the copy in the CALLING translation unit, and
@@ -96,27 +114,43 @@ static inline int invfs_vol_fault(const char *site)
 {
     const char *spec = getenv("INVFS_FAULT");
 
-    if (spec != invfs_fault_seen) {
-        invfs_fault_seen = spec;
+    /* Production fast path: unset or empty means unarmed, and that is decided
+     * without taking a lock. If the variable was armed earlier in this process
+     * (a test disarming between cases) the state is cleared once, under the
+     * lock, so a later arm starts from zero. */
+    if (!spec || !*spec) {
+        if (atomic_load_explicit(&invfs_fault_seen, memory_order_relaxed)) {
+            pthread_mutex_lock(&invfs_fault_lock);
+            invfs_fault_armed[0] = 0;
+            invfs_fault_countdown = 0;
+            atomic_store_explicit(&invfs_fault_seen, NULL, memory_order_relaxed);
+            pthread_mutex_unlock(&invfs_fault_lock);
+        }
+        return 0;
+    }
+
+    int fire = 0;
+    pthread_mutex_lock(&invfs_fault_lock);
+    if (spec != atomic_load_explicit(&invfs_fault_seen, memory_order_relaxed)) {
         invfs_fault_armed[0] = 0;
         invfs_fault_countdown = 0;
-        if (spec && *spec) {
-            const char *colon = strchr(spec, ':');
-            if (colon && (size_t)(colon - spec) < sizeof invfs_fault_armed) {
-                memcpy(invfs_fault_armed, spec, (size_t)(colon - spec));
-                invfs_fault_armed[colon - spec] = 0;
-                invfs_fault_countdown = strtol(colon + 1, NULL, 10);
-                if (invfs_fault_countdown < 1)
-                    invfs_fault_countdown = 0;
-            }
+        const char *colon = strchr(spec, ':');
+        if (colon && (size_t)(colon - spec) < sizeof invfs_fault_armed) {
+            memcpy(invfs_fault_armed, spec, (size_t)(colon - spec));
+            invfs_fault_armed[colon - spec] = 0;
+            invfs_fault_countdown = strtol(colon + 1, NULL, 10);
+            if (invfs_fault_countdown < 1)
+                invfs_fault_countdown = 0;
+        }
+        atomic_store_explicit(&invfs_fault_seen, spec, memory_order_relaxed);
+    }
+    if (invfs_fault_countdown > 0 && strcmp(invfs_fault_armed, site) == 0) {
+        if (--invfs_fault_countdown == 0) {   /* one shot, exactly once */
+            fire = 1;
         }
     }
-    if (!invfs_fault_countdown || strcmp(invfs_fault_armed, site) != 0)
-        return 0;
-    if (--invfs_fault_countdown > 0)
-        return 0;
-    invfs_fault_countdown = 0;         /* one shot */
-    return 1;
+    pthread_mutex_unlock(&invfs_fault_lock);
+    return fire;
 }
 
 #endif /* INVFS_VOL_FAULT_H */
