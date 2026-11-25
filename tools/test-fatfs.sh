@@ -65,7 +65,9 @@ export REPO
 # read-only, and proves the mount is writable before any fixture is
 # written through it. See tools/lib-loopmount.sh for why.
 . "$REPO/tools/lib-loopmount.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACK=$REPO/tools/codecpacks/fatfs.codecpack
 WORK=/dev/shm/wp16fatfs
 # WP132: the exFAT leg mounts $WORK/mnt on a loop, and the old trap was a bare

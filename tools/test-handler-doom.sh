@@ -33,7 +33,9 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 T=$B/invf-handler_doom_test
 WORK=/dev/shm/wp610hd
 IMG=hd.img

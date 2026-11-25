@@ -19,7 +19,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/metav3hardlink
 IMG=metav3hardlink.img
 MNT=$WORK/mnt

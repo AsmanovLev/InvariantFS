@@ -63,7 +63,9 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp21rollback
 IMGA=wp21rb-a.img    # core: sweep -> rollback -> pre-sweep bytes
 IMGB=wp21rb-b.img    # post-checkpoint writes discarded

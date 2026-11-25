@@ -59,7 +59,9 @@ export REPO
 # the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACK=$REPO/tools/codecpacks/xfs.codecpack
 # scratch lives on /tmp (a separate tmpfs): only the blkio-opened VOLUME
 # images must sit under /dev/shm with relative paths (the header note);

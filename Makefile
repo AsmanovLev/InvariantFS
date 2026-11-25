@@ -46,6 +46,20 @@ CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pt
            -DINVFS_BUILD_DATE=\"$(BUILD_DATE)\" \
            -DINVFS_AUTHOR_NAME=\"$(AUTHOR_NAME)\" \
            -DINVFS_LICENSE=\"$(LICENSE)\"
+# ThreadSanitizer build: `make TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan`.
+#
+# The engine is threaded (sweep lanes, the FUSE daemon's workers) and has ~185
+# mutex sites with nothing that verifies their order. The kernel filesystems get
+# `lockdep` for that; a userspace daemon gets nothing unless it is built with a
+# thread checker. TSan is the closest equivalent: it reports lock-order
+# inversions (deadlock risk) and unsynchronised access at run time.
+#
+# Appended to CFLAGS, which the Makefile also passes to the LINK line, so the
+# runtime is linked without a separate LDFLAGS variable. OUT/OBJ are separate on
+# purpose: a TSan build must not overwrite the binaries the tests use.
+ifeq ($(TSAN),1)
+CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer -g -O1
+endif
 LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 STOCK_ZLIB_SRC := $(wildcard $(SRC)/zlib/*.c)
 STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SRC))

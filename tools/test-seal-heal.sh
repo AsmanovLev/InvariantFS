@@ -52,7 +52,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 
 . "$REPO/tools/fsck-clean.sh"
 
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp402heal
 IMG=wp402heal-e.img      # image E: basic / dry-run / explicit / missing
 IMGF=wp402heal-f.img     # image F: beyond capacity + independence

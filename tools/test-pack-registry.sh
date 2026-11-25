@@ -82,7 +82,9 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO/tools/lib-scratch.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK="${INVFS_PACKREG_WORK:-$(invfs_scratch_root)/invf-packreg-$$}"
 IMG=pr-reg.img
 IMG2=pr-reg2.img

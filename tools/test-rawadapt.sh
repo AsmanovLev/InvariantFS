@@ -37,7 +37,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp23rawadapt
 IMG1=wp23rawadapt-a.img    # legs 1-3, 7
 IMG2=wp23rawadapt-b.img    # legs 4-6 (precedence + oscillation)

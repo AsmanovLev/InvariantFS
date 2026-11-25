@@ -84,7 +84,9 @@
 set -uo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 
 # The default scratch used to be hardcoded to /tmp. /tmp is tmpfs on this box
 # and holds 3.8 GiB -- 3891 MiB against this suite's own 4000 MB floor -- so

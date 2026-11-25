@@ -55,7 +55,9 @@ export REPO
 # read-only, and proves the mount is writable before any fixture is
 # written through it. See tools/lib-loopmount.sh for why.
 . "$REPO/tools/lib-loopmount.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACK=$REPO/tools/codecpacks/ntfs.codecpack
 WORK=${INVFS_NTFS_WORK:-$(invfs_scratch_root)/wp16ntfs-$$}
 # The containerpack lane stages every container in a scratch dir (see

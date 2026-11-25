@@ -105,7 +105,9 @@ EOM
 fi
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 ok()   { echo "  ok: $* (as uid $(id -u))"; }

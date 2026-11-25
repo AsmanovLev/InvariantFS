@@ -25,7 +25,9 @@
 #   INVFS_E2E_AGENT=wp45 bash tools/run-e2e.sh tools/test-heat-mapper.sh
 set -u
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/tmp/invfs-e2e-test-heat-mapper
 MNT=$WORK/mnt
 OUT=$WORK/out

@@ -15,7 +15,9 @@
 set -u
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK="${1:-/srv/flakey/invfs-bench}"
 CORPUS=$WORK/corpus/usr
 RES=$WORK/RESULTS.txt

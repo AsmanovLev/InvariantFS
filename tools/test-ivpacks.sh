@@ -43,7 +43,9 @@ set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 export REPO
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK="${WORK:-/dev/shm/ivpacks}"
 PACKROOT=$REPO/tools/codecpacks
 CPACKS="qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z"

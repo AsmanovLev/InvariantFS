@@ -55,7 +55,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp201seal
 IMG=wp201seal.img        # image A: the main seal/stale/unseal line
 IMGB=wp201seal-b.img     # image B: menu geometry legs

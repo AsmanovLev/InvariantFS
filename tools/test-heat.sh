@@ -30,7 +30,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # the format-aware "volume is clean" gate ( has no L2P orphans counter)
 . "$REPO/tools/fsck-clean.sh"
 
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp19heat
 IMG=wp19heat.img
 IMG2=wp19heat2.img

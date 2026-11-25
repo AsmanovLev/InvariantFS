@@ -53,7 +53,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 SRC=$REPO/src
 . "$REPO/tools/lib-scratch.sh"
 WORK="$(invfs_scratch_root)/invf-nbli-$$"

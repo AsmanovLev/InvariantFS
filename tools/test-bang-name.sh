@@ -61,7 +61,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # WP205: one scratch-root answer for the whole suite set (see
 # tools/lib-scratch.sh).
 . "$REPO/tools/lib-scratch.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 SCRATCH="${INVFS_BANGSCRATCH:-$(invfs_scratch_root)/wt-bang/scratch/e2e-bangname}"
 WORK=$SCRATCH/work
 IMG=wp135bang.img

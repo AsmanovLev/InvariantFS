@@ -46,7 +46,9 @@ set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 export REPO
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp18resize
 trap 'rm -rf "$WORK" /dev/shm/wp18r-*.img' EXIT  # e2e hygiene: /dev/shm is a small tmpfs
 IMG=wp18r-a.img      # grow + shrink legs

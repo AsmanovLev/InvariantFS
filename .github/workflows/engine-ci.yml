@@ -327,6 +327,94 @@ jobs:
   # gate was supposedly protecting against, and the cost of being off was that
   # ~25 suites had no CI coverage. Enabled; if an unnamed red appears the step
   # names the suite, which is the same information the skip list encodes.
+  # ThreadSanitizer. The engine is threaded -- sweep lanes, the FUSE daemon's
+  # workers -- and has ~185 mutex sites with nothing that checks their order. The
+  # kernel filesystems get lockdep for that; a userspace daemon gets nothing
+  # unless it is built with a thread checker. This job is the closest equivalent:
+  # TSan reports lock-order inversions (deadlock risk), unsynchronised access, and
+  # with second_deadlock_stack it names the second lock.
+  #
+  # The motivation is a real, still-unexplained failure: on 2026-11-25 an arch
+  # install guest sat for an hour with `invf-fuse(S,futex_do_wait)` while the
+  # installer waited on a child (run 45563213732, load 0.3, 433 MB used). A futex
+  # wait is not by itself a bug, but nothing in the tree could tell the difference
+  # between "idle" and "waiting for a wakeup that will never come".
+  tsan:
+    needs: [scope]
+    if: needs.scope.outputs.full == 'true' || needs.scope.outputs.engine == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config             libfuse3-dev zlib1g-dev libzstd-dev python3 fuse3
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
+      - name: repo hygiene
+        run: bash tools/check-repo-hygiene.sh
+
+      - name: build with ThreadSanitizer
+        run: make -j"$(nproc)" TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan
+
+      # Without this check the job could build WITHOUT the instrumented runtime
+      # (a knob that silently did nothing) and then report a clean run for tests
+      # that were never sanitized. That is the same false-green shape this project
+      # keeps finding in other guises.
+      - name: assert the build is really instrumented
+        run: |
+          set -e
+          ldd bin-tsan/invf-fsck | tee /tmp/ldd.txt || true
+          # Either the runtime is shared (libtsan.so) or its symbols are linked
+          # in; both mean the file was instrumented.
+          if grep -qi 'libtsan' /tmp/ldd.txt; then
+            echo "ok: links libtsan"
+          elif nm -D bin-tsan/invf-fsck 2>/dev/null | grep -q '__tsan_'; then
+            echo "ok: __tsan_* symbols present"
+          else
+            echo "::error::bin-tsan/invf-fsck carries no TSan runtime or symbols -- TSAN=1 did nothing"
+            exit 1
+          fi
+
+      - name: threaded suites under TSan
+        run: |
+          export INVFS_BIN="$PWD/bin-tsan"
+          # halt_on_error=0 collects every report instead of dying on the first;
+          # the process still exits nonzero if anything was reported.
+          export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:history_size=4"
+          FAIL=0
+          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback test-writepath test-dynzone; do
+            log="/tmp/tsan-$s.log"
+            echo "::group::$s"
+            rc=0
+            timeout 1500 bash "tools/$s.sh" >"$log" 2>&1 || rc=$?
+            # A suite that skipped proves nothing, and "no output, exit 0" is how
+            # that hides. Require its own PASS line.
+            if ! grep -qE ': PASS' "$log"; then
+              echo "$s: no PASS line -- it did not run to completion (rc=$rc)"
+              tail -20 "$log"
+              FAIL=1
+            fi
+            if grep -q 'WARNING: ThreadSanitizer' "$log"; then
+              echo "$s: ThreadSanitizer reported:"
+              grep -n 'WARNING: ThreadSanitizer' "$log" | sed 's/^/  /'
+              sed -n '/WARNING: ThreadSanitizer/,+25p' "$log" | head -80
+              FAIL=1
+            fi
+            if [ "$rc" != 0 ]; then
+              echo "$s: exit $rc"
+              tail -15 "$log"
+              FAIL=1
+            fi
+            echo "::endgroup::"
+          done
+          [ "$FAIL" = 0 ] || { echo "tsan: a suite failed or a race was reported"; exit 1; }
+          echo "tsan: every suite passed with no ThreadSanitizer report"
+
   e2e-full:
     needs: [scope, engine]
     if: needs.scope.outputs.full == 'true'

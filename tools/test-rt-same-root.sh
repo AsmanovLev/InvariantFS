@@ -52,7 +52,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # WP205: one scratch-root answer for the whole suite set (see
 # tools/lib-scratch.sh).
 . "$REPO/tools/lib-scratch.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 T=$B/invf-fsck_rootslot_test
 # Per-process scratch: several agents run `make test` concurrently, and a
 # fixed path makes them delete each other's images.

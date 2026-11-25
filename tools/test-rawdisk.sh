@@ -50,7 +50,9 @@ set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
 export REPO
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACK=$REPO/tools/codecpacks/rawdisk.codecpack
 WORK=/dev/shm/rawdiskwp
 if [ "${INVFS_KEEP_WORK:-0}" = 1 ]; then trap 'echo KEPT $WORK' EXIT; else trap 'rm -rf "$WORK" /dev/shm/rawdiskwp*' EXIT; fi

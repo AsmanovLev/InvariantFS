@@ -50,7 +50,9 @@ set -e
 set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"   # override with the worktree when testing a branch
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wp22c
 IMG_A=wp22c-a.img     # leg A: sync failure latch + re-anchor
 IMG_B=wp22c-b.img     # leg B: rename kills the source name

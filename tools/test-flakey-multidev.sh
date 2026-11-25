@@ -32,7 +32,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 FLK=${FLAKEY_MD_WORK:-/var/tmp/invfs-flakey-md}
 DEV0=${FLAKEY_MD_DEV0:-invfs_flakey_md0}
 DEV1=${FLAKEY_MD_DEV1:-invfs_flakey_md1}

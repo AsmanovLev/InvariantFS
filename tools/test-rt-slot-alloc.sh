@@ -60,7 +60,9 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 # tools/lib-scratch.sh). The default used to name the author's bench disk,
 # which no other host has.
 . "$REPO/tools/lib-scratch.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 T=$B/invf-rt_slot_test
 # WP123-FIX: a single fixed scratch made this suite collide with itself.
 # Every worktree's `make test` starts with `rm -rf "$WORK"`, so two agents

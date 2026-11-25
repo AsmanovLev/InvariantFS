@@ -37,7 +37,9 @@ set -o pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 export REPO
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACKDIR=$REPO/tools/codecpacks/ext4fs.codecpack
 WORK=/dev/shm/wpcphostio
 SCRATCHROOT=/dev/shm/wpcphostio-scratch

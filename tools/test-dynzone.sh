@@ -43,7 +43,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/wpdynzone
 IMG1=wpdynzone-a.img    # legs 1-4 (fill/stats/mount/sweep)
 IMG2=wpdynzone-b.img    # legs 5-6 (seal + resize)

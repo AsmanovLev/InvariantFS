@@ -69,7 +69,9 @@ REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 export REPO
 # WP205: one scratch-root answer for the whole suite set.
 . "$REPO/tools/lib-scratch.sh"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 PACK=$REPO/tools/codecpacks/wim.codecpack
 WORK=${INVFS_WIM_WORK:-$(invfs_scratch_root)/wp637wim-$$}
 IMG=wp637wim.img

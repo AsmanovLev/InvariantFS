@@ -22,7 +22,9 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-B=$REPO/bin
+# INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
+# replacing the binaries the normal runs use.
+B=${INVFS_BIN:-$REPO/bin}
 WORK=/dev/shm/packvol
 IMG=pv-inspect.img
 rm -rf "$WORK" && mkdir -p "$WORK/src/.invariantfs/codecpacks/vxp.codecpack/bin"
