@@ -2909,6 +2909,20 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
 
     if (!out)
         return -1;
+    /* Cached: this is called once or twice per FILE while walking a
+     * namespace, and the answer only changes when a publish moves the root
+     * (rt.seq). The count came from gprof on a 21 651-file walk: 36 384
+     * base_root calls, 73 461 page reads inside mbuf_root_read alone.
+     *
+     * The test seam still fires on the cached path: it exists to force the
+     * capture/reclaim interleave at "root known, not yet walked"
+     * (reclaim_reader_epoch_test parks the reader here), and that boundary is
+     * just as real when the capture came from the cache. */
+    if (v->rt_root_cached && v->rt_root_seq == v->rt.seq) {
+        *out = v->rt_root_blkptr;
+        invfs_test_base_read_hook(out);
+        return 0;
+    }
     memset(out, 0, sizeof *out);
     rc = mbuf_root_read(v, &pba, &gen);
     if (rc < 0)
@@ -2918,6 +2932,9 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
     if (mbuf_read(v, pba, page) != 0)
         return -1;
     mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
+    v->rt_root_blkptr = *out;
+    v->rt_root_seq = v->rt.seq;
+    v->rt_root_cached = 1;
     /* Test seam: the root is captured and nothing of it has been read yet.
      * This is the boundary a reclaim reader epoch must span -- a fold that
      * publishes, drains and frees between the capture above and the walk

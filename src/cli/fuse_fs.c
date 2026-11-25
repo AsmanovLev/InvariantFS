@@ -4543,6 +4543,22 @@ int main(int argc, char *argv[])
 
     if (perf_trace_enabled())
         fprintf(stderr, "[perf-trace 0.000s] opening volume %s...\n", img);
+    /* Do NOT let vol_open start the pba_ref warmup thread here.
+     *
+     * The mount is about to walk the whole namespace (build_file_table), and that
+     * walk calls pba_ref_ensure() itself -- so the warmup thread was computing
+     * the same map at the same time as the walk, on the same locks. Measured
+     * locally on a 21 651-file namespace (invf-verify --deep, same ensure path):
+     *
+     *   warmup on : 56 s wall, 354 905 futex, 447 387 pread64
+     *   warmup off: 33 s wall,       0 futex, 299 143 pread64
+     *
+     * i.e. a 41% pessimisation for a cold walk. The thread is started immediately
+     * AFTER the table is published instead (below build_file_table), where it
+     * cannot race the walk and still has the whole uptime to finish before a
+     * sweep needs the map. An explicit INVFS_PBA_WARMUP in the environment wins. */
+    if (!getenv("INVFS_PBA_WARMUP"))
+        setenv("INVFS_PBA_WARMUP", "0", 1);
     g_vol = vol_open(img, &err);
     if (!g_vol) {
         fprintf(stderr, "cannot open volume %s (err %d)\n", img, err);
@@ -4723,6 +4739,14 @@ int main(int argc, char *argv[])
     if (perf_trace_enabled())
         fprintf(stderr, "[perf-trace %.3fs] file table complete (%d files)\n", fuse_now_sec() - t_main_start, g_nentries);
     fprintf(stderr, "InvariantFS mounted: %d files\n", g_nentries);
+    /* Now, not at vol_open: see the note there. The walk above already computed
+     * this map, so this is normally a no-op; it is here so a volume whose walk
+     * was short still gets the map warmed before a sweep can need it. */
+    {
+        const char *wu = getenv("INVFS_PBA_WARMUP");
+        if (wu && strcmp(wu, "0") != 0)
+            (void)vol_pba_warmup_start(g_vol);
+    }
     if (!have_allow_other && geteuid() == 0)
         fprintf(stderr, "invf: note: mounted without -o allow_other; if using as a rootfs or chroot, mount with -o allow_other so non-root users have access\n");
 

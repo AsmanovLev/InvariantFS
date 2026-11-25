@@ -1065,6 +1065,13 @@ const char *vol_pck0_gate_msg(const invfs_volume *v);
    rebuilt the file every time would pass every correctness assertion. */
 void vol_arc_stats(invfs_volume *v, invfs_arc_stats *out);
 
+/* Start the pba_ref warmup thread explicitly. vol_open starts it on its own
+ * unless INVFS_PBA_WARMUP says otherwise, and the FUSE mount defers it to this
+ * call so the thread cannot race the namespace walk that is about to compute the
+ * very same map (measured 41% of a cold walk, 2026-11-25). Idempotent: a second
+ * call while it runs is a no-op. */
+int  vol_pba_warmup_start(invfs_volume *v);
+
 /* ENOSPC policy helpers (defined in volume.c) */
 int vol_write_enabled(invfs_volume *v);
 void vol_set_readonly(invfs_volume *v, int ro);

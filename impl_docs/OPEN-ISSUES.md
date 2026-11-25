@@ -1148,12 +1148,27 @@ Rejected: persisting a name index on the volume. That surface was deleted on
 purpose and `tools/check-repo-hygiene.sh` carries a tripwire against its names
 coming back.
 
-Already done, and measured as *not* the lever: `walk_dir` used to resolve each
-directory's path from the root (`vol_path_lookup`) although it already held the
-inode from the parent's listing -- the per-entry version of that redundancy had
-been removed earlier (the `walk=103.8s` comment in `vol_dirs.c`). Threading the
-inode through (`vol_ino_list_dir`, `2026-11-25`) removes the work and is correct,
-but moved the profile by ~1%: the cost is reads per page, not path walks.
+### Three local changes tried, measured one at a time (2026-11-25)
+
+| change | pread64 | futex | wall |
+|---|---|---|---|
+| baseline (`invf-verify --deep`, 21 651 files) | 576 471 | 324 822 | 71 s |
+| 1. `walk_dir` passes the directory inode it already has (`vol_ino_list_dir`) | 570 981 | 318 132 | 64 s |
+| 2. + `base_root` cached on `rt.seq` (was: re-validate both RT30 slots per call, 36 384 calls) | 447 387 | 343 660 | 65 s |
+| 3. + the pba_ref warmup thread deferred until after the walk | 299 143 | **0** | **33 s** |
+
+(1) is correct but is not the lever: the per-ENTRY version of that redundancy had
+already been removed (the `walk=103.8s` comment in `vol_dirs.c`), and the
+per-DIRECTORY half moved the profile by 1%. (2) is a real 22% of the reads and
+exists because `base_root` used to answer the same question from disk on every
+operation. (3) is the big one and it was not a read problem at all: the warmup
+thread computes the SAME pba_ref map that the walk computes, concurrently, on the
+same locks -- 355 k futex syscalls of pure contention and a 41% pessimisation of a
+cold walk. The mount now starts it after the table is published, where it cannot
+race the walk.
+
+Measured on the tool that shares the walk's `pba_ref_ensure` path; the boot number
+(`build_file_table: walk=`) is the confirmation to collect next.
 
 Tooling left behind: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof` builds with
 `-pg` for `gprof`, because "the walk is slow" is not an answer.

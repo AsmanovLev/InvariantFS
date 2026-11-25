@@ -647,6 +647,21 @@ typedef struct invfs_volume {
      * cursors mirroring the v2 raw/shadow pair. */
     invfs_rt rt;
     int      rt_present;
+    /* ---- validated base root, cached (2026-11-25) ----------------------
+     * base_root() used to re-validate BOTH RT30 slots and re-read the root
+     * page on every call: 36 384 calls for 21 651 files while walking a
+     * namespace, 73 461 page reads spent on answering the same question.
+     * The answer changes only when a publish moves the root, and that is the
+     * one place that touches rt.root_slot[] (mbuf_rt30_publish: root_slot[slot]
+     * = pba; rt.seq++), so rt.seq is the whole invalidation condition -- no
+     * separate flag to forget to clear.
+     *
+     * valid==0 means "not cached"; rt_shadow is the last verified blkptr and
+     * rt_seq the rt.seq it was verified at. Zeroed by vol_open with the rest
+     * of the struct. */
+    int          rt_root_cached;
+    uint64_t     rt_root_seq;
+    invfs_blkptr rt_root_blkptr;
     /* ---- ANC0 tail anchor (see vol_anchor.c) --------------------------
      * The second LOCATION for rt and spt0, at total_blocks - 1, readable
      * without touching block 0. anchor_state is the open-time probe verdict
