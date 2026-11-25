@@ -17,6 +17,7 @@
 #include "vol_anchor.h"
 
 #include <stddef.h>
+#include <pthread.h>
 
 /* ------------------------------------------------------------------ */
 /* 1. page wire format                                                */
@@ -527,9 +528,18 @@ int mbuf_root_publish(invfs_volume *v, uint64_t root_pba, uint64_t root_gen)
     if (vol_bitmap_flush(v) != 0)
         return -1;
 
+    /* Under the same leaf mutex base_root uses to read rt.seq. The root cache
+     * keys on rt.seq, so a reader may hold it while this line runs; without the
+     * lock ThreadSanitizer reports exactly that pair ("data race
+     * src/core/vol_metabuf.c:532 in mbuf_root_publish" against base_root's read,
+     * 2026-11-25). Held only across these two stores -- mbuf_rt30_store below
+     * does its own I/O and must not run with this mutex held, since a second
+     * publisher waiting on it would serialise behind a barrier. */
+    pthread_mutex_lock(&v->rt_root_mu);
     slot = (uint32_t)(v->rt.seq & 1u);
     v->rt.root_slot[slot] = root_pba;
     v->rt.seq++;
+    pthread_mutex_unlock(&v->rt_root_mu);
     /* One barrier covers the bitmap and the descriptor together: the
      * descriptor must never become durable before the allocation it names. */
     if (mbuf_rt30_store(v) != 0)
