@@ -1209,11 +1209,27 @@ static inline void rec_set_name(invfs_inode_rec *rh, const char *name)
     rh->name[n] = 0;
 }
 
-static inline int bit_get(const uint8_t *b, uint64_t i) { return (b[i / 8] >> (i % 8)) & 1; }
+/* Allocation bitmap, one bit per block. Byte-granular atomics: the pba_ref
+ * warmup thread reads this map (mbuf_page_allocated) while the writer flips bits,
+ * and ThreadSanitizer reported exactly that pair -- "data race
+ * volume_internal.h:1212 in bit_get" (run 45707724778). Relaxed is right: the
+ * bitmap's CONTENT is ordered by the flush that persists it, not by this
+ * primitive, so all that is needed here is that a byte read cannot tear against
+ * a byte write. */
+static inline int bit_get(const uint8_t *b, uint64_t i)
+{
+    return (__atomic_load_n(&b[i / 8], __ATOMIC_RELAXED) >> (i % 8)) & 1;
+}
 
-static inline void bit_set(uint8_t *b, uint64_t i) { b[i / 8] |= (uint8_t)(1u << (i % 8)); }
+static inline void bit_set(uint8_t *b, uint64_t i)
+{
+    __atomic_fetch_or(&b[i / 8], (uint8_t)(1u << (i % 8)), __ATOMIC_RELAXED);
+}
 
-static inline void bit_clr(uint8_t *b, uint64_t i) { b[i / 8] &= (uint8_t)~(1u << (i % 8)); }
+static inline void bit_clr(uint8_t *b, uint64_t i)
+{
+    __atomic_fetch_and(&b[i / 8], (uint8_t)~(1u << (i % 8)), __ATOMIC_RELAXED);
+}
 
 /* Widen the dirty byte range to cover the byte holding bit i, so a flush
  * writes just that slice instead of the whole bitmap. This was three
