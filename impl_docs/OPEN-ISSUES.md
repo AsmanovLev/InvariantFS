@@ -1196,7 +1196,14 @@ thread is still inside `vol_open_inner` and while fsck-style reloads mutate
 publishes `v` before every mutex in it is initialised (the reports pair
 `pthread_mutex_init`/`calloc` with a `pthread_mutex_lock` in `base_root`).
 
-**`test-sweep-lane-retire` — 89 reports, all of one shape.**
+**`test-sweep-lane-retire` — 89 reports, all of one shape. RESOLVED, and it was
+not a race at all: `vol_close` destroyed `rt_root_mu` at the TOP, and the close
+work below still reaches `base_root` (vol_retire_drain_all -> dl_retire_free_list
+-> pba_ref_ensure -> vol_walk_strict -> walk -> base_root). ThreadSanitizer's own
+message is "use of an invalid mutex", and the caller stack ends in `vol_close`;
+the "calloc vs lock" pairing was the same bug seen from the allocation side. The
+destroys moved to the end of vol_close and the suite is back in the gate. Original
+report, kept because the reasoning matters:**
 
 ```
 #0 calloc            #1 vol_open_inner  (main thread)

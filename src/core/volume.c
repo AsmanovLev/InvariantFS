@@ -2067,10 +2067,15 @@ invfs_volume *vol_open(const char *path, int *err)
 void vol_close(invfs_volume *v)
 {
     if (v) {
+        /* Stop the worker HERE, but destroy its mutexes and the root-cache mutex
+         * at the END of this function. Close work below still reads the volume:
+         * vol_retire_drain_all -> dl_retire_free_list -> pba_ref_ensure ->
+         * vol_walk_strict -> base_root takes rt_root_mu, so destroying it here
+         * made every close that drains a retire list lock a destroyed mutex.
+         * ThreadSanitizer named it exactly (2026-11-25, 89 reports in
+         * test-sweep-lane-retire: "use of an invalid mutex ... pthread_mutex_lock
+         * <- base_root <- ... <- vol_close"): it was my ordering, not a race. */
         vol_pba_warmup_stop(v);
-        pthread_mutex_destroy(&v->pba_warmup_mu);
-        pthread_mutex_destroy(&v->rt_root_mu);
-        pthread_cond_destroy(&v->pba_warmup_cv);
     }
     /* Reserve/bootstrap: evict this volume's pack section first (no
      * volume state involved; later teardown must not see stale
@@ -2209,6 +2214,10 @@ void vol_close(invfs_volume *v)
     free(v->bz);
     free(v->bitmap);
     free(v->meta_mapper);
+    /* Now nothing can reach base_root or the warmup state again. */
+    pthread_mutex_destroy(&v->rt_root_mu);
+    pthread_mutex_destroy(&v->pba_warmup_mu);
+    pthread_cond_destroy(&v->pba_warmup_cv);
     heat_locks_destroy(v);   /* WP-heat-table-concurrent-safe */
     cpack_locks_destroy(v);  /* WP-cpack-map-copy-out (after the map reset) */
     free(v->tier);

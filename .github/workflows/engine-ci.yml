@@ -400,13 +400,13 @@ jobs:
           # impl_docs/OPEN-ISSUES.md ("TSan on the FUSE daemon") and this list
           # grows as each one is understood and fixed. Shipping them green-by-
           # exclusion would be the false-green shape this project keeps paying for.
-          # test-sweep-lane-retire is out for now too, for a different reason:
-          # 89 reports, every one pairing a calloc in vol_open_inner with a
-          # base_root lock/unlock, i.e. a thread from a PREVIOUS volume still
-          # holding a pointer into memory the next open has already reused. That
-          # is a lifetime finding, not a knob, and it is recorded with the FUSE
-          # ones in impl_docs/OPEN-ISSUES.md.
-          for s in test-put-failure test-sweep-publish-rollback; do
+          # test-sweep-lane-retire was excluded for 89 reports and is back:
+          # every one of them was vol_close destroying rt_root_mu BEFORE the
+          # close work that still calls base_root (vol_retire_drain_all ->
+          # dl_retire_free_list -> pba_ref_ensure -> walk -> base_root). An
+          # ordering bug of mine, not a race -- ThreadSanitizer said "use of an
+          # invalid mutex" and pointed at the destroy in the caller stack.
+          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback; do
             log="/tmp/tsan-$s.log"
             echo "::group::$s"
             rc=0
