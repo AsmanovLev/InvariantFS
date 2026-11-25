@@ -110,9 +110,25 @@ serial_wait_match() {
     done
 }
 
-note "waiting for NixOS boot / login trigger..."
-serial_wait_match "nixos login:|login:|<<< Welcome to NixOS|nixos-invfs login:|root@|# |nixos#" "$TIMEOUT_SEC" || fail "login prompt never appeared (see $SER)"
-note "console trigger detected"
+note "waiting for the boot trigger..."
+# NOT `# ` and NOT `~`: the project's initramfs starts a rescue shell on ttyS0
+# before the hand-off by design, and its prompt is "~ #". The old pattern matched
+# it, so the probe was typed into the INITRAMFS while the installed root was
+# still being chrooted -- measured 2026-11-24: mount completed 00:51:39,
+# "sh: can't access tty" (the rescue shell) 00:51:39, probe answered
+# INVFSROOTrootfs at 00:51:41, i.e. /proc/mounts of the initramfs, not of the
+# booted system. The distro's own login prompt, or the hand-off marker itself,
+# is the honest trigger.
+serial_wait_match "Chrooting to InvFS root|nixos login:|login:|<<< Welcome to NixOS" "$TIMEOUT_SEC" \
+    || fail "neither the hand-off marker nor a login prompt appeared (see $SER)"
+note "boot trigger detected"
+
+# If the hand-off marker came first, the guest is only starting: give its getty
+# a window to appear before typing at the console.
+if ! grep -q -a "login:" "$SER" 2>/dev/null; then
+    note "hand-off reached; waiting for the guest's login prompt"
+    serial_wait_match "login:" 240 || note "no guest login prompt within 240s; probing the console anyway"
+fi
 
 # If login prompt is showing, perform interactive login
 if grep -q -a -E "login:" "$SER" 2>/dev/null && ! grep -q -a -E "(root@|# |nixos#|~\]#)" "$SER" 2>/dev/null; then

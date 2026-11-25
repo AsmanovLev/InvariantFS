@@ -3615,3 +3615,35 @@ root that way. The next diagnostic is to print `head -5 /proc/mounts` verbatim
 before the typed probe on gentoo, and to check that the shell the harness logs
 into is the one the marker is typed into. Until that is established, a green here
 would be a claim about a check that cannot fail.
+
+## OPEN (2026-11-25) — the engine job's meta suites are unstable on CI runners
+
+**Status:** OPEN, informational until a run repeats. Three different suites, three
+consecutive runs, three different verdicts -- and every one passes locally:
+
+| run | suite | CI verdict | local |
+|---|---|---|---|
+| 45362001099 | `test-meta-dirent` | hung 58 min, job cancelled (orphan `invf-fuse`) | PASS |
+| 45442540562 | `test-meta-inode` | FAIL (`nlink`/row assertion) | PASS |
+| 45517518985 | `test-meta-fsck` | FAIL `corrupted base page: not reported DAMAGED` | PASS (`bad pages: 1`, exit 3) |
+
+Local reproduction for the last one, on the same tree (main @ a83e3e2):
+
+```
+build_rc=0
+rc=0
+  |   bad pages:    1
+ALL WP-M4 FSCK LEGS PASS
+```
+
+So the assertion is sound and the engine reports the corruption; what differs on
+the runner is the environment. The suites all mount FUSE, run in the same job
+with `sed 's|/dev/shm|/tmp/invfs-e2e|g'` so they share one directory, and the
+engine job has no per-suite timeout -- the dirent hang held the whole job for the
+full hour it was given.
+
+Next steps, in order of cheapness: (1) re-run the failed job and see whether the
+same suite fails twice in a row (a repeat makes it a defect, not a flake);
+(2) give the engine job's per-suite loop its own `timeout`, as the e2e-full loop
+already has, so one wedged suite cannot eat the job's budget and take e2e-full and
+soak down with it (both need `engine`); (3) only then instrument.

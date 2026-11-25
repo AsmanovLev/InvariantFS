@@ -341,7 +341,17 @@ if pgrep -x invf-fuse >/dev/null 2>&1; then
 fi
 
 say "verifying root filesystem with invf-fsck..."
-invf-fsck "$P2" || exit 1
+# Capture and PRINT the verdict. Measured 2026-11-24 (installation-iso-alpine):
+# this line failed with rc=1 and the log carried no output at all -- the `say`
+# above it was the last thing written, so the log said "the setup failed" and
+# nothing about why. A refusal that prints nothing is the shape the project
+# polices everywhere else; a harness must not have it either.
+if ! invf-fsck "$P2" > /tmp/invfs-fsck-final.log 2>&1; then
+    say "invf-fsck on $P2 FAILED; its output follows:"
+    while IFS= read -r _l; do say "  fsck| $_l"; done < /tmp/invfs-fsck-final.log
+    exit 1
+fi
+say "root filesystem clean"
 
 say "spot checking bit-exact reads via invf-cat..."
 mkdir -p "$B"

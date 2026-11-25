@@ -275,7 +275,11 @@ jobs:
             # relocate dev/shm to disk to keep CI tmpfs bounded
             sed 's|/dev/shm|/tmp/invfs-e2e|g' "tools/$s.sh" > ".ci-tools/$s.sh"
             echo "::group::$s"
-            if bash ".ci-tools/$s.sh"; then
+            # A per-suite cap, the same discipline as the e2e-full loop: without
+            # it one wedged suite holds the job for an hour and takes e2e-full and
+            # soak with it (measured 2026-11-24: test-meta-dirent hung 58 min,
+            # job cancelled, both dependent jobs skipped).
+            if timeout 1200 bash ".ci-tools/$s.sh"; then
               echo "$s: PASS"
             else
               echo "$s: FAIL"; FAIL=1
