@@ -1175,8 +1175,18 @@ same locks -- 355 k futex syscalls of pure contention and a 41% pessimisation of
 cold walk. The mount now starts it after the table is published, where it cannot
 race the walk.
 
-Measured on the tool that shares the walk's `pba_ref_ensure` path; the boot number
-(`build_file_table: walk=`) is the confirmation to collect next.
+**Confirmed on the boot path** (run 45625987117, installed nixos root, 40 298
+files):
+
+```
+before: build_file_table: total=47.868s (walk=47.820s, qsort=0.047s)
+after:  build_file_table: total=10.299s (walk=10.209s, qsort=0.090s)
+```
+
+-78% on the exact number that was timing out the initramfs, and with the mount
+itself unchanged (vol_open 0.037 s, fold 0.000 s). The warmup/walk contention was
+the whole of it. `test-writepath`'s 29 TSan reports are still open (FUSE daemon),
+so the lazy table is not needed yet.
 
 Tooling left behind: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof` builds with
 `-pg` for `gprof`, because "the walk is slow" is not an answer.
