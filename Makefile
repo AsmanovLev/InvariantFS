@@ -1930,7 +1930,8 @@ release-verify:
 # ---- docs -----------------------------------------------------------------
 # ctags index (impl_docs/FUNCTIONS.md, TYPES.md, functions/, types/) plus the
 # doxygen HTML browser (impl_docs/doxygen/html, gitignored). Requires doxygen
-# (and graphviz for the call graphs).
+# (and graphviz for the call graphs) and ctags for the index. Everything this
+# target produces is gitignored: the index is a view of the tree, not a document.
 docs:
 	$(TESTENV) bash tools/gen_impl_docs.sh
 	doxygen Doxyfile

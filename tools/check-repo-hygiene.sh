@@ -177,6 +177,36 @@ if [ "$viol" -eq 0 ]; then
     python3 tools/check-citations.py || viol=1
 fi
 
+# 6. DOCUMENT INDEX. Every live document must be listed in impl_docs/DOCMAP.md.
+#
+#    The failure this catches is not rot but ORPHANING: a document that is
+#    correct, useful and unfindable. It happened to four HANDOFF-* notes, a
+#    directory of eight task specs and a folder of raw measurement JSON -- all of
+#    which had zero inbound references and were found only by listing a directory.
+#    Archiving them fixed the symptom; this is the rule that stops the next one.
+#
+#    Scoped to docs/ and impl_docs/ and to *.md: archived files are not expected
+#    in the index (docs/archive/README.md is theirs) and generated files are
+#    gitignored.
+if [ "$viol" -eq 0 ]; then
+    python3 - "$(git rev-parse --show-toplevel)" <<'PYEOF' || viol=1
+import subprocess, sys
+root = sys.argv[1]
+tracked = subprocess.run(['git', '-C', root, 'ls-files', '*.md'],
+                         capture_output=True, text=True).stdout.split()
+live = sorted(p for p in tracked
+              if p.startswith(('docs/', 'impl_docs/')) and not p.startswith('docs/archive/'))
+docmap = open(root + '/impl_docs/DOCMAP.md', encoding='utf-8', errors='replace').read()
+missing = [p for p in live if ('`%s`' % p) not in docmap]
+if missing:
+    for p in missing:
+        print('  INDEX   %s is not listed in impl_docs/DOCMAP.md' % p)
+    print('document index: FAIL -- %d live document(s) not findable from DOCMAP.md' % len(missing))
+    sys.exit(1)
+print('document index: OK (%d live documents, all listed in DOCMAP.md)' % len(live))
+PYEOF
+fi
+
 # The vol_find ledger runs HERE rather than in make test: it is a repo-shape
 # property, not a behavioural test, and a tripwire that lives in the suite is
 # one nobody runs before pushing.

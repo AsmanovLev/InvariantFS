@@ -209,6 +209,34 @@ Consequences, and they are binding:
 - **Shipped design rationale lives in the commit that shipped it**
   (`git log -p -- <path>`), not in a side file. The WP docs were deleted for
   this reason; do not recreate that directory.
+- **A work package is a scratchpad; a finding is not.** WP reports and task
+  specs are DELETED when the work lands (`git log --diff-filter=D --name-only`
+  reproduces every one of them, with the diff that shipped them beside it).
+  What was *measured* or *learned* -- findings, benchmarks, raw evidence --
+  goes to `docs/archive/`, because it was never in the code to begin with.
+- **Touching the code obliges the map in the same commit**, and the map is not
+  one document. Triggers and what each one binds:
+
+  | if you ... | update, in the same commit |
+  |---|---|
+  | add, split or delete a module under `src/core/` | a row in `impl_docs/DOCMAP.md` and in `impl_docs/FILEMAP.md` |
+  | change an on-disk structure, magic number or zone | `src/core/invarifs.h` (the authority), `docs/architecture/META.md`, and the ADR that decided it |
+  | change the FUSE surface or the initramfs hand-off | `docs/adr/ADR-008-fuse-vs-kernel.md` and the install guide for every distro it affects |
+  | change a durability, ordering or visibility invariant | `impl_docs/INVARIANTS.md` and `docs/adr/ADR-009-durability-contract.md` |
+  | fix a defect, or find one and not fix it | `INCIDENTS.md` for an incident, `impl_docs/OPEN-ISSUES.md` for a measured problem -- one of the two, not both |
+  | add a document under `docs/` or `impl_docs/` | a row in the document index at the end of `impl_docs/DOCMAP.md` |
+
+  The last row is machine-checked: `tools/check-repo-hygiene.sh` fails when a
+  tracked document is missing from that index. A document that cannot be found
+  from the index is indistinguishable from one that does not exist -- four
+  `HANDOFF-*` notes, eight task specs and a directory of raw measurement JSON sat
+  with zero inbound references until 2026-11-25.
+- **Status is a location, not a sentence.** Live documents live in `docs/` and
+  `impl_docs/`; finished ones live in `docs/archive/` (its `README.md` is their
+  index); generated ones (the ctags symbol index, the doxygen browser) are
+  gitignored and rebuilt by `make docs`. No document carries a hand-maintained
+  "Status:" line, because that line is exactly the kind of claim that drifts away
+  from the tree.
 - **New docs go in `docs/`** (architecture, ADRs, guides, benchmarks), not
   next to the source and not in `impl_docs/` except the generated
   symbol indexes and the live trackers (`AUDIT.md`, `INCIDENTS.md`).

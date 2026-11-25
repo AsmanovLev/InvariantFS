@@ -139,5 +139,5 @@ directory. Filenames (basenames) are unchanged.
 | examples/ | — | Upstream example programs (reference only) |
 
 Note: `*.obj` files in this directory are committed Windows build artifacts,
-not sources. Generated symbol/type indexes live in impl_docs/FUNCTIONS.md and
-impl_docs/TYPES.md (tools/gen_impl_docs.sh).
+not sources. The symbol/type index is generated on demand by
+`tools/gen_impl_docs.sh` (`make docs`) and is gitignored -- see DOCMAP.md.

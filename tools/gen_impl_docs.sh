@@ -14,7 +14,12 @@
 # four ctags artifacts above stay the committed, hand-diffable index.
 set -euo pipefail
 
-ROOT="/home/user/InvariantFS"
+# The tree this script lives in, not a developer's home directory. The old
+# hardcoded ROOT="/home/user/InvariantFS" meant `make docs` worked on exactly one
+# machine and failed everywhere else -- and since FUNCTIONS.md/TYPES.md were
+# committed, nobody noticed for months: the indexes sat at 2026-09-05 while the
+# engine moved on, which is worse than not having them.
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$ROOT/src"
 OUT="$ROOT/impl_docs"
 
