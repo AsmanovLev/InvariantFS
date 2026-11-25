@@ -74,7 +74,9 @@ the PRE-FIX tree, which is where the defect lives):
 3. **stage 6, `batches`** — `tz_v3_gc` sees the registry row is not named by
    any live recipe and frees `pba=14953, phys=1` — the live root page. Traced:
    `[trace] vol_free_blocks pba=14953 n=1 retain=0 ck=0 rel=0` from
-   `vol_tz_gc` (`src/core/vol_textzone.c:1551`, the free at `:1618`).
+   `vol_tz_gc` in `src/core/vol_textzone.c` (line numbers are from the commit
+   this report was written at; the file has been rewritten since, so they are
+   not cited here -- a pointer that does not resolve is worse than none).
 4. **stage 7, `finalize`** — the fold calls `vol_v3_base_root`, which refuses
    the freed slot[0] and falls back to slot[1] = the *pre-transform* root
    14960. The fold republishes a base that does not contain the transform's
