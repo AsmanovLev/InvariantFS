@@ -190,8 +190,26 @@ invfs_mount_handler() {
         esac
     fi
     [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
-    invf-fuse -o "$mopts" "$dev" "$mp"
-    [ $? -eq 0 ] || invfs_die "failed to mount '$dev'"
+    # Detached, for the same measured reason as the dracut module: invf-fuse
+    # does not daemonize, so a foreground call makes the mount's lifetime a
+    # property of this hook -- its process group and its controlling terminal.
+    # tools/initramfs-init.sh backgrounds and detaches the daemon for the same
+    # mount, and that is the path that boots.
+    invf-fuse -o "$mopts" "$dev" "$mp" >/tmp/invf-fuse.log 2>&1 &
+    _fuse_pid=$!
+    _i=0
+    while ! grep -q " $mp " /proc/mounts 2>/dev/null; do
+        _i=$((_i + 1))
+        if [ "$_i" -gt 600 ]; then
+            cat /tmp/invf-fuse.log >&2
+            invfs_die "root did not mount within 60s"
+        fi
+        if ! kill -0 "$_fuse_pid" 2>/dev/null; then
+            cat /tmp/invf-fuse.log >&2
+            invfs_die "invf-fuse exited before the root was mounted"
+        fi
+        sleep 0.1
+    done
     msg "invfs: root fs mounted ($dev)"
 
     # chroot hand-off: switch_root cannot enter a FUSE root (see header)

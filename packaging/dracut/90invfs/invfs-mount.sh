@@ -73,7 +73,38 @@ if [ "$_mem_kb" -gt 0 ] && [ "$_mem_mb" -lt 1500 ]; then
     esac
 fi
 [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
-invf-fuse -o "$mopts" "$rootdev" "$NEWROOT" 2>&1 | vinfo
+# The daemon must outlive this hook, and it must not own the console.
+#
+# It used to run in the FOREGROUND of a pipeline (`invf-fuse ... 2>&1 | vinfo`),
+# which makes its lifetime a property of that pipeline: invf-fuse does not
+# daemonize (no fork/daemon() in src/cli/fuse_fs.c), so the hook blocks on it and
+# the daemon keeps the hook's process group and controlling terminal. The
+# project's own initramfs does the opposite for the same mount --
+# tools/initramfs-init.sh backgrounds it, redirects to a file and detaches from
+# the tty -- and that is the path that boots (gentoo, whose image uses it).
+#
+# Measured context: void and arch both freeze after the root is mounted (void at
+# dracut's "Seeding random number generator...", arch after journald starts),
+# with the tty still echoing and no hung_task/soft-lockup dump -- while gentoo,
+# mounting the same volume through the same code but from OUR init, reaches
+# runlevel 3. This is the structural difference between the two, so it is the
+# first thing to remove.
+invf-fuse -o "$mopts" "$rootdev" "$NEWROOT" >/tmp/invf-fuse.log 2>&1 &
+_FUSE_PID=$!
+_i=0
+while ! ismounted "$NEWROOT"; do
+    _i=$((_i + 1))
+    if [ "$_i" -gt 600 ]; then
+        vinfo < /tmp/invf-fuse.log
+        die "invfs: root did not mount within 60s"
+    fi
+    if ! kill -0 "$_FUSE_PID" 2>/dev/null; then
+        vinfo < /tmp/invf-fuse.log
+        die "invfs: invf-fuse exited before the root was mounted"
+    fi
+    sleep 0.1
+done
+vinfo < /tmp/invf-fuse.log
 
 if ! ismounted "$NEWROOT"; then
     die "invfs: failed to mount root fs on $rootdev"
