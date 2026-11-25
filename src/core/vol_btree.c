@@ -2909,46 +2909,49 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
 
     if (!out)
         return -1;
-    /* Cached: this is called once or twice per FILE while walking a
-     * namespace, and the answer only changes when a publish moves the root
-     * (rt.seq). The count came from gprof on a 21 651-file walk: 36 384
-     * base_root calls, 73 461 page reads inside mbuf_root_read alone.
+    /* Cached: this is called once or twice per FILE while walking a namespace,
+     * and the answer only changes when a publish moves the root (rt.seq). The
+     * count came from gprof on a 21 651-file walk: 36 384 base_root calls,
+     * 73 461 page reads inside mbuf_root_read alone.
      *
-     * The test seam still fires on the cached path: it exists to force the
-     * capture/reclaim interleave at "root known, not yet walked"
-     * (reclaim_reader_epoch_test parks the reader here), and that boundary is
-     * just as real when the capture came from the cache. */
-    /* Under the leaf mutex: base_root runs on the main thread and, through the
-     * pba_ref warmup worker's walk, on a second one. */
+     * The lock covers BOTH paths. The cached one only needs it for the
+     * comparison; the miss path reads v->rt as well (mbuf_root_read reads
+     * rt.root_slot[] and may reload the descriptor), and leaving that outside was
+     * a real race with the publisher -- ThreadSanitizer, run 45655655043: "data
+     * race vol_metabuf.c:540 in mbuf_root_publish". After taking the lock the
+     * cache is re-checked, because another thread may have filled it while this
+     * one was unlocked.
+     *
+     * The test seam fires OUTSIDE the lock on purpose: it parks the caller
+     * (reclaim_reader_epoch_test), and parking inside a leaf mutex would deadlock
+     * the second walker. */
     pthread_mutex_lock(&v->rt_root_mu);
     if (v->rt_root_cached && v->rt_root_seq == v->rt.seq) {
         *out = v->rt_root_blkptr;
         pthread_mutex_unlock(&v->rt_root_mu);
-        /* Fired OUTSIDE the lock: the test seam parks the calling thread, and
-         * parking it inside a leaf mutex would deadlock the second walker. */
         invfs_test_base_read_hook(out);
         return 0;
     }
-    pthread_mutex_unlock(&v->rt_root_mu);
     memset(out, 0, sizeof *out);
     rc = mbuf_root_read(v, &pba, &gen);
-    if (rc < 0)
+    if (rc < 0) {
+        pthread_mutex_unlock(&v->rt_root_mu);
         return -1;
-    if (rc == 1)
+    }
+    if (rc == 1) {
+        pthread_mutex_unlock(&v->rt_root_mu);
         return 0;   /* no live root slot: empty tree */
-    if (mbuf_read(v, pba, page) != 0)
+    }
+    if (mbuf_read(v, pba, page) != 0) {
+        pthread_mutex_unlock(&v->rt_root_mu);
         return -1;
+    }
     mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
-    pthread_mutex_lock(&v->rt_root_mu);
     v->rt_root_blkptr = *out;
     v->rt_root_seq = v->rt.seq;
     v->rt_root_cached = 1;
     pthread_mutex_unlock(&v->rt_root_mu);
-    /* Test seam: the root is captured and nothing of it has been read yet.
-     * This is the boundary a reclaim reader epoch must span -- a fold that
-     * publishes, drains and frees between the capture above and the walk
-     * below takes the pages out from under the caller. See the KNOWN GAP in
-     * this file's header. */
+    /* Test seam: the root is captured and nothing of it has been read yet. */
     invfs_test_base_read_hook(out);
     return 0;
 }
