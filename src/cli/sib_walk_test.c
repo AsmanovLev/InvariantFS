@@ -418,6 +418,15 @@ int main(int argc, char **argv)
             return 2;
         }
     }
+    /* No pba_ref warmup thread: it walks the namespace itself (pba_ref_ensure
+     * -> vol_walk_strict -> walk_dir), and walk_dir is where the per-LEVEL
+     * countdown this test arms lives. A warmup still running when the position
+     * search starts consumes the countdown, the armed position never fires, and
+     * the search reports "0 discriminating positions" -- which reads as "the
+     * seam is broken" while the seam is fine and the arming was eaten by another
+     * thread. Measured 2026-11-25 on the CI runners; on a fast local box the
+     * warmup had already finished, which is why it only showed up there. */
+    (void)setenv("INVFS_PBA_WARMUP", "0", 1);
     g_v = vol_open(img, &err);
     if (!g_v) {
         fprintf(stderr, "sib_walk_test: vol_open failed: err=%d\n", err);

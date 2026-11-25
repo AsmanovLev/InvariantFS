@@ -57,8 +57,15 @@ CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pt
 # Appended to CFLAGS, which the Makefile also passes to the LINK line, so the
 # runtime is linked without a separate LDFLAGS variable. OUT/OBJ are separate on
 # purpose: a TSan build must not overwrite the binaries the tests use.
+# The flags go in their own variable because a SECOND link path needs them: the
+# codecpack .so rules use PLUGIN_CFLAGS and link $(STOCK_ZLIB_O), which is built
+# with $(CFLAGS) -- so a TSan build produced instrumented objects and an
+# uninstrumented shared object, i.e. "undefined reference to __tsan_read4" from
+# src/zlib/trees.c at plugin-so time (2026-11-25).
+TSAN_FLAGS :=
 ifeq ($(TSAN),1)
-CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer -g -O1
+TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g -O1
+CFLAGS     += $(TSAN_FLAGS)
 endif
 # gprof build: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof`, then
 # `bin-prof/invf-verify ...` writes gmon.out and `gprof bin-prof/invf-verify
@@ -400,6 +407,7 @@ PACKDIR      = tools/codecpacks/$(1).codecpack
 PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
 # qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
+PLUGIN_CFLAGS += $(TSAN_FLAGS)
 PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
 PLUGIN_EXTRA_qcow2 := $(OBJ)/deflate_repro.o $(OBJ)/deflate_backend_system.o \
                       $(OBJ)/deflate_backend_stock.o $(STOCK_ZLIB_O)

@@ -1157,6 +1157,14 @@ coming back.
 | 2. + `base_root` cached on `rt.seq` (was: re-validate both RT30 slots per call, 36 384 calls) | 447 387 | 343 660 | 65 s |
 | 3. + the pba_ref warmup thread deferred until after the walk | 299 143 | **0** | **33 s** |
 
+The same thread also had a second victim, found the hard way: `sib_walk_test` arms
+a per-LEVEL fault countdown on `walk_dir_stop`, and a warmup still running on a
+slow runner walks the namespace itself (`pba_ref_ensure` -> `vol_walk_strict` ->
+`walk_dir`), eating the countdown. The test then reports "0 discriminating
+positions", which reads as "the seam is broken" while the seam is fine. It only
+showed up on CI because a fast local box finishes the warmup before the search
+starts. The test now sets `INVFS_PBA_WARMUP=0` before `vol_open`.
+
 (1) is correct but is not the lever: the per-ENTRY version of that redundancy had
 already been removed (the `walk=103.8s` comment in `vol_dirs.c`), and the
 per-DIRECTORY half moved the profile by 1%. (2) is a real 22% of the reads and
