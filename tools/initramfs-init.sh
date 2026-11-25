@@ -415,6 +415,18 @@ INIT=$(get_opt invfs.init)
 # wrong volume, a rootfs whose init is missing -- and it is precisely the case
 # an operator boots rescue media to fix. A medium that panics there has
 # removed the only way to reach the repair tools, which are sitting right here.
+# Say WHAT the hand-off is about to run and why it might refuse: a guest that
+# mounts and then lands in this shell with no explanation is undebuggable from a
+# serial log (measured on nixos 2026-11-24: "InvariantFS mounted: 40296 files",
+# then `sh: can't access tty` and a prompt, no message from this file).
+# Always, and cheap: one line before the hand-off. An initramfs that hands off
+# (or refuses to) without saying which path it used leaves a serial log that
+# cannot be debugged -- measured on nixos 2026-11-24, which mounted the root
+# ("InvariantFS mounted: 40296 files") and then appeared at a shell with no
+# message from this file at all.
+echo "[init] INIT='$INIT' chroot target='/mnt/invfs$INIT'"
+ls -l "/mnt/invfs$INIT" 2>&1 | sed 's/^/[init] /'
+[ -x "/mnt/invfs$INIT" ] && echo "[init] -x: yes" || echo "[init] -x: NO"
 if [ ! -x "/mnt/invfs$INIT" ]; then
     echo "The volume mounted, but $INIT is not there (checked /mnt/invfs$INIT)."
     if [ -e "/mnt/invfs$INIT" ]; then
@@ -424,7 +436,9 @@ if [ ! -x "/mnt/invfs$INIT" ]; then
         echo "This volume has no root filesystem in it: it may be a data-only"
         echo "volume, a half-restored one, or not the volume you meant."
     fi
+    echo "[init] INIT was '$INIT' (chroot target /mnt/invfs$INIT)"
     echo "Staying in the repair shell instead of handing off to a rootfs."
     rescue_shell
 fi
+echo "[init] exec chroot /mnt/invfs '$INIT'"
 exec chroot /mnt/invfs "$INIT"
