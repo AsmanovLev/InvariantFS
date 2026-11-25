@@ -115,6 +115,36 @@ has_opt() {  # $1 = bare flag, e.g. invfs.selftest
 RAW_UUID=$(get_opt invfs.raw_uuid)
 DEV1_UUID=$(get_opt invfs.dev1_uuid)
 
+# invfs.perf_trace=1 makes the daemon print per-phase timings (mount fold,
+# file-table build) into its own log, which this init then keeps on the console.
+# Without it a slow mount and a hung mount look identical: both are "vol_open
+# ... then silence" (2026-11-25, gentoo: 120 s of silence was a file-table build
+# over an installed root, not a deadlock).
+# Default ON: a boot log that shows WHEN the time went is worth a dozen lines,
+# and this is the path where every "the guest froze" report has to be read
+# afterwards. `invfs.perf_trace=0` turns it off.
+case "$(get_opt invfs.perf_trace)" in
+    0|no|false|off) ;;
+    *) export INVFS_PERF_TRACE=1 ;;
+esac
+
+# What machine is this? A boot that takes 4 minutes on TCG and 8 seconds on KVM
+# looks like a bug in the first case only if nobody wrote down which one it was.
+machine_report() {
+    _cpu=$(awk -F': ' '/^model name/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+    [ -n "$_cpu" ] || _cpu=$(awk -F': ' '/^Processor/{print $2; exit}' /proc/cpuinfo 2>/dev/null)
+    [ -n "$_cpu" ] || _cpu="unknown CPU"
+    _ncpu=$(grep -c '^processor' /proc/cpuinfo 2>/dev/null || echo 1)
+    _mem=$(awk '/^MemTotal/{printf "%d", $2/1024}' /proc/meminfo 2>/dev/null)
+    _dmi=$(cat /sys/class/dmi/id/product_name 2>/dev/null || cat /sys/firmware/devicetree/base/model 2>/dev/null)
+    [ -n "$_dmi" ] || _dmi="unknown board"
+    echo "[machine] guest: ${_ncpu} cpu, ${_mem:-?} MB, ${_cpu}, board: ${_dmi}, kernel $(uname -r 2>/dev/null)"
+    case "$_cpu" in
+        *QEMU*|*Virtual*|*KVM*) echo "[machine] guest: running under emulation/virtualisation" ;;
+    esac
+}
+machine_report
+
 # ---- find InvFS volumes by superblock magic + uuid -----------------------
 # Uses invf-fuse's own parser (the initramfs busybox has no dd/od); prints
 # "dev uuid" lines for every block device carrying an InvFS superblock.

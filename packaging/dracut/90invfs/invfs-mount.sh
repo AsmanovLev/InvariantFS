@@ -73,6 +73,11 @@ if [ "$_mem_kb" -gt 0 ] && [ "$_mem_mb" -lt 1500 ]; then
     esac
 fi
 [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
+# The daemon's per-phase timings go into its own log, and this hook keeps that
+# log on the console. Without them a slow mount and a hung mount read the same:
+# "vol_open ... then silence" (2026-11-25, gentoo: 120 s of silence was the
+# file-table build over an installed root, not a deadlock).
+getargbool 1 invfs.perf_trace && export INVFS_PERF_TRACE=1
 # The daemon must outlive this hook, and it must not own the console.
 #
 # It used to run in the FOREGROUND of a pipeline (`invf-fuse ... 2>&1 | vinfo`),

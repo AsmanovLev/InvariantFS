@@ -17,6 +17,12 @@ export INVFS_SERVER="$SRV"
 VOL=""
 B=/root/pkg
 say() { echo "iso-setup: $*"; }
+
+# Per-phase timings from the daemon (mount fold, file-table build) into its log,
+# which this script keeps on the console. Same reason as the boot path: a slow
+# mount and a hung mount read identically without it -- 2026-11-25, gentoo spent
+# >120 s in the file-table build over an installed root and the log said nothing.
+export INVFS_PERF_TRACE="${INVFS_PERF_TRACE:-1}"
 done_rc=1
 STATS=""
 
@@ -394,6 +400,43 @@ if [ -e /mnt/nix/var/nix/profiles/system/init ]; then
     ln -sf /nix/var/nix/profiles/system/init /mnt/sbin/init
 elif [ -e /mnt/init ]; then
     ln -sf /init /mnt/sbin/init 2>/dev/null || true
+fi
+
+# ---- mode readiness -------------------------------------------------------
+# The 2026-11-25 boot refused the hand-off with the chain resolved and the file
+# PRESENT but `-r--r--r--`: /nix/store/...-nixos-system-.../init was 0444 on the
+# volume, so nothing could execute it. Two things can produce that, and the log
+# has to say which:
+#   (a) the mode was written as 0444 by the install (nix writes store files
+#       read-only, then chmods the executable ones), or
+#   (b) chmod through this FUSE mount does not take effect at all.
+# The probe answers both: it chmods a fresh file inside the target volume, and it
+# compares the installed store's init with the INSTALLER's own copy of the same
+# path -- same content, same hash, so a different mode is ours.
+say "mode readiness: does chmod through the InvFS mount take effect?"
+mp=/mnt/tmp/.mode-probe.$$
+if : > "$mp" 2>/dev/null; then
+    chmod 0555 "$mp" 2>/dev/null
+    say "  fresh file, after chmod 0555 -> $(stat -c '%a' "$mp" 2>/dev/null || echo '?')  (want 555)"
+    chmod 0644 "$mp" 2>/dev/null
+    say "  fresh file, after chmod 0644 -> $(stat -c '%a' "$mp" 2>/dev/null || echo '?')  (want 644)"
+    rm -f "$mp"
+else
+    say "  could not create a probe file under /mnt/tmp"
+fi
+VOLINIT=$(ls -d /mnt/nix/store/*-nixos-system-*/init 2>/dev/null | head -1)
+LIVEINIT=$(ls -d /nix/store/*-nixos-system-*/init 2>/dev/null | head -1)
+say "  installed store init : $(stat -c '%a %n' "${VOLINIT:-/nonexistent}" 2>/dev/null || echo MISSING)"
+say "  installer store init : $(stat -c '%a %n' "${LIVEINIT:-/nonexistent}" 2>/dev/null || echo MISSING)"
+if [ -n "$VOLINIT" ] && [ ! -x "$VOLINIT" ]; then
+    say "  the installed init is NOT executable; trying chmod 0755 (this is a probe, not a fix):"
+    chmod 0755 "$VOLINIT" 2>&1 | sed 's/^/    chmod| /'
+    say "  after chmod: $(stat -c '%a %n' "$VOLINIT" 2>/dev/null || echo '?')"
+    [ -x "$VOLINIT" ] && say "  chmod through the mount WORKS -- so the install wrote 0444 and the boot can proceed"                        || say "  chmod through the mount did NOT take effect -- that is the defect"
+fi
+if [ -n "${VOLINIT:-}" ] && [ -n "${LIVEINIT:-}" ]; then
+    v=$(stat -c '%a' "$VOLINIT" 2>/dev/null); l=$(stat -c '%a' "$LIVEINIT" 2>/dev/null)
+    [ "$v" = "$l" ] && say "  modes agree (installer $l, volume $v)"                     || say "  MODES DIFFER: installer $l vs volume $v -- the copy through FUSE lost the bits"
 fi
 
 # Pre-populate BOOTX64.EFI from host server if available

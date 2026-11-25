@@ -190,6 +190,12 @@ invfs_mount_handler() {
         esac
     fi
     [ -n "${rootflags:-}" ] && mopts="$mopts,$rootflags"
+    # Same flag, same default, same reason as the dracut module: a slow mount
+    # must be distinguishable from a hung one in the log.
+    case "$(invfs_getarg invfs.perf_trace)" in
+        0|no|false|off) ;;
+        *) export INVFS_PERF_TRACE=1 ;;
+    esac
     # Detached, for the same measured reason as the dracut module: invf-fuse
     # does not daemonize, so a foreground call makes the mount's lifetime a
     # property of this hook -- its process group and its controlling terminal.

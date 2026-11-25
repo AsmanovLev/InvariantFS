@@ -1,4 +1,6 @@
 #!/bin/bash
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+. "$REPO/tools/lib-machine.sh"
 # tools/boot-gentoo-qemu.sh — scripted, reproducible clean Gentoo-on-InvariantFS
 # boot under QEMU (WP62 regression re-run).
 #
@@ -336,11 +338,12 @@ INITRD="$ROOT/vm/initramfs.cpio.gz"
 # ---------------------------------------------------------------------------
 # 5. Boot QEMU (direct kernel, single device)
 # ---------------------------------------------------------------------------
+log "machine: $(machine_host_line)"
 log "stage 5: qemu boot (m=3072, q35/kvm, ssh hostfwd :$WP62_SSH_PORT -> :22)"
 qemu-system-x86_64 \
     -machine q35,accel=kvm -cpu host -m 3072 -smp 2 \
     -kernel "$WP62_KERNEL" -initrd "$INITRD" \
-    -append 'console=ttyS0,115200' \
+    -append 'console=ttyS0,115200 invfs.perf_trace=1' \
     -drive file="$IMG",format=raw,if=virtio \
     -netdev "user,id=net0,hostfwd=tcp::${WP62_SSH_PORT}-:22" \
     -device virtio-net-pci,netdev=net0 \

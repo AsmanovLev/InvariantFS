@@ -16,6 +16,12 @@ SRV="${SRV:-http://10.0.2.2:8000}"
 VOL=""   # resolved below: invfsvol= cmdline, else first writable disk
 B=/home/builder/pkg
 say() { echo "iso-setup: $*"; }
+
+# Per-phase timings from the daemon (mount fold, file-table build) into its log,
+# which this script keeps on the console. Same reason as the boot path: a slow
+# mount and a hung mount read identically without it -- 2026-11-25, gentoo spent
+# >120 s in the file-table build over an installed root and the log said nothing.
+export INVFS_PERF_TRACE="${INVFS_PERF_TRACE:-1}"
 done_rc=1
 STATS=""
 finish() {

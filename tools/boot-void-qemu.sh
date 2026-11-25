@@ -41,6 +41,7 @@
 set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+. "$REPO/tools/lib-machine.sh"
 B="$REPO/bin"
 WORK="${INVFS_VOID_WORK:-/var/tmp/invfs-wp64-boot}"
 LOGDIR="${INVFS_VOID_LOGDIR:-/var/tmp/invfs-wp64-logs}"
@@ -248,7 +249,7 @@ if [ "$BOOTLOADER" = 1 ]; then
 else
     QOPTS=(-machine "q35,accel=$ACCEL" -cpu "$CPU" -m "$MEM" -smp 2
            -kernel "$KERNEL" -initrd "$INITRD"
-           -append 'console=ttyS0,115200'
+           -append 'console=ttyS0,115200 invfs.perf_trace=1'
            -drive "file=$IMG,format=raw,if=virtio")
     [ "$MODE" = multi ] && QOPTS+=(-drive "file=$SHADOW,format=raw,if=virtio")
     QOPTS+=(-netdev "user,id=net0,hostfwd=tcp::$PORT-:22"
@@ -263,6 +264,7 @@ else
     done
 fi
 
+note "machine: $(machine_host_line)"
 note "booting ($MODE): qemu-system-x86_64 ${QOPTS[*]}"
 rm -f "$SERIAL"
 qemu-system-x86_64 "${QOPTS[@]}" &

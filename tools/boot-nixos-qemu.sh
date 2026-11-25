@@ -9,6 +9,7 @@
 set -euo pipefail
 
 REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
+. "$REPO/tools/lib-machine.sh"
 B="$REPO/bin"
 WORK="${INVFS_NIXOS_WORK:-/var/tmp/invfs-nixos-boot}"
 LOGDIR="${INVFS_NIXOS_LOGDIR:-/var/tmp/invfs-nixos-logs}"
@@ -88,6 +89,7 @@ cleanup() {
 trap cleanup EXIT
 
 QLOG="$LOGDIR/qemu-bootloader.log"
+note "machine: $(machine_host_line)"
 note "launching QEMU (accel=$ACCEL, memory=$MEM MB)"
 qemu-system-x86_64 -machine q35,accel=$ACCEL -cpu "$CPU" -m "$MEM" -smp 2 \
     -drive if=pflash,format=raw,readonly=on,file="$OVMF" \

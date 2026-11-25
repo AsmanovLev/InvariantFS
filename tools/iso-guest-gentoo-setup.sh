@@ -21,6 +21,12 @@ STAGE3_VER="20261011T170049Z"
 STAGE3_URL="https://distfiles.gentoo.org/releases/amd64/autobuilds/current-stage3-amd64-openrc/stage3-amd64-openrc-$STAGE3_VER.tar.xz"
 STAGE3_SHA512="80ccdd6d88f94f695f77741fc4f7d81e841565255073ac65aef8e28159c6657146a9a07bafd39e127d8b53270262123f2320c6f0c0e68c9d55da648866a4f57c  stage3-amd64-openrc-$STAGE3_VER.tar.xz"
 say() { echo "iso-setup: $*"; }
+
+# Per-phase timings from the daemon (mount fold, file-table build) into its log,
+# which this script keeps on the console. Same reason as the boot path: a slow
+# mount and a hung mount read identically without it -- 2026-11-25, gentoo spent
+# >120 s in the file-table build over an installed root and the log said nothing.
+export INVFS_PERF_TRACE="${INVFS_PERF_TRACE:-1}"
 done_rc=1
 STATS=""
 finish() {
