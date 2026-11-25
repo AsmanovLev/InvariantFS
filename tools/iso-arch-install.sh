@@ -151,13 +151,50 @@ exec 9>"$SPIPE.in"
 
 note "qemu pid $QPIDE; waiting for marker (up to $TIMEOUT_MIN min)"
 TIMEOUT_SEC=$(( TIMEOUT_MIN * 60 ))
+# Ask the guest what it is doing before calling this a timeout.
+#
+# arch's setup has now timed out four times and every one of those logs ended on
+# the same line with nothing to act on: not whether the guest was still working
+# (a slow pacstrap under TCG), wedged with its tty alive (the freeze that takes a
+# mounted root away -- seen on alpine, where the shell echoed typed bytes and
+# nothing executed), or simply gone. The answer decides where to look next, so
+# the timeout has to produce it instead of just ending the job.
+guest_diag() {
+    note "diagnostics: asking the guest console whether it is alive"
+    printf '
+' >&9 2>/dev/null || true
+    sleep 2
+    printf 'echo DIAG-ALIVE; cat /proc/loadavg; ps -ef 2>/dev/null | head -15; echo DIAG-END
+' >&9 2>/dev/null || true
+    _i=0
+    while [ "$_i" -lt 25 ]; do
+        grep -aq 'DIAG-END' "$SER" 2>/dev/null && break
+        _i=$((_i + 1)); sleep 1
+    done
+    if grep -aq 'DIAG-ALIVE' "$SER" 2>/dev/null; then
+        note "guest console ANSWERED -- the tty is alive:"
+        sed -n '/DIAG-ALIVE/,/DIAG-END/p' "$SER" | head -40 | sed 's/^/  diag| /'
+    else
+        note "guest console did NOT answer within 25s (wedged, or single-threaded busy)"
+    fi
+    note "last 20 serial lines:"
+    tail -20 "$SER" 2>/dev/null | sed 's/^/  tail| /'
+    if [ -n "$QPIDE" ] && kill -0 "$QPIDE" 2>/dev/null; then
+        note "qemu process: $(ps -o stat=,wchan= -p "$QPIDE" 2>/dev/null | tr -s ' ')"
+        note "qemu threads: $(ls "/proc/$QPIDE/task" 2>/dev/null | wc -l)"
+    else
+        note "qemu is gone"
+    fi
+}
+
 START_SEC=$(date +%s)
 while true; do
     if grep -aq "INVFS-ISO-SETUP:" "$SER" 2>/dev/null; then break; fi
     if ! kill -0 "$QPIDE" 2>/dev/null; then note "qemu exited early"; break; fi
     NOW_SEC=$(date +%s)
     if [ $((NOW_SEC - START_SEC)) -ge "$TIMEOUT_SEC" ]; then
-        fail "timeout waiting for guest setup marker"
+        guest_diag
+        fail "timeout waiting for guest setup marker after $TIMEOUT_MIN min (see the diag lines above)"
     fi
     sleep 1
 done
