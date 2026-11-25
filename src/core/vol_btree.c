@@ -2918,11 +2918,18 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
      * capture/reclaim interleave at "root known, not yet walked"
      * (reclaim_reader_epoch_test parks the reader here), and that boundary is
      * just as real when the capture came from the cache. */
+    /* Under the leaf mutex: base_root runs on the main thread and, through the
+     * pba_ref warmup worker's walk, on a second one. */
+    pthread_mutex_lock(&v->rt_root_mu);
     if (v->rt_root_cached && v->rt_root_seq == v->rt.seq) {
         *out = v->rt_root_blkptr;
+        pthread_mutex_unlock(&v->rt_root_mu);
+        /* Fired OUTSIDE the lock: the test seam parks the calling thread, and
+         * parking it inside a leaf mutex would deadlock the second walker. */
         invfs_test_base_read_hook(out);
         return 0;
     }
+    pthread_mutex_unlock(&v->rt_root_mu);
     memset(out, 0, sizeof *out);
     rc = mbuf_root_read(v, &pba, &gen);
     if (rc < 0)
@@ -2932,9 +2939,11 @@ static int base_root(invfs_volume *v, invfs_blkptr *out)
     if (mbuf_read(v, pba, page) != 0)
         return -1;
     mbuf_ptr_set(out, pba, page, INVFS_BP_ROOT);
+    pthread_mutex_lock(&v->rt_root_mu);
     v->rt_root_blkptr = *out;
     v->rt_root_seq = v->rt.seq;
     v->rt_root_cached = 1;
+    pthread_mutex_unlock(&v->rt_root_mu);
     /* Test seam: the root is captured and nothing of it has been read yet.
      * This is the boundary a reclaim reader epoch must span -- a fold that
      * publishes, drains and frees between the capture above and the walk

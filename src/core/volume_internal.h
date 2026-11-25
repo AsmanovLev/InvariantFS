@@ -662,6 +662,12 @@ typedef struct invfs_volume {
     int          rt_root_cached;
     uint64_t     rt_root_seq;
     invfs_blkptr rt_root_blkptr;
+    /* Leaf mutex for the three fields above. base_root() is reached from the
+     * main thread AND from the pba_ref warmup worker (its walk lists
+     * directories), which ThreadSanitizer caught immediately (3 reports,
+     * 2026-11-25, run 45621242935). Only a blkptr is copied under it; nothing
+     * else is acquired while it is held, so it cannot participate in a cycle. */
+    pthread_mutex_t rt_root_mu;
     /* ---- ANC0 tail anchor (see vol_anchor.c) --------------------------
      * The second LOCATION for rt and spt0, at total_blocks - 1, readable
      * without touching block 0. anchor_state is the open-time probe verdict

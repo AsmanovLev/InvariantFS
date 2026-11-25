@@ -1372,6 +1372,7 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
      * carries its own leaf mutex rather than relying on a caller's. */
     cpack_locks_init(v);
     (void)pthread_mutex_init(&v->pba_warmup_mu, NULL);
+    (void)pthread_mutex_init(&v->rt_root_mu, NULL);
     (void)pthread_cond_init(&v->pba_warmup_cv, NULL);
     v->pba_warmup_started = 0;
     v->pba_warmup_done = 0;
@@ -2068,6 +2069,7 @@ void vol_close(invfs_volume *v)
     if (v) {
         vol_pba_warmup_stop(v);
         pthread_mutex_destroy(&v->pba_warmup_mu);
+        pthread_mutex_destroy(&v->rt_root_mu);
         pthread_cond_destroy(&v->pba_warmup_cv);
     }
     /* Reserve/bootstrap: evict this volume's pack section first (no
