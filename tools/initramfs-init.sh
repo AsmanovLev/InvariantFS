@@ -427,7 +427,22 @@ INIT=$(get_opt invfs.init)
 echo "[init] INIT='$INIT' chroot target='/mnt/invfs$INIT'"
 ls -l "/mnt/invfs$INIT" 2>&1 | sed 's/^/[init] /'
 [ -x "/mnt/invfs$INIT" ] && echo "[init] -x: yes" || echo "[init] -x: NO"
-if [ ! -x "/mnt/invfs$INIT" ]; then
+# An ABSOLUTE symlink cannot be tested from the initramfs: the kernel resolves
+# /mnt/invfs/init -> /nix/... in THIS root, where /nix does not exist, so `-x`
+# answers NO for a link that is perfectly fine after chroot. Measured on nixos
+# 2026-11-25:
+#   [init] lrwxrwxrwx 1 0 0 33 ... /mnt/invfs/init -> /nix/var/nix/profiles/system/init
+#   [init] -x: NO
+#   [init] INIT was '/init' ... Staying in the repair shell
+# i.e. the volume was mounted (40296 files) and the init refused to hand off to
+# a root that was ready. Test it where the kernel will run it: inside the mount.
+HAVE_INIT=0
+if [ -x "/mnt/invfs$INIT" ]; then
+    HAVE_INIT=1
+elif [ -e "/mnt/invfs$INIT" ]; then
+    chroot /mnt/invfs /bin/sh -c "[ -x '$INIT' ]" >/dev/null 2>&1 && HAVE_INIT=1
+fi
+if [ "$HAVE_INIT" != 1 ]; then
     echo "The volume mounted, but $INIT is not there (checked /mnt/invfs$INIT)."
     if [ -e "/mnt/invfs$INIT" ]; then
         echo "It exists but is not executable -- wrong permissions, or it is a"

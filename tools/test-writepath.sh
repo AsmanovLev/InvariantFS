@@ -91,8 +91,21 @@ mnt_down() {
     fail "invf-fuse daemon did not exit after unmount"
 }
 
-fsck_ok() { $B/invf-fsck "$1" | tee "$WORK/fsck.last" | grep -q "^OK$" \
-    || { cat "$WORK/fsck.last"; fail "fsck not clean: $1"; }; }
+# Capture BOTH streams and say which of the two failures this is. The old form
+# tee'd stdout only, so an invf-fsck that exited without printing a report left
+# fsck.last empty, `cat` printed nothing, and the message said "fsck not clean"
+# -- a claim about the volume when the tool had said nothing at all (measured
+# 2026-11-25, D3 crash leg: stderr carried vol_open lines, stdout carried no
+# verdict, and the failure read as data damage).
+fsck_ok() {
+    $B/invf-fsck "$1" > "$WORK/fsck.last" 2>&1
+    grep -q "^OK$" "$WORK/fsck.last" && return 0
+    cat "$WORK/fsck.last"
+    if ! grep -qE "^(OK|DAMAGED)$|^state:" "$WORK/fsck.last"; then
+        fail "fsck printed NO verdict for $1 (the tool failed; this is not damage)"
+    fi
+    fail "fsck not clean: $1"
+}
 
 deep_ok() { $B/invf-verify "$1" --deep | tail -1 | grep -q " 0 corrupt," \
     || fail "verify --deep not clean: $1"; }
