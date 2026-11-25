@@ -126,6 +126,19 @@ int main(int argc, char **argv)
         return 2;
     }
 
+    /* No background pba_ref warmup: fsck RE-READS the RT30 descriptor
+     * (fsck_rt30 -> mbuf_rt30_load) to judge it, and that write to v->rt races
+     * the warmup worker's walk, which reads v->rt through base_root on every
+     * directory it lists. ThreadSanitizer reported exactly that on 2026-11-25:
+     *
+     *   Read of size 4 ... by thread T1
+     *     #0 base_root  #1 base_get  ...  #15 pba_warmup_worker
+     *   Previous write of size 8 ... by main thread
+     *     #0 mbuf_rt30_load  #1 fsck_rt30  #2 fsck_scan  #4 main
+     *
+     * fsck's own work is single-threaded and it needs a coherent descriptor far
+     * more than it needs a warm reference map, so the worker stays off. */
+    (void)setenv("INVFS_PBA_WARMUP", "0", 1);
     v = vol_open(img, &err);
     if (!v) {
         fprintf(stderr, "invf-fsck: cannot open %s (err %d)\n", img, err);

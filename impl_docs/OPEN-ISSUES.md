@@ -1180,3 +1180,38 @@ Measured on the tool that shares the walk's `pba_ref_ensure` path; the boot numb
 
 Tooling left behind: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof` builds with
 `-pg` for `gprof`, because "the walk is slow" is not an answer.
+
+## TSan on the threaded paths: what it found and what is still open (2026-11-25)
+
+The `tsan` job (build with `TSAN=1`, run suites with `INVFS_TEST_CFLAGS` so the
+suites' own helper compiles link the runtime) is gating on two offline suites:
+`test-put-failure` and `test-sweep-publish-rollback`, both clean. Two more are
+excluded **by name**, with what they found recorded here rather than hidden:
+
+**`test-writepath` — 29 reports on the first run, all in the FUSE daemon.**
+Every stack reaches `base_root` / `vol_open_inner`. A mount is a different animal
+from these tools: libfuse's worker threads call into the daemon while the main
+thread is still inside `vol_open_inner` and while fsck-style reloads mutate
+`v->rt`. Needs triage of its own: first question is whether `vol_open_inner`
+publishes `v` before every mutex in it is initialised (the reports pair
+`pthread_mutex_init`/`calloc` with a `pthread_mutex_lock` in `base_root`).
+
+**`test-sweep-lane-retire` — 89 reports, all of one shape.**
+
+```
+#0 calloc            #1 vol_open_inner  (main thread)
+#0 pthread_mutex_lock/unlock  #1 base_root (another thread)
+```
+
+Same address on both sides: a thread from a PREVIOUS volume is still locking a
+mutex inside memory the next `vol_open_inner` has already been handed by `calloc`.
+`vol_close` does stop and join the pba warmup thread, so the dangling thread is
+one of the sweep's own lane threads (vol_sweep.c spawns them) — a thread outliving
+its volume. That is a lifetime bug, not a lock-ordering one, and it is the most
+serious of the two.
+
+Fixed already, by the same job, in this order: the fault-injection seam's
+countdown and armed string (no synchronisation at all), `blkio`'s I/O counters
+(`++` from two threads), the base-root cache (added by this work, caught by TSan
+an hour later), and `invf-fsck`'s warmup (it re-reads the RT30 descriptor while a
+walker reads `v->rt`).
