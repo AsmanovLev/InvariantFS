@@ -450,6 +450,25 @@ say "  store executables (a lost +x on these means the whole store is 444):"
 for b in /mnt/nix/store/*-bash-*/bin/bash /mnt/nix/store/*-nixos-system-*/init; do
     [ -e "$b" ] && say "    $(stat -c '%a %n' "$b")"
 done
+# EVERY store executable is 444 on the volume (bash, bash-interactive, the
+# system init) while the installer's own copies are 555, and chmod works in both
+# shapes tested above. So the question is no longer "does chmod work" but "does
+# the store's write sequence work", and nix's sequence is: mkdir the store path
+# 0555, create the file, write it, chmod it to 0444 or 0555. Mirror it exactly,
+# in a directory of our own, so the answer is about the mount and not about nix:
+say "  the store's own write sequence, replayed by hand:"
+d=/mnt/nix/store/zz-probe-dir.$$
+if mkdir -p "$d" 2>/dev/null && chmod 0555 "$d" 2>/dev/null; then
+    say "    mkdir 0555 -> $(stat -c '%a' "$d")"
+    if ( set -C; : > "$d/exec.sh" ) 2>/dev/null; then
+        say "    create in a 0555 dir -> $(stat -c '%a' "$d/exec.sh")"
+        chmod 0555 "$d/exec.sh" 2>/dev/null
+        say "    then chmod 0555 -> $(stat -c '%a' "$d/exec.sh")   (want 555 -- this is the step that fails on the real store)"
+    fi
+    chmod 0755 "$d" 2>/dev/null; rm -rf "$d" 2>/dev/null
+else
+    say "    could not create a probe directory under /mnt/nix/store"
+fi
 say "  chmod after a link (the shape a store import has):"
 p=/mnt/tmp/.link-probe.$$
 q=/mnt/tmp/.link-probe-target.$$

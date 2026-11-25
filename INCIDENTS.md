@@ -3692,3 +3692,48 @@ freezes this project has been chasing (see the 2026-11-23 entry): a guest whose
 root mount is still enumerating cannot start udev, and udev coldplug timeouts look
 exactly like a frozen system. The next step is to make the table build lazy or
 incremental, or to announce the mount before it and let lookups block on demand.
+
+## OPEN (2026-11-25) — nixos: the whole Nix store lands 444 on the volume, so the installed system can never start
+
+  **Date:** Nov 25, 2026
+  **Severity:** High (the one distro still red; the volume it installs is unbootable
+  by construction, and nothing about the mount or the hand-off is at fault)
+  **Status:** OPEN. Diagnosis narrowed by probe; the write sequence is being
+  replayed by hand to say whether this is ours.
+
+The nixos boot refuses the hand-off because `/init` is not executable. The
+question was whether that is one file or all of them, and it is all of them --
+measured in run 45635849105, inside the guest, through the mount:
+
+```
+store executables (a lost +x on these means the whole store is 444):
+  444 /mnt/nix/store/…-bash-5.2p37/bin/bash
+  444 /mnt/nix/store/…-bash-interactive-5.2p37/bin/bash
+  444 /mnt/nix/store/…-nixos-system-…/init
+installer store init : 555 /nix/store/…-nixos-system-…/init
+```
+
+and the two things that could have explained it are both ruled out by the same
+run:
+
+```
+fresh file, after chmod 0555 -> 555      (want 555)
+fresh file, after chmod 0644 -> 644      (want 644)
+chmod after a hardlink, 0555 -> 555 / 555, then 0444 -> 444 / 444
+```
+
+So `chmod` through this mount works, in both the plain and the two-names-one-inode
+shape, and the installer's own copy of the *same* store path is 555. What differs
+is the sequence nix uses to build a store path: `mkdir` the path 0555, create and
+write the file inside it, then chmod. The next probe replays exactly that, in a
+directory of our own under `/mnt/nix/store`, so the answer is about the mount and
+not about nix:
+
+  * chmod 0555 on a file created inside a 0555 directory yields 444 -> the mount
+    is wrong and this is a user-facing engine defect (any atomic/chmod-in-store
+    workflow hits it);
+  * yields 555 -> the mount is fine and nix chmods a path resolved in *its* root
+    rather than `/mnt`, i.e. the installer's business.
+
+Either way the boot failure is a consequence, not the cause: a store whose
+executables are 444 cannot boot regardless of what the initramfs does.
