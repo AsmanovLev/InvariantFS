@@ -285,6 +285,19 @@ jobs:
               echo "$s: FAIL"; FAIL=1
             fi
             echo "::endgroup::"
+            # Count and clear stray daemons before the next suite. Four different
+            # meta suites have now failed in four runs (dirent hung, inode, fsck,
+            # fold) and every failure is an fsck that refused or printed nothing
+            # -- the shape a stale FUSE daemon leaves behind, since the suites
+            # mount, some of them get SIGKILLed, and nothing sweeps up afterwards.
+            # Measuring it is the point: if a suite leaves a daemon, this line
+            # names it, and the next run tells us whether the failures follow.
+            strays=$(pgrep -af "invf-fuse /tmp/invfs-e2e" 2>/dev/null | wc -l)
+            if [ "${strays:-0}" -gt 0 ]; then
+              echo "note: $strays stray invf-fuse process(es) survived $s:"
+              pgrep -af "invf-fuse /tmp/invfs-e2e" | sed 's/^/  stray: /'
+              pkill -9 -f "invf-fuse /tmp/invfs-e2e" 2>/dev/null || true
+            fi
             rm -rf /tmp/invfs-e2e
             mkdir -p /tmp/invfs-e2e
           done

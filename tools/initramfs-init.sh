@@ -436,17 +436,41 @@ ls -l "/mnt/invfs$INIT" 2>&1 | sed 's/^/[init] /'
 #   [init] INIT was '/init' ... Staying in the repair shell
 # i.e. the volume was mounted (40296 files) and the init refused to hand off to
 # a root that was ready. Test it where the kernel will run it: inside the mount.
+# `-e` and `-x` FOLLOW the link, so neither can answer for NixOS's /init:
+#   /init -> /nix/var/nix/profiles/system/init      (absolute)
+# Resolved from the initramfs that target is /nix/... which does not exist here,
+# so both tests say no for a root that is fine after chroot. Measured twice
+# (2026-11-25, runs 45528526588 and 45534711912): "-x: NO" then "The volume
+# mounted, but /init is not there" -- on a volume holding 40296 files. The first
+# attempt guarded the in-chroot test with `[ -e ]`, which has the same flaw and
+# never fired. Test unconditionally, and fall back to resolving the link by hand
+# for the case where the in-chroot test itself cannot run.
 HAVE_INIT=0
 if [ -x "/mnt/invfs$INIT" ]; then
     HAVE_INIT=1
-elif [ -e "/mnt/invfs$INIT" ]; then
-    chroot /mnt/invfs /bin/sh -c "[ -x '$INIT' ]" >/dev/null 2>&1 && HAVE_INIT=1
+else
+    if chroot /mnt/invfs /bin/sh -c "[ -x '$INIT' ]" >/dev/null 2>&1; then
+        HAVE_INIT=1
+    else
+        _target=$(readlink "/mnt/invfs$INIT" 2>/dev/null || true)
+        case "$_target" in
+            /*) [ -x "/mnt/invfs$_target" ] && HAVE_INIT=1 ;;
+        esac
+    fi
 fi
 if [ "$HAVE_INIT" != 1 ]; then
-    echo "The volume mounted, but $INIT is not there (checked /mnt/invfs$INIT)."
-    if [ -e "/mnt/invfs$INIT" ]; then
+    echo "The volume mounted, but $INIT is not executable there (checked /mnt/invfs$INIT)."
+    _target=$(readlink "/mnt/invfs$INIT" 2>/dev/null || true)
+    if [ -n "$_target" ]; then
+        echo "It is a symlink to '$_target'; inside the volume that target is"
+        if [ -e "/mnt/invfs$_target" ]; then
+            echo "present but not executable -- wrong mode, or it is a directory."
+        else
+            echo "absent, so the link dangles inside the volume too."
+        fi
+    elif [ -e "/mnt/invfs$INIT" ]; then
         echo "It exists but is not executable -- wrong permissions, or it is a"
-        echo "directory or a dangling symlink."
+        echo "directory."
     else
         echo "This volume has no root filesystem in it: it may be a data-only"
         echo "volume, a half-restored one, or not the volume you meant."
