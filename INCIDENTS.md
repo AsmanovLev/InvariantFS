@@ -3735,5 +3735,24 @@ not about nix:
   * yields 555 -> the mount is fine and nix chmods a path resolved in *its* root
     rather than `/mnt`, i.e. the installer's business.
 
+**Answered (run 45647381802).** The mount is NOT the problem. Replaying the
+store's own write sequence by hand inside the guest:
+
+```
+mkdir 0555            -> 555
+create in a 0555 dir  -> 644
+then chmod 0555       -> 555      <- the step that fails on the real store, and it
+                                    works here
+```
+
+So `chmod` on a file created inside a read-only directory is fine, and what is
+left is the copy `nixos-install` performs: it writes the destination files 0444
+and the +x the source has never lands. The harness now closes that where it can be
+closed honestly -- the installer's own `/nix/store` holds the same closure built on
+this machine, so any file executable THERE and not on the volume is exactly the set
+that was lost, and it is `chmod --reference`'d from that source. That is a
+workaround to make the installed system testable, not a fix for the installer;
+this entry stays OPEN with that distinction written down.
+
 Either way the boot failure is a consequence, not the cause: a store whose
 executables are 444 cannot boot regardless of what the initramfs does.

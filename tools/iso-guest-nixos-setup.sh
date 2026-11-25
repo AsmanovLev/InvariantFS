@@ -492,6 +492,33 @@ if [ -n "${INVFS_SERVER:-}" ]; then
     curl -fsSL -o /mnt/boot/EFI/BOOT/BOOTX64.EFI "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
 fi
 
+# ---- mode fixup, with the installer's own store as the reference -----------
+# The probe above settles where the bits are lost: replaying the store's write
+# sequence by hand -- mkdir 0555, create inside it, chmod 0555 -- gives 555, so
+# the MOUNT is not dropping them. What is left is the copy itself: nix writes the
+# destination files 0444 and the +x that the source has never lands (measured
+# 2026-11-25, run 45647381802: every store executable 444 while the installer's
+# copy of the same paths is 555).
+#
+# Rather than guess which files should be executable, use the source as the
+# reference: the installer's own /nix/store holds the same closure, built on this
+# machine, so any file that is executable THERE and not here is exactly the set
+# that was lost. Closing this in the harness is not a fix for the installer, and
+# it is not claimed to be one: INCIDENTS.md records the open question. It is what
+# makes the installed system bootable enough to test the rest.
+say "mode fixup: +x bits the installer's own store has and the volume does not"
+mfs=/tmp/modefix.stats
+: > "$mfs" 2>/dev/null
+while IFS= read -r src; do
+    dst="/mnt$src"
+    if [ ! -e "$dst" ]; then echo m >> "$mfs"; continue; fi
+    if [ ! -x "$dst" ]; then
+        if chmod --reference="$src" "$dst" 2>/dev/null; then echo f >> "$mfs"; else echo e >> "$mfs"; fi
+    fi
+done < <(find /nix/store -type f -perm -u+x 2>/dev/null)
+say "  fixed $(grep -c f "$mfs" 2>/dev/null || echo 0), absent on the volume $(grep -c m "$mfs" 2>/dev/null || echo 0), chmod failed $(grep -c e "$mfs" 2>/dev/null || echo 0)"
+say "  /mnt/init is now $(stat -c '%a' /mnt/init 2>/dev/null || echo MISSING) (want 555)"
+
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
 say "running invf-boot-setup on /mnt/boot (ESP)..."
 invf-boot-setup --esp /mnt/boot --root "$P2" --cmdline "console=ttyS0,115200 invfs.init=/init" || true
