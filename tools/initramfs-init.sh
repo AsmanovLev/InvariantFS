@@ -449,14 +449,36 @@ HAVE_INIT=0
 if [ -x "/mnt/invfs$INIT" ]; then
     HAVE_INIT=1
 else
-    if chroot /mnt/invfs /bin/sh -c "[ -x '$INIT' ]" >/dev/null 2>&1; then
-        HAVE_INIT=1
-    else
-        _target=$(readlink "/mnt/invfs$INIT" 2>/dev/null || true)
-        case "$_target" in
-            /*) [ -x "/mnt/invfs$_target" ] && HAVE_INIT=1 ;;
+    # Walk the link chain BY HAND, one `readlink` at a time, re-prefixing the
+    # mount root at every hop. `readlink` only reads the stored target -- it
+    # never resolves -- so this answers the question the kernel would answer
+    # after chroot, without depending on chroot working, on /bin/sh being
+    # executable through the mount, or on the offline tools (which refuse while
+    # the volume is mounted).
+    #
+    # This is the third attempt at the same test, and the first two failed the
+    # same way: `-x` and `-e` resolve in the INITRAMFS's root, where NixOS's
+    # absolute targets (/nix/store/...) do not exist. Measured 2026-11-25:
+    #   /init -> /nix/var/nix/profiles/system/init   (itself a link into /nix/store)
+    #   "-x: NO", and "inside the volume that target is absent" -- both wrong
+    #   statements about a volume holding 40296 files.
+    _cur="$INIT"
+    _hops=0
+    while [ "$_hops" -lt 8 ]; do
+        if [ -x "/mnt/invfs$_cur" ]; then
+            HAVE_INIT=1
+            break
+        fi
+        _prev="$_cur"
+        _t=$(readlink "/mnt/invfs$_cur" 2>/dev/null || true)
+        [ -n "$_t" ] || break
+        case "$_t" in
+            /*) _cur="$_t" ;;
+            *)  _cur="$(dirname "$_cur")/$_t" ;;
         esac
-    fi
+        _hops=$((_hops + 1))
+        echo "[init] hop$_hops $_prev -> $_cur"
+    done
 fi
 if [ "$HAVE_INIT" != 1 ]; then
     echo "The volume mounted, but $INIT is not executable there (checked /mnt/invfs$INIT)."
