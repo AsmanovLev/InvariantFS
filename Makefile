@@ -162,7 +162,14 @@ B3      := blake3 blake3_dispatch blake3_portable
 # Canonical core object list for the e2e helper link lines in tools/test-*.sh.
 # Emitted by `all` so it can never go stale against $(CORE). Kept as a list of
 # individual .o files (NOT a .a archive) so link order does not matter.
-CORE_OBJS_FILE := build/core_objs.txt
+# The default path is what thirty-five suites read literally
+# ($REPO/build/core_objs.txt), so it stays. A build with a different OBJ (the
+# TSan and gprof ones) must NOT write that file: it lists the objects of the last
+# build, so a `make TSAN=1 OBJ=build/obj-tsan` would leave every later suite
+# linking instrumented objects with a plain gcc -- "undefined reference to
+# __tsan_read4" from src/zlib (seen locally 2026-11-25, and the same shape as the
+# CI failure in the tsan job, one layer down).
+CORE_OBJS_FILE := $(if $(filter build/obj,$(OBJ)),build/core_objs.txt,$(OBJ)/core_objs.txt)
 
 # WP101: hermetic unit-suite env, applied per recipe line (see `test:`).
 # Unset in production: pack_scan_all() scanning /usr/lib/invfs/codecpacks
