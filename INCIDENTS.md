@@ -3647,3 +3647,48 @@ same suite fails twice in a row (a repeat makes it a defect, not a flake);
 (2) give the engine job's per-suite loop its own `timeout`, as the e2e-full loop
 already has, so one wedged suite cannot eat the job's budget and take e2e-full and
 soak down with it (both need `engine`); (3) only then instrument.
+
+## OPEN (2026-11-25) — the mount waits for a full file-table build, so a 40k-file root can outlast the initramfs budget
+
+  **Date:** Nov 25, 2026
+  **Severity:** High (the one distro that had booted stopped booting; the failure
+  presents as a hang, not as a slow mount)
+  **Status:** OPEN. Mitigated in the harness, not in the engine.
+
+gentoo, whose installed root is the only one that ever reached a userspace
+milestone, failed its boot check in run 45583323109:
+
+```
+[    3.810152] RAS: Correctable Errors collector initialized.
+...
+ERROR: invf-fuse did not mount in 120s:
+vol_open: /dev/vda2: format v1 (metadata inode tree): base root engine up
+vol: packs from volume: 0 container, ...
+```
+
+The daemon opened the volume and then printed nothing for two minutes. That is
+not a deadlock and not a regression in the open path: `fuse_fs.c` prints
+`InvariantFS mounted: N files` only AFTER `build_file_table()`, which enumerates
+every entry on the volume. On an empty volume (the install phase, "mounted: 0
+files") that is instant; on an installed Gentoo root of tens of thousands of
+files, under TCG on a loaded runner, it is minutes.
+
+The evidence that this is time and not a hang: the same image booted to OpenRC
+runlevel 3 in earlier runs, and the number of files did not change. The evidence
+that it is `build_file_table` and not the mount syscall: the daemon's own log
+stops exactly at "base root engine up", which is printed before the build, and
+the "mounted" line is printed after it.
+
+What was changed (harness only, not the engine): the initramfs budget
+is `INVFS_MOUNT_TIMEOUT` (default 300 s, was a hardcoded 120 s) and it prints the
+daemon's log tail every 15 s, so a slow build looks slow on the serial console
+instead of silent; the gentoo boot window went 600 -> 900 s so the outer bound
+cannot expire while the mount is legitimately in progress.
+
+What is NOT solved, and is the actual question: **mount cost is O(files) and it
+blocks the mount.** A rootfs that takes minutes to become mountable is unusable
+regardless of what the budget is, and it also explains the alpine/arch/void
+freezes this project has been chasing (see the 2026-11-23 entry): a guest whose
+root mount is still enumerating cannot start udev, and udev coldplug timeouts look
+exactly like a frozen system. The next step is to make the table build lazy or
+incremental, or to announce the mount before it and let lookups block on demand.

@@ -89,7 +89,14 @@ if [ "$BOOTLOADER" = 1 ]; then
     fi
     [ "$ACCEL" = kvm ] && CPU=${INVFS_CPU:-host} || CPU=${INVFS_CPU:-max}
     if [ "$ACCEL" = tcg ] && [ -z "${INVFS_GENTOO_TIMEOUT:-}" ]; then
-        TIMEOUT_SEC=600
+        # 900, not 600: the initramfs may spend up to 300 s mounting (the mount
+        # completes only after invf-fuse's full file-table build, which on a
+        # 40k-file rootfs under TCG is minutes), and the distro then needs its
+        # own time to reach runlevel 3. With 600 the outer window could expire
+        # while the mount was still legitimately in progress -- measured
+        # 2026-11-25, run 45583323109: "neither a login prompt nor OpenRC
+        # runlevel 3 within 600s" with the daemon still building its table.
+        TIMEOUT_SEC=900
     fi
 
     if [ -z "$OVMF" ]; then

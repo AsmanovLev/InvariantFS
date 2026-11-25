@@ -292,19 +292,38 @@ else
     invf-fuse -o "$FUSE_OPTS" -f "$INVFS_RAW" /mnt/invfs >/tmp/fuse.log 2>&1 &
 fi
 
+# The daemon announces "InvariantFS mounted: N files" only AFTER
+# build_file_table() -- a full enumeration of the volume. On a real rootfs
+# (40-60k files) under TCG that is minutes, not seconds, and the 120 s budget
+# this used to have turned a slow mount into a repair shell. Measured
+# 2026-11-25 (run 45583323109, gentoo): the log held
+#   vol_open: /dev/vda2: format v1 ... base root engine up
+# and then nothing for 120 s, which is the table build, not a hang -- while the
+# same image had booted in earlier runs on a less loaded runner.
+#
+# So: a budget that can be changed (INVFS_MOUNT_TIMEOUT, seconds), and a
+# heartbeat that prints the daemon's own log every 15 s, so a slow build looks
+# like a slow build on the serial console instead of silence.
+MOUNT_TIMEOUT="${INVFS_MOUNT_TIMEOUT:-300}"
 READY=""
 i=0
-while [ "$i" -lt 120 ]; do
+last_note=0
+while [ "$i" -lt "$MOUNT_TIMEOUT" ]; do
     if grep -q "InvariantFS mounted" /tmp/fuse.log 2>/dev/null; then
         READY=1
         break
     fi
-    sleep 1
     i=$((i + 1))
+    if [ $((i % 15)) -eq 0 ] && [ "$i" -ne "$last_note" ]; then
+        last_note=$i
+        echo "[init] still waiting for the mount (${i}s of ${MOUNT_TIMEOUT}s); daemon log so far:"
+        tail -3 /tmp/fuse.log 2>/dev/null | sed 's/^/  fuse| /'
+    fi
+    sleep 1
 done
 
 if [ "$READY" != "1" ]; then
-    echo "ERROR: invf-fuse did not mount in 120s:"
+    echo "ERROR: invf-fuse did not mount in ${MOUNT_TIMEOUT}s (INVFS_MOUNT_TIMEOUT):"
     cat /tmp/fuse.log
     rescue_shell
 fi
