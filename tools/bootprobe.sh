@@ -63,7 +63,7 @@ bootprobe_ask() {
         bootprobe_send "$_ba_send"
         _ba_i=0
         while [ "$_ba_i" -lt 15 ]; do
-            if grep -qE '^INVFSROOT' "$_ba_log" 2>/dev/null; then
+            if grep -qE 'INVFSROOT[A-Za-z0-9]' "$_ba_log" 2>/dev/null; then
                 bootprobe_assert "$_ba_log"
                 return $?
             fi
@@ -81,7 +81,7 @@ bootprobe_wait() {
     _bp_tmo=${2:-30}
     _bp_i=0
     while [ "$_bp_i" -lt "$_bp_tmo" ]; do
-        if grep -qE '^INVFSROOT' "$_bp_log" 2>/dev/null; then
+        if grep -qE 'INVFSROOT[A-Za-z0-9]' "$_bp_log" 2>/dev/null; then
             if grep -qE 'no InvariantFS volume found|InvariantFS root did not come up' "$_bp_log" 2>/dev/null; then
                 return 2
             fi
@@ -97,7 +97,14 @@ bootprobe_wait() {
 }
 
 bootprobe_assert() {
-    BOOTPROBE_SEEN=$(grep -E '^INVFSROOT' "$1" 2>/dev/null | tail -1) || true
+    # `grep -o` with the token pattern, not `^INVFSROOT`: on this harness the serial
+    # file carries the guest's own line, and a '[guest HH:MM:SS] ' prefix rides
+    # along in some paths -- the anchored form then found nothing while five
+    # INVFSROOTfuse lines sat in the log (run 45682852389). The pattern also has to
+    # be narrower than the bare word, because the ECHOED command contains
+    # INVFSROOT%s: requiring an alphanumeric character after the token excludes it
+    # without depending on where the line starts.
+    BOOTPROBE_SEEN=$(grep -oE 'INVFSROOT[A-Za-z0-9]+' "$1" 2>/dev/null | tail -1) || true
     if grep -qE 'no InvariantFS volume found|InvariantFS root did not come up' "$1" 2>/dev/null; then
         return 1
     fi

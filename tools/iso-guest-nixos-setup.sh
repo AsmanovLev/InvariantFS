@@ -513,17 +513,19 @@ fi
 say "mode fixup: 0444 store files that are ELF or '#!' get their exec bits back"
 mfs=/tmp/modefix.stats
 : > "$mfs" 2>/dev/null
-find /mnt/nix/store -type f -perm 444 -print0 2>/dev/null   | xargs -0 -r -n 200 sh -c '
-        for f do
-            m=$(head -c 4 "$f" 2>/dev/null | od -An -tx1 2>/dev/null | tr -d " 
-")
-            case "$m" in
-                7f454c46|2321*)
-                    if chmod 0555 "$f" 2>/dev/null; then echo f >> '"$mfs"'
-                    else echo e >> '"$mfs"'; fi ;;
-            esac
-        done' _ 2>/dev/null
-say "  fixed $(grep -c f "$mfs" 2>/dev/null || echo 0), chmod failed $(grep -c e "$mfs" 2>/dev/null || echo 0)"
+# Finding and classifying must not spawn a process per file: the first version ran
+# `head`+`od` on each of them and took 56 MINUTES on the runner (2026-11-25,
+# 17:59:42 -> 18:56:09), which is absurd for a workaround and pushed the job to 80
+# minutes. grep reads the same magic bytes in one batched pass per pattern.
+find /mnt/nix/store -type f -perm 444 -print0 2>/dev/null > /tmp/modefix.list
+: > /tmp/modefix.hit
+for pat in '^ELF' '^#!'; do
+    xargs -0 -r -n 400 grep -a -l -m1 -e "$pat" < /tmp/modefix.list 2>/dev/null || true
+done | sort -u > /tmp/modefix.hit
+while IFS= read -r f; do
+    if chmod 0555 "$f" 2>/dev/null; then echo f >> "$mfs"; else echo e >> "$mfs"; fi
+done < /tmp/modefix.hit
+say "  candidates $(wc -l < /tmp/modefix.list 2>/dev/null || echo 0), fixed $(grep -c f "$mfs" 2>/dev/null || echo 0), chmod failed $(grep -c e "$mfs" 2>/dev/null || echo 0)"
 say "  /mnt/init is now $(stat -Lc '%a' /mnt/init 2>/dev/null || echo MISSING) (want 555)"
 
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
