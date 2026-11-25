@@ -63,7 +63,14 @@ bootprobe_ask() {
         bootprobe_send "$_ba_send"
         _ba_i=0
         while [ "$_ba_i" -lt 15 ]; do
-            if grep -qE 'INVFSROOT[A-Za-z0-9]' "$_ba_log" 2>/dev/null; then
+            # A GOOD answer, not just any answer. During the hand-off the console
+            # can still be answering from the initramfs, where /proc/mounts says
+            # `rootfs` -- and the first such answer used to end the probe with
+            # "root is not InvariantFS" while the system was, in fact, three
+            # seconds from reaching its own shell (run 45707724778: hand-off at
+            # 22:26:20, systemd up, probe answered INVFSROOTrootfs at 22:30:21).
+            # Wait for the token that names a FUSE root; keep asking otherwise.
+            if grep -qoE 'INVFSROOT(fuse|invfs)' "$_ba_log" 2>/dev/null; then
                 bootprobe_assert "$_ba_log"
                 return $?
             fi
