@@ -445,40 +445,84 @@ ls -l "/mnt/invfs$INIT" 2>&1 | sed 's/^/[init] /'
 # attempt guarded the in-chroot test with `[ -e ]`, which has the same flaw and
 # never fired. Test unconditionally, and fall back to resolving the link by hand
 # for the case where the in-chroot test itself cannot run.
+# Resolve a path INSIDE the mount, following one symlink component at a time.
+#
+# `readlink` cannot cross a symlinked DIRECTORY: for
+#   /nix/var/nix/profiles/system/init
+# where `system` is itself a link into /nix/store, `readlink` on that whole path
+# fails with ENOENT -- the kernel must resolve `system` first, and from the
+# initramfs's root it cannot. Measured 2026-11-25, run 45556796872: the walker
+# printed `hop1 /init -> /nix/var/nix/profiles/system/init` and then stopped,
+# with 40296 files mounted and a NixOS root behind them.
+#
+# So walk the components: readlink each prefix, substitute its target (absolute
+# targets restart from the mount root, relative ones stay in the current
+# directory), and start over. Bounded, and it prints every substitution it makes.
+# Path normalisation without external tools: drop empty and "." components, pop
+# on "..". Needed because a relative link target is substituted textually and can
+# carry both (measured on the first version: /d/e -> ../f came back as /d/../f).
+normalize_path() {
+    _in="$1"
+    _out=""
+    _ifs=$IFS
+    IFS=/
+    set -- $_in
+    IFS=$_ifs
+    for _c in "$@"; do
+        case "$_c" in
+            ''|.) ;;
+            ..) _out=${_out%/*} ;;
+            *) _out="$_out/$_c" ;;
+        esac
+    done
+    printf '%s
+' "${_out:-/}"
+}
+
+resolve_in_mount() {
+    _p="$1"
+    _guard=0
+    while [ "$_guard" -lt 40 ]; do
+        _guard=$((_guard + 1))
+        _cur=""
+        _rest="$_p"
+        _changed=0
+        while [ -n "$_rest" ]; do
+            _comp=${_rest%%/*}
+            if [ "$_comp" = "$_rest" ]; then _rest=""; else _rest=${_rest#*/}; fi
+            [ -z "$_comp" ] && continue
+            _next="$_cur/$_comp"
+            _tgt=$(readlink "/mnt/invfs$_next" 2>/dev/null || true)
+            if [ -n "$_tgt" ]; then
+                case "$_tgt" in
+                    /*) _cur="$_tgt" ;;
+                    *)  _cur="$_cur/$_tgt" ;;
+                esac
+                _cur=$(normalize_path "$_cur")
+                if [ -n "$_rest" ]; then _p="$_cur/$_rest"; else _p="$_cur"; fi
+                echo "[init] link $_next -> $_tgt" >&2
+                _changed=1
+                break
+            fi
+            _cur="$_next"
+        done
+        if [ "$_changed" = 0 ]; then
+            normalize_path "$_cur"
+            return 0
+        fi
+    done
+    return 1
+}
+
 HAVE_INIT=0
 if [ -x "/mnt/invfs$INIT" ]; then
     HAVE_INIT=1
 else
-    # Walk the link chain BY HAND, one `readlink` at a time, re-prefixing the
-    # mount root at every hop. `readlink` only reads the stored target -- it
-    # never resolves -- so this answers the question the kernel would answer
-    # after chroot, without depending on chroot working, on /bin/sh being
-    # executable through the mount, or on the offline tools (which refuse while
-    # the volume is mounted).
-    #
-    # This is the third attempt at the same test, and the first two failed the
-    # same way: `-x` and `-e` resolve in the INITRAMFS's root, where NixOS's
-    # absolute targets (/nix/store/...) do not exist. Measured 2026-11-25:
-    #   /init -> /nix/var/nix/profiles/system/init   (itself a link into /nix/store)
-    #   "-x: NO", and "inside the volume that target is absent" -- both wrong
-    #   statements about a volume holding 40296 files.
-    _cur="$INIT"
-    _hops=0
-    while [ "$_hops" -lt 8 ]; do
-        if [ -x "/mnt/invfs$_cur" ]; then
-            HAVE_INIT=1
-            break
-        fi
-        _prev="$_cur"
-        _t=$(readlink "/mnt/invfs$_cur" 2>/dev/null || true)
-        [ -n "$_t" ] || break
-        case "$_t" in
-            /*) _cur="$_t" ;;
-            *)  _cur="$(dirname "$_cur")/$_t" ;;
-        esac
-        _hops=$((_hops + 1))
-        echo "[init] hop$_hops $_prev -> $_cur"
-    done
+    _final=$(resolve_in_mount "$INIT" || true)
+    if [ -n "$_final" ] && [ -x "/mnt/invfs$_final" ]; then
+        HAVE_INIT=1
+        echo "[init] $INIT resolves inside the volume to $_final"
+    fi
 fi
 if [ "$HAVE_INIT" != 1 ]; then
     echo "The volume mounted, but $INIT is not executable there (checked /mnt/invfs$INIT)."
