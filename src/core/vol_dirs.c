@@ -380,6 +380,36 @@ static int list_cb(void *ctx_, const char *nm, size_t nlen, uint64_t child)
     return 0;
 }
 
+/* List a directory GIVEN ITS INODE. This is the same scan vol_path_list_dir
+ * performs after it has resolved the path, and it exists because a walk already
+ * holds the inode: walk_dir gets `ents[i].ino` from the parent's listing one
+ * step earlier, so resolving the child's path from the root and back down was
+ * work whose answer it already had.
+ *
+ * Measured before this split (2026-11-25): a 40 000-file namespace took 47.8 s
+ * of build_file_table's walk on a nixos root, and invf-verify on an equivalent
+ * local tree issued 576 471 pread64 calls for ~21 651 files -- 27 reads per
+ * file, which is what resolving the same directories over and over costs. The
+ * per-ENTRY version of this redundancy was removed earlier (see the comment in
+ * walk_dir); this is the per-DIRECTORY half. */
+int vol_ino_list_dir(invfs_volume *v, uint64_t pino,
+                        invfs_dirent *ents, int max)
+{
+    list_ctx c;
+    int rc;
+
+    if (!v || !ents || max <= 0)
+        return 0;
+    c.v = v;
+    c.ents = ents;
+    c.max = max;
+    c.n = 0;
+    rc = vol_dirent_scan(v, pino, list_cb, &c);
+    if (rc != 0 && rc != 1)
+        return -EIO;
+    return c.n;
+}
+
 int vol_path_list_dir(invfs_volume *v, const char *dir,
                          invfs_dirent *ents, int max)
 {
@@ -1157,7 +1187,7 @@ int vol_ensure_path(invfs_volume *v, const char *name)
  * the walk could not be completed (a listing or a row read failed, or the
  * depth cap was hit). In strict mode a row read that fails is that last
  * case; out of it, the same read is a `continue`. */
-static int walk_dir(invfs_volume *v, const char *dir,
+static int walk_dir(invfs_volume *v, const char *dir, uint64_t dir_ino,
                        vol_walk_cb cb, void *ctx, int depth, int strict)
 {
     invfs_dirent *ents;
@@ -1175,7 +1205,7 @@ static int walk_dir(invfs_volume *v, const char *dir,
     if (!ents)
         return -1;
     for (;;) {
-        n = vol_path_list_dir(v, dir, ents, cap);
+        n = vol_ino_list_dir(v, dir_ino, ents, cap);
         if (n < 0) { free(ents); return -1; }
         if (n < cap)
             break;
@@ -1254,7 +1284,7 @@ static int walk_dir(invfs_volume *v, const char *dir,
             return 1;
         }
         if (in.type == INVFS_ITYP_DIR) {
-            int sub_rc = walk_dir(v, path, cb, ctx, depth + 1, strict);
+            int sub_rc = walk_dir(v, path, ino, cb, ctx, depth + 1, strict);
             if (sub_rc != 0) {
                 free(ents);
                 return sub_rc;
@@ -1269,7 +1299,7 @@ int vol_walk(invfs_volume *v, vol_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return walk_dir(v, "", cb, ctx, 0, 0);
+    return walk_dir(v, "", INVFS_ROOT_INO, cb, ctx, 0, 0);
 }
 
 /* The same walk, with every unreadable row reported instead of stepped over.
@@ -1279,14 +1309,23 @@ int vol_walk_strict(invfs_volume *v, vol_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return walk_dir(v, "", cb, ctx, 0, 1);
+    return walk_dir(v, "", INVFS_ROOT_INO, cb, ctx, 0, 1);
 }
 
 int vol_walk_strict_dir(invfs_volume *v, const char *dir, vol_walk_cb cb, void *ctx)
 {
     if (!v)
         return -1;
-    return walk_dir(v, dir ? dir : "", cb, ctx, 0, 1);
+    {
+        const char *d = dir ? dir : "";
+        uint64_t dino = INVFS_ROOT_INO;
+        if (skip_slash(d)[0]) {
+            int lrc = vol_path_lookup(v, d, &dino);
+            if (lrc <= 0)
+                return -1;
+        }
+        return walk_dir(v, d, dino, cb, ctx, 0, 1);
+    }
 }
 
 

@@ -60,6 +60,14 @@ CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pt
 ifeq ($(TSAN),1)
 CFLAGS  += -fsanitize=thread -fno-omit-frame-pointer -g -O1
 endif
+# gprof build: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof`, then
+# `bin-prof/invf-verify ...` writes gmon.out and `gprof bin-prof/invf-verify
+# gmon.out` says where the time went. This exists because "the walk is slow"
+# is not an answer: attributing 47 s of mount to a function needs a profile,
+# not a bigger budget (2026-11-25).
+ifeq ($(PROF),1)
+CFLAGS  += -pg -g -O2 -fno-omit-frame-pointer
+endif
 LDLIBS  := -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
 STOCK_ZLIB_SRC := $(wildcard $(SRC)/zlib/*.c)
 STOCK_ZLIB_O := $(patsubst $(SRC)/zlib/%.c,$(OBJ)/zlib_stock_%.o,$(STOCK_ZLIB_SRC))

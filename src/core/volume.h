@@ -462,6 +462,11 @@ int vol_path_lookup(invfs_volume *v, const char *name, uint64_t *ino_out);
  * link inspectors keep vol_path_lookup's lstat behavior. */
 int vol_path_resolve(invfs_volume *v, const char *name, uint64_t *ino_out);
 int vol_path_is_dir(invfs_volume *v, const char *name);
+/* List a directory by its inode: what a walk should use, since a walk already
+ * holds the inode from the parent listing. vol_path_list_dir below resolves the
+ * path from the root first -- correct, and needlessly expensive inside a walk. */
+int vol_ino_list_dir(invfs_volume *v, uint64_t pino,
+                     invfs_dirent *ents, int max);
 int vol_path_list_dir(invfs_volume *v, const char *dir,
                          invfs_dirent *ents, int max);
 int vol_path_stat(invfs_volume *v, const char *name, uint64_t *id_out,

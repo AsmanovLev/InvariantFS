@@ -1078,3 +1078,82 @@ boundary, which is worse than today's over-reserve (`fresh` too high -> a false
 `-2`). A correct fix has to say, in one place, that `touched[]` answers only for
 `cur_child` and that every segment of another child counts as fresh unless it is
 below `filled`. That is a WP with its own leg, not a drive-by patch.
+
+## The mount's namespace walk costs 24 syscalls per file (2026-11-25)
+
+**Measured, not estimated.** `INVFS_PERF_TRACE` (now on by default in every
+boot path) prints the split on an installed nixos root of 40 296 files:
+
+```
+vol_open(/dev/vda2): total=0.032s (sb=0.012s, mbuf=0.001s, delta=0.000s, pba_ref=0.014s)
+mount fold done in 0.000s
+build_file_table: total=47.868s (walk=47.820s, qsort=0.047s, 40296 files)
+```
+
+So the fold is nothing (0.000 s -- it is not the bottleneck and moving it to
+unmount would have changed nothing), the sort is 47 ms, and **the walk is 47.8 s,
+1.2 ms per file**. That is what turns a 120 s initramfs budget into a repair shell
+(gentoo, run 45583323109) and, more importantly, what a guest's udev is waiting
+for while it looks frozen.
+
+Reproduced locally without FUSE or a guest (40 000 files imported into a 0.35 GB
+volume, `invf-verify --deep`) and profiled rather than guessed:
+
+| | before | after threading the dir inode |
+|---|---|---|
+| wall | 71 s | 64 s |
+| pread64 | 576 471 | 570 981 |
+| futex | 324 822 | 318 132 |
+
+gprof on that run: **CPU is 0.29 s of a 64 s wall.** The time is syscalls, and
+531 633 `vmux_pread` calls for 21 651 files (24.6 per file) break down as:
+
+| caller | preads | share |
+|---|---|---|
+| `dl_staged_free` | 276 028 | 52% |
+| `mbuf_read_ptr` | 108 549 | 20% |
+| `mbuf_root_read` (via `base_root`, 36 384 calls) | 73 461 | 14% |
+| `mbuf_read` | 37 292 | 7% |
+| `seg_read_once` | 36 085 | 7% |
+
+`base_root()` re-reads and re-validates both RT30 root slots on **every** call
+(2 preads) plus the root page itself -- 36 384 times for 21 651 files. That is a
+designed-in per-operation cost with no cache in front of it.
+
+### Candidates, in the order they should be tried
+
+1. **Cache the validated root (RT30 slots + root page) in the volume, invalidated
+   on publication.** ~14% of reads, one page instead of three per operation, and
+   the invalidation point is the same place a fold/commit publishes a new root --
+   it has to be exactly right, which is why it is not a drive-by patch.
+2. **Batch `dl_staged_free`.** Half of all reads, for freeing staged blocks: it
+   looks like one page read per freed block. Reading the page once per run of
+   adjacent frees is the obvious shape; needs the free-list format read carefully.
+3. **Walk-scoped page cache for metadata.** Only worth it after (1) and (2): the
+   working set is the whole tree, so a pass-scoped cache (built at walk start,
+   dropped at walk end, no invalidation problem because nothing survives the
+   pass) is the cheap version. Deliberately NOT the existing ARC: ARC serves data
+   blocks (`vol_read.c`, keyed by pba+TZ tag) with a 64 MB default budget, and
+   putting metadata in it would make data and metadata evict each other while
+   making the ARC stats unreadable.
+4. **Parallel walk** by subtree. Real speedup available, but `g_io_lock` and the
+   strict-walk guarantee ("every live inode or an explicit failure") make it a
+   design change, not a loop swap.
+5. **Lazy table** -- mount immediately, build the name table in the background,
+   and let lookups that miss fall back to `vol_find`. Removes the walk from the
+   boot's critical path entirely, at the cost of a second resolution path and of
+   the `-ENOENT` vs `-EIO` question the DEGRADED flag answers today (WP135).
+
+Rejected: persisting a name index on the volume. That surface was deleted on
+purpose and `tools/check-repo-hygiene.sh` carries a tripwire against its names
+coming back.
+
+Already done, and measured as *not* the lever: `walk_dir` used to resolve each
+directory's path from the root (`vol_path_lookup`) although it already held the
+inode from the parent's listing -- the per-entry version of that redundancy had
+been removed earlier (the `walk=103.8s` comment in `vol_dirs.c`). Threading the
+inode through (`vol_ino_list_dir`, `2026-11-25`) removes the work and is correct,
+but moved the profile by ~1%: the cost is reads per page, not path walks.
+
+Tooling left behind: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof` builds with
+`-pg` for `gprof`, because "the walk is slow" is not an answer.
