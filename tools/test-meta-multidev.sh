@@ -132,7 +132,7 @@ echo "remount: hello.txt + dir/sub/deep present"
 mnt_down
 
 echo "== leg 5: fsck clean; mirror still byte-identical =="
-FSCK=$($B/invf-fsck "$D0" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$D0" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "$FSCK" | grep -q "format:       v[0-9]" || { echo "$FSCK"; fail "fsck not v0"; }
 cmp <(head -c "$META_SPAN" "$D0") <(head -c "$META_SPAN" "$D1") \

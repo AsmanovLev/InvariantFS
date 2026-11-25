@@ -184,7 +184,7 @@ done
 echo "offline: invf-cat bit-exact for all files"
 
 # --- fsck + CLEAN --------------------------------------------------------
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "fsck: OK"
 

@@ -74,7 +74,7 @@ grep -q "VERIFY PASS" "$WORK/verify.log" \
     || { cat "$WORK/verify.log"; fail "remount verify did not report PASS"; }
 cat "$WORK/verify.log"
 
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 
 # after all round-trips the superblock must still read CLEAN

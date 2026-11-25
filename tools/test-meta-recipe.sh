@@ -196,7 +196,7 @@ cp "$WORK/img.bak" "$IMG"
 cmp "$SRC/seg1plus" "$WORK/restored.out" || fail "restored image not bit-exact"
 echo "restore: clean image reads bit-exact"
 
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "fsck: OK"
 

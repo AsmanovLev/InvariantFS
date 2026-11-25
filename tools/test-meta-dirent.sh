@@ -159,7 +159,7 @@ echo "remount: post-remount create has a fresh inode"
 mnt_down
 
 # --- offline sanity: fsck accepts the base tree -------------------------
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 echo "fsck: OK"
 

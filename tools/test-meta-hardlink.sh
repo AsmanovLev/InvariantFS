@@ -188,7 +188,7 @@ echo "  rename overwrite: victim link count dropped, other name intact"
 mnt_down
 
 # --- offline sanity: fsck clean, and the last unlink freed the inode -----
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 # WP118: this volume has hardlinks in it by construction (that is the whole
 # point of the suite), so it is also the POSITIVE CONTROL for the nlink /

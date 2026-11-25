@@ -102,7 +102,7 @@ echo "$CFSCK" | grep -q "^OK$" || { echo "$CFSCK"; fail "crash-leg fsck not OK";
 echo "crash: publish/reset window replayed idempotently, fsck OK"
 
 echo "== leg 4: fsck + CLEAN state =="
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 
 # after the fold + remount the superblock must still read CLEAN

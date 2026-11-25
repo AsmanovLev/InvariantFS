@@ -115,7 +115,7 @@ echo "tree: 3 inodes created, 43 deleted, survivors intact"
 
 # --- offline reopen + fsck sanity, then a final remount -------------------
 get_ok "$IMG" 42 "mode=0600 uid=1001 gid=1002 nlink=1 size=1234"
-FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck exited nonzero"; }
+FSCK=$($B/invf-fsck "$IMG" 2>&1) || { echo "${FSCK:-<fsck printed NOTHING -- no verdict, no reason>}"; fail "fsck exited nonzero"; }
 echo "$FSCK" | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not OK"; }
 mnt_up
 mnt_down
