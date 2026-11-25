@@ -265,9 +265,9 @@ out:
 }
 C
 CORE_O="$(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt")"
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/rngread" "$WORK/rngread.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/rngread" "$WORK/rngread.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 
 echo "== mkfs + import =="
@@ -473,7 +473,7 @@ int main(int argc, char **argv)
     return rc;
 }
 C
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 "$WORK/cbrm" "$IMG" multi.splt nest.splt
 if $B/invf-ls "$IMG" | grep -q "splt!"; then

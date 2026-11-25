@@ -591,7 +591,7 @@ int main(int argc, char **argv)
 C
 CORE_O="$(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt")"
 for t in classof rngread cbrm; do
-    gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/$t" "$WORK/$t.c" \
+    "${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/$t" "$WORK/$t.c" \
         $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 done
 

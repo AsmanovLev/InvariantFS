@@ -386,6 +386,12 @@ jobs:
           # halt_on_error=0 collects every report instead of dying on the first;
           # the process still exits nonzero if anything was reported.
           export TSAN_OPTIONS="halt_on_error=0:second_deadlock_stack=1:history_size=4"
+          # Several suites compile their own helper against build/core_objs.txt
+          # (test-dynzone's dzpick is one). In this job those objects are
+          # instrumented, so the suite's own gcc invocation needs the runtime too
+          # or the link ends in "undefined reference to __tsan_read4" --
+          # measured 2026-11-25. Suites honour INVFS_TEST_CFLAGS for exactly this.
+          export INVFS_TEST_CFLAGS="-fsanitize=thread"
           FAIL=0
           for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback test-writepath test-dynzone; do
             log="/tmp/tsan-$s.log"

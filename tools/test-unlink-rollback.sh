@@ -117,7 +117,7 @@ RB_EOF
 # vol_plugin_inproc/pack_sig/ed25519 and broke the link. Same shape as
 # tools/test-containerpack.sh.
 CORE_O="$(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt")"
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/unlinkrb" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/unlinkrb" \
     "$WORK/unlinkrb.c" \
     $CORE_O \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl

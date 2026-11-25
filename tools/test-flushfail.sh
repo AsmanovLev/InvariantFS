@@ -619,7 +619,7 @@ int main(int argc, char **argv)
 }
 EOF
 
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/ff_harness" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/ff_harness" \
     "$WORK/ff_harness.c" $OBJS -Wl,-l:libzstd.so.1 -lz -lpthread \
     || fail "harness build"
 H=$WORK/ff_harness

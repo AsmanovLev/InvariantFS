@@ -397,6 +397,7 @@ int main(int argc, char **argv)
     char img[512];
     int err = 0, i, n;
     int stop_pos = -1, ndisc_stop = 0, saw_complete_stop = 0, reach_stop = 0;
+    int stopped_empty = 0;
     int row_pos  = -1, ndisc_row  = 0, saw_complete_row  = 0, reach_row = 0;
     int ctrl_msg = 0;
 
@@ -455,15 +456,27 @@ int main(int argc, char **argv)
             if (stop_pos < 0) { stop_pos = i; reach_stop = total; }
             ndisc_stop++;
         }
+        if (rc != 0 && total == 0) stopped_empty = 1;
     }
     ok(saw_complete_stop,
        "position search (stop): some position ran past the last directory "
        "level and the walk reported COMPLETE, so the countdown really is "
        "per-level and the trace above is complete");
-    ok(stop_pos > 0,
-       "position search (stop): %d discriminating position(s); the walk "
-       "STOPPED having reached >=1 and <%d of the siblings -- that is the "
-       "partial view under test", ndisc_stop, NC * NPARTS);
+    /* The fixture is ONE directory level holding all %d siblings, so "stopped
+     * having reached some but not all" cannot happen here by construction: the
+     * seam is consulted once per LEVEL, and stopping the only level delivers
+     * nothing. This leg used to require ndisc_stop > 0 and passed only while a
+     * second walker (the pba_ref warmup thread) was racing this one for the
+     * countdown -- that is, it passed for the wrong reason (2026-11-25). What it
+     * can prove honestly is the property that matters: an armed stop is HONOURED
+     * (rc != 0, 0 delivered) rather than silently reported as a complete view.
+     * The partial-view claim itself is the ROW leg below, which has eight
+     * discriminating positions on this same fixture. */
+    ok(stopped_empty,
+       "position search (stop): arming the only directory level stops the walk "
+       "with rc!=0 and 0/%d siblings delivered -- a stopped walk does not claim "
+       "a full view (a one-level fixture cannot produce a partial LEVEL stop; "
+       "the partial view is the row leg below)", NC * NPARTS);
 
     /* ---- POSITION SEARCH: the ROW seam (once per ENTRY of a level) ---- */
     info("position search, walk_dir_row (consulted once per ENTRY; the "

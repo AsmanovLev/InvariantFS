@@ -249,7 +249,7 @@ int main(int argc, char **argv)
 }
 C
 CORE_O="$(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt")"
-gcc -std=gnu11 -O2 -I"$REPO/src" -I"$REPO/src/core" -I"$REPO/src/codecs" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I"$REPO/src" -I"$REPO/src/core" -I"$REPO/src/codecs" \
     -I"$REPO/src/recipes" -I"$REPO/src/vendor7z" -o "$WORK/classof" \
     "$WORK/classof.c" $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 for k in $KINDS; do
@@ -320,7 +320,7 @@ int main(int argc, char **argv)
     return rc;
 }
 C
-gcc -std=gnu11 -O2 -I"$REPO/src" -I"$REPO/src/core" -I"$REPO/src/codecs" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I"$REPO/src" -I"$REPO/src/core" -I"$REPO/src/codecs" \
     -I"$REPO/src/recipes" -I"$REPO/src/vendor7z" -o "$WORK/cbrm" "$WORK/cbrm.c" \
     $CORE_O -Wl,-l:libzstd.so.1 -lz -lpthread
 names=""; for k in $KINDS; do names="$names $k.iso"; done

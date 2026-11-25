@@ -289,7 +289,7 @@ int main(int argc, char **argv)
 }
 EOF
 
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/dd_harness" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/dd_harness" \
     "$WORK/dd_harness.c" $OBJS -Wl,--wrap=vol_free_blocks -Wl,--wrap=vol_free_recipe_blocks -Wl,-l:libzstd.so.1 -lz -lpthread \
     || fail "harness build"
 H=$WORK/dd_harness

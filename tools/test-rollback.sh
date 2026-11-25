@@ -118,7 +118,7 @@ int main(int argc, char **argv)
     return 2;
 }
 RBPICK_EOF
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rbpick" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rbpick" \
     "$WORK/tools/rbpick.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
@@ -239,7 +239,7 @@ int main(int argc, char **argv)
     return 0;
 }
 RBGEN_EOF
-gcc -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS -DINVFS_EMBED_FLACX \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS -DINVFS_EMBED_FLACX \
     -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rbgen" \
     "$WORK/tools/rbgen.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
@@ -250,7 +250,7 @@ echo "== build the SPT0 contract probe (engine API: capture/restore/drop) =="
 # Legs [D]/[G]/[C] are properties of src/core/vol_spt0.c, not of the CLI
 # wiring, so they are driven through the API. Same -D set as rbgen.
 cp "$REPO/tools/test-rollback-probe.c" "$WORK/tools/rbprobe.c"
-gcc -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS -DINVFS_EMBED_FLACX \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -DMINIZ_NO_ZLIB_APIS -DINVFS_EMBED_FLACX \
     -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/tools/rbprobe" \
     "$WORK/tools/rbprobe.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \

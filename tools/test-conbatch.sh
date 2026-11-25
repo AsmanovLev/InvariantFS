@@ -181,7 +181,7 @@ int main(int argc, char **argv)
     return 0;
 }
 C
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 
@@ -255,7 +255,7 @@ int main(int argc, char **argv)
     return rc;
 }
 C
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/cbrm" "$WORK/cbrm.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 "$WORK/cbrm" "$IMG" bins.tar

@@ -118,7 +118,7 @@ int main(int argc, char **argv)
     return 0;
 }
 C
-gcc -std=gnu11 -O2 -I$SRC -I$SRC/core -I$SRC/codecs -I$SRC/recipes -I$SRC/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$SRC -I$SRC/core -I$SRC/codecs -I$SRC/recipes -I$SRC/vendor7z -o "$WORK/classof" "$WORK/classof.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread
 

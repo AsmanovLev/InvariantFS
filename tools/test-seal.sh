@@ -98,7 +98,7 @@ int main(int argc, char **argv)
     return rc ? 1 : 0;
 }
 SEALRM_EOF
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealrm" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealrm" \
     "$WORK/tools/sealrm.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
@@ -298,7 +298,7 @@ int main(int argc, char **argv)
     return 0;
 }
 RESEAL_EOF
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/reseal" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/reseal" \
     "$WORK/tools/reseal.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
@@ -602,7 +602,7 @@ int main(int argc, char **argv)
     return 0;
 }
 SEALFLIP_EOF
-gcc -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealflip" \
+"${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -o "$WORK/tools/sealflip" \
     "$WORK/tools/sealflip.c" \
     $(sed "s|^|$REPO/|" "$REPO/build/core_objs.txt") \
     -Wl,-l:libzstd.so.1 -lz -lpthread -ldl
