@@ -672,15 +672,17 @@ jobs:
     # Boot verification is skipped BY NAME for this distro: the installed root
     # freezes mid-boot on InvFS (arch in systemd right after journald starts,
     # void in dracut before switch_root, alpine on the first write from a
-    # logged-in shell). INCIDENTS.md ("an installed root hangs mid-boot on
-    # InvFS") holds the evidence and what it rules out -- no hung_task dump, no
-    # soft lockup, tty echo alive -- i.e. a lost wakeup, parked until there is a
-    # KVM host to reproduce on. The install itself is verified above by
-    # INVFS-ISO-SETUP: PASS, and the setup prints "SKIP boot verification (...)"
-    # so the log names it; INVFS_ISO_BOOT_VERIFY=auto turns it back on. gentoo
-    # and nixos still verify their boots.
+    # BOOT VERIFICATION IS ON. It was skipped by name here while the root of
+    # this distro appeared to freeze mid-boot; the cause turned out to be the
+    # mount cost, not a lost wakeup: the pba_ref warmup thread walked the whole
+    # namespace at the same time as build_file_table, and on an installed root
+    # that was 47.8 s of the initramfs budget (10.3 s once the thread is deferred,
+    # run 45625987117). With the mount budget a knob and the walk no longer
+    # racing, there is no reason to skip -- and a skip that outlives its cause is
+    # how a green badge stops meaning anything. If it freezes again the log will
+    # say so by name; INVFS_ISO_BOOT_VERIFY=skip is the manual escape.
     env:
-      INVFS_ISO_BOOT_VERIFY: skip
+      INVFS_ISO_BOOT_VERIFY: auto
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
@@ -767,15 +769,17 @@ jobs:
     # Boot verification is skipped BY NAME for this distro: the installed root
     # freezes mid-boot on InvFS (arch in systemd right after journald starts,
     # void in dracut before switch_root, alpine on the first write from a
-    # logged-in shell). INCIDENTS.md ("an installed root hangs mid-boot on
-    # InvFS") holds the evidence and what it rules out -- no hung_task dump, no
-    # soft lockup, tty echo alive -- i.e. a lost wakeup, parked until there is a
-    # KVM host to reproduce on. The install itself is verified above by
-    # INVFS-ISO-SETUP: PASS, and the setup prints "SKIP boot verification (...)"
-    # so the log names it; INVFS_ISO_BOOT_VERIFY=auto turns it back on. gentoo
-    # and nixos still verify their boots.
+    # BOOT VERIFICATION IS ON. It was skipped by name here while the root of
+    # this distro appeared to freeze mid-boot; the cause turned out to be the
+    # mount cost, not a lost wakeup: the pba_ref warmup thread walked the whole
+    # namespace at the same time as build_file_table, and on an installed root
+    # that was 47.8 s of the initramfs budget (10.3 s once the thread is deferred,
+    # run 45625987117). With the mount budget a knob and the walk no longer
+    # racing, there is no reason to skip -- and a skip that outlives its cause is
+    # how a green badge stops meaning anything. If it freezes again the log will
+    # say so by name; INVFS_ISO_BOOT_VERIFY=skip is the manual escape.
     env:
-      INVFS_ISO_BOOT_VERIFY: skip
+      INVFS_ISO_BOOT_VERIFY: auto
     steps:
       # fetch-depth 0 so TAGS are present (same VERSION reason as above).
       - uses: actions/checkout@v7
@@ -867,15 +871,17 @@ jobs:
     # Boot verification is skipped BY NAME for this distro: the installed root
     # freezes mid-boot on InvFS (arch in systemd right after journald starts,
     # void in dracut before switch_root, alpine on the first write from a
-    # logged-in shell). INCIDENTS.md ("an installed root hangs mid-boot on
-    # InvFS") holds the evidence and what it rules out -- no hung_task dump, no
-    # soft lockup, tty echo alive -- i.e. a lost wakeup, parked until there is a
-    # KVM host to reproduce on. The install itself is verified above by
-    # INVFS-ISO-SETUP: PASS, and the setup prints "SKIP boot verification (...)"
-    # so the log names it; INVFS_ISO_BOOT_VERIFY=auto turns it back on. gentoo
-    # and nixos still verify their boots.
+    # BOOT VERIFICATION IS ON. It was skipped by name here while the root of
+    # this distro appeared to freeze mid-boot; the cause turned out to be the
+    # mount cost, not a lost wakeup: the pba_ref warmup thread walked the whole
+    # namespace at the same time as build_file_table, and on an installed root
+    # that was 47.8 s of the initramfs budget (10.3 s once the thread is deferred,
+    # run 45625987117). With the mount budget a knob and the walk no longer
+    # racing, there is no reason to skip -- and a skip that outlives its cause is
+    # how a green badge stops meaning anything. If it freezes again the log will
+    # say so by name; INVFS_ISO_BOOT_VERIFY=skip is the manual escape.
     env:
-      INVFS_ISO_BOOT_VERIFY: skip
+      INVFS_ISO_BOOT_VERIFY: auto
     steps:
       - uses: actions/checkout@v7
         with:
