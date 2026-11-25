@@ -46,6 +46,35 @@ bootprobe_send() {
     "$1" "awk '\$2==\"/\"{printf \"INVFSROOT%s\\n\", \$3}' /proc/mounts"
 }
 
+# Send the probe and wait for the token, RE-SENDING while the guest is busy.
+#
+# The one-shot form failed exactly where it mattered: on nixos the installed
+# systemd was still starting when the probe was typed, the shell answered 31 s
+# later, the 30 s window had closed, and the verdict was "root is not
+# InvariantFS" -- while the very next serial line said INVFSROOTfuse (run
+# 45667191942: FAIL at 19:03:09.565, token at .552). A guest that takes 90 s to
+# boot is not a guest with the wrong root, so the ask repeats.
+bootprobe_ask() {
+    _ba_log=$1
+    _ba_send=$2
+    _ba_tmo=${3:-300}
+    _ba_round=0
+    while [ $((_ba_round * 15)) -lt "$_ba_tmo" ]; do
+        bootprobe_send "$_ba_send"
+        _ba_i=0
+        while [ "$_ba_i" -lt 15 ]; do
+            if grep -qE '^INVFSROOT' "$_ba_log" 2>/dev/null; then
+                bootprobe_assert "$_ba_log"
+                return $?
+            fi
+            sleep 1
+            _ba_i=$((_ba_i + 1))
+        done
+        _ba_round=$((_ba_round + 1))
+    done
+    return 2
+}
+
 # Poll for the token, so a slow guest is not mistaken for a wrong root.
 bootprobe_wait() {
     _bp_log=$1

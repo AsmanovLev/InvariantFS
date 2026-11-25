@@ -152,12 +152,11 @@ note "verifying FUSE root mount..."
 # both satisfy -- measured green on a guest that printed "no InvariantFS volume
 # found on any block device".
 . "$(dirname "$0")/bootprobe.sh"
-bootprobe_send serial_send
-serial_send "echo 'INVFS_TRIGGER_ROOT_CHECK_DONE'"
-serial_wait_match "INVFS_TRIGGER_ROOT_CHECK_DONE" 30 || fail "root check timed out"
-
-bootprobe_wait "$SER" 30 || true
-bootprobe_assert "$SER" && BOOT_RC=0 || BOOT_RC=$?
+# Ask, and KEEP asking: on this distro the installed systemd is often still
+# starting when the probe is typed, and the answer arrives 30-60 s later. The
+# one-shot window turned that into "root is not InvariantFS" while the next serial
+# line said INVFSROOTfuse (run 45667191942).
+bootprobe_ask "$SER" serial_send 300 && BOOT_RC=0 || BOOT_RC=$?
 case $BOOT_RC in
 0) note "root confirmed on InvariantFS (${BOOTPROBE_SEEN})" ;;
 1) fail "the guest reported its root did not come up (no InvariantFS volume found) -- this is NOT a boot" ;;
