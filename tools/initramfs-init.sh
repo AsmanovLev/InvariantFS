@@ -515,8 +515,10 @@ resolve_in_mount() {
 }
 
 HAVE_INIT=0
+_final=""
 if [ -x "/mnt/invfs$INIT" ]; then
     HAVE_INIT=1
+    _final="$INIT"
 else
     _final=$(resolve_in_mount "$INIT" || true)
     if [ -n "$_final" ] && [ -x "/mnt/invfs$_final" ]; then
@@ -525,21 +527,21 @@ else
     fi
 fi
 if [ "$HAVE_INIT" != 1 ]; then
-    echo "The volume mounted, but $INIT is not executable there (checked /mnt/invfs$INIT)."
-    _target=$(readlink "/mnt/invfs$INIT" 2>/dev/null || true)
-    if [ -n "$_target" ]; then
-        echo "It is a symlink to '$_target'; inside the volume that target is"
-        if [ -e "/mnt/invfs$_target" ]; then
-            echo "present but not executable -- wrong mode, or it is a directory."
+    # Say what the VOLUME says about the end of the chain, not what the initramfs's
+    # root says about the first link. The earlier form printed
+    # "inside the volume that target is absent" for a root that was complete,
+    # because it resolved the next link in the same wrong root (2026-11-25).
+    echo "The volume mounted, but $INIT does not lead to an executable init."
+    if [ -n "$_final" ]; then
+        echo "[init] the chain resolves to '$_final'; the volume reports:"
+        if [ -e "/mnt/invfs$_final" ]; then
+            ls -ld "/mnt/invfs$_final" 2>&1 | sed 's/^/  /'
+            echo "  (present, so this is a mode problem, not a missing file)"
         else
-            echo "absent, so the link dangles inside the volume too."
+            echo "  <no such entry: the volume really does not contain it>"
         fi
-    elif [ -e "/mnt/invfs$INIT" ]; then
-        echo "It exists but is not executable -- wrong permissions, or it is a"
-        echo "directory."
     else
-        echo "This volume has no root filesystem in it: it may be a data-only"
-        echo "volume, a half-restored one, or not the volume you meant."
+        echo "[init] '$INIT' could not be resolved inside the volume at all."
     fi
     echo "[init] INIT was '$INIT' (chroot target /mnt/invfs$INIT)"
     echo "Staying in the repair shell instead of handing off to a rootfs."

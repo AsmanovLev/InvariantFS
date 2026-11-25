@@ -198,7 +198,7 @@ echo "== the file survived the abandoned pass, byte for byte =="
 cmp "$REF/t.bin" "$WORK/t.out" || fail "t.bin is not byte-identical after the abandoned sweep"
 
 echo "== fsck clean, and no unclaimed growth =="
-"$B/invf-fsck" "$IMG" | tail -1 | grep -q "^OK$" || fail "fsck not clean"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean (last line is not OK)"; }
 UNC_AFTER=$(unclaimed_mib "$IMG")
 echo "  unclaimed after the sweep: ${UNC_AFTER:-0} MiB (was ${UNC_BEFORE:-0})"
 awk -v a="${UNC_AFTER:-0}" -v b="${UNC_BEFORE:-0}" 'BEGIN{exit !(a<=b)}' ||

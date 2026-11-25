@@ -182,7 +182,7 @@ echo "== the file survived the abandoned pass, byte for byte =="
 cmp "$REF/v.bin" "$WORK/v.out" || fail "v.bin is not byte-identical after the abandoned sweep"
 
 echo "== fsck clean, verify deep 0 corrupt =="
-"$B/invf-fsck" "$IMG" 2>/dev/null | tail -1 | grep -q "^OK$" || fail "fsck not clean"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean (last line is not OK)"; }
 "$B/invf-verify" "$IMG" --deep 2>&1 | grep -q "0 corrupt" ||
     fail "invf-verify --deep did not report 0 corrupt"
 
@@ -194,7 +194,7 @@ set -e
 [ "$RC" -eq 0 ] || { cat "$WORK/resweep.log"; fail "recovery sweep rc=$RC (want 0)"; }
 "$B/invf-cat" "$IMG" v.bin > "$WORK/v.out2" 2>/dev/null || fail "invf-cat v.bin after resweep"
 cmp "$REF/v.bin" "$WORK/v.out2" || fail "v.bin is not byte-identical after the recovery sweep"
-"$B/invf-fsck" "$IMG" 2>/dev/null | tail -1 | grep -q "^OK$" || fail "fsck not clean after resweep"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean after resweep: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean after resweep (last line is not OK)"; }
 
 echo
 echo "PUT FAILURE ROLLBACK: PASS (free $FREE_BEFORE -> $FREE_AFTER blocks, $RB)"

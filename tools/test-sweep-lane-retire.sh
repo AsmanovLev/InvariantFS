@@ -160,7 +160,7 @@ done
 echo "  all $(ls "$REF" | wc -l) files bit-exact"
 
 echo "== fsck clean after sweep #1 =="
-"$B/invf-fsck" "$IMG" | tail -1 | grep -q "^OK$" || fail "fsck not clean"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean (last line is not OK)"; }
 UNC1=$(unclaimed_mib "$IMG")
 echo "  unclaimed: ${UNC1:-0} MiB (was ${UNC0:-0})"
 
@@ -179,7 +179,7 @@ echo "  free after sweep #2: $FREE2 blocks (was $FREE1; discharge $GAIN2)"
     fail "sweep #2 lost $DROP blocks it did not give back (free $FREE1 -> $FREE2)"
 [ "$GAIN2" -ge 100 ] ||
     fail "sweep #2 discharged only $GAIN2 blocks (free $FREE1 -> $FREE2); the one-generation window did not come back"
-"$B/invf-fsck" "$IMG" | tail -1 | grep -q "^OK$" || fail "fsck not clean after sweep #2"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean after sweep #2: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean after sweep #2 (last line is not OK)"; }
 UNC2=$(unclaimed_mib "$IMG")
 echo "  unclaimed: ${UNC2:-0} MiB (was ${UNC1:-0} after sweep #1, ${UNC0:-0} before any sweep)"
 
@@ -194,7 +194,7 @@ DROP3=$((FREE2 - FREE3))
 echo "  free after sweep #3: $FREE3 blocks (was $FREE2; delta $DROP3)"
 [ "$DROP3" -le 64 ] ||
     fail "sweep #3 lost $DROP3 blocks (free $FREE2 -> $FREE3)"
-"$B/invf-fsck" "$IMG" | tail -1 | grep -q "^OK$" || fail "fsck not clean after sweep #3"
+FSCK=$("$B/invf-fsck" "$IMG" 2>&1) || { echo "$FSCK"; fail "fsck not clean after sweep #3: fsck exited nonzero (output above)"; }; echo "$FSCK" | tail -1 | grep -q "^OK$" || { echo "$FSCK"; fail "fsck not clean after sweep #3 (last line is not OK)"; }
 UNC3=$(unclaimed_mib "$IMG")
 echo "  unclaimed: ${UNC3:-0} MiB (was ${UNC2:-0})"
 awk -v a="${UNC3:-0}" -v b="${UNC2:-0}" 'BEGIN{exit !(a<=b)}' ||

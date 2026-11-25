@@ -29,8 +29,10 @@ finish() {
 }
 trap 'done_rc=$?; finish' EXIT
 
-# Watchdog: heartbeat + memory + active processes to console
-( while true; do
+# Watchdog: heartbeat + memory + active processes to console, plus a stall dump
+# (see the bottom of this loop: it fires once if nothing changes for 5 minutes).
+( prev_act=""; same=0; dumped=0
+  while true; do
     mem=$(free -m | awk '/^Mem/{print $3"/"$2"MB"}')
     load=$(cut -d' ' -f1 /proc/loadavg)
     act=""
@@ -58,6 +60,38 @@ trap 'done_rc=$?; finish' EXIT
         fi
     done
     echo "iso-watch: mem=$mem load=$load act=$act"
+    # Stall dump. The host-side timeout can type at the console but cannot see
+    # inside once the guest drops to a login prompt -- measured 2026-11-25, run
+    # 45563213732: at 140 min the console was `archiso login:`, the harness typed
+    # its diagnostics there, getty echoed them and ran nothing. So the evidence has
+    # to be taken by something already inside the guest: if the set of active
+    # processes is IDENTICAL for ten samples (5 min), dump the process table, every
+    # thread of the InvariantFS daemon with its state and wchan, its kernel stack,
+    # and dmesg.
+    if [ "$act" = "$prev_act" ]; then
+        same=$((same + 1))
+    else
+        same=0
+        prev_act="$act"
+    fi
+    if [ "$same" -ge 10 ] && [ "$dumped" = 0 ]; then
+        dumped=1
+        echo "iso-watch: === STALL: the active set has not changed for 5 min ==="
+        ps -eo pid,ppid,stat,wchan:22,comm 2>/dev/null | head -30 | sed 's/^/iso-dump| /'
+        for p in $(pgrep -x invf-fuse 2>/dev/null); do
+            tcount=$(ls "/proc/$p/task" 2>/dev/null | wc -l)
+            echo "iso-dump| invf-fuse pid=$p threads=$tcount"
+            for t in "/proc/$p"/task/*; do
+                [ -r "$t/stat" ] || continue
+                tst=$(sed 's/.*) //' "$t/stat" 2>/dev/null | cut -d' ' -f1)
+                twc=$(cat "$t/wchan" 2>/dev/null || echo '?')
+                echo "iso-dump|   tid=${t##*/} state=$tst wchan=$twc"
+            done
+            tail -6 "/proc/$p/stack" 2>/dev/null | sed 's/^/iso-dump|   stack /' || true
+        done
+        dmesg 2>/dev/null | tail -12 | sed 's/^/iso-dump| dmesg /' || true
+        echo "iso-watch: === end of stall dump (taken once) ==="
+    fi
     sleep 30
   done ) &
 

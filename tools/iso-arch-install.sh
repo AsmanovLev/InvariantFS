@@ -164,6 +164,16 @@ guest_diag() {
     printf '
 ' >&9 2>/dev/null || true
     sleep 2
+    # If the console is sitting at a login prompt, getty eats whatever we type:
+    # measured 2026-11-25 (run 45563213732), where the whole diagnostic line came
+    # back echoed by `archiso login:` and nothing ran. Log in first -- archiso's
+    # root has no password.
+    if tail -5 "$SER" 2>/dev/null | grep -q 'login:'; then
+        note "console is at a login prompt; logging in as root before asking"
+        printf 'root
+' >&9 2>/dev/null || true
+        sleep 4
+    fi
     printf 'echo DIAG-ALIVE; cat /proc/loadavg; ps -ef 2>/dev/null | head -15; echo DIAG-END
 ' >&9 2>/dev/null || true
     _i=0
