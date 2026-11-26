@@ -3727,7 +3727,7 @@ root mount is still enumerating cannot start udev, and udev coldplug timeouts lo
 exactly like a frozen system. The next step is to make the table build lazy or
 incremental, or to announce the mount before it and let lookups block on demand.
 
-## OPEN (2026-11-25) — nixos: the whole Nix store lands 444 on the volume, so the installed system can never start
+## CLOSED (2026-11-26) — nixos: the whole Nix store lands 444 on the volume, so the installed system can never start
 
   **Date:** Nov 25, 2026
   **Severity:** High (the one distro still red; the volume it installs is unbootable
@@ -3790,3 +3790,30 @@ this entry stays OPEN with that distinction written down.
 
 Either way the boot failure is a consequence, not the cause: a store whose
 executables are 444 cannot boot regardless of what the initramfs does.
+
+  **CLOSED 2026-11-26 — it was our bug, and the fix is one line of intent.**
+  Reproduced locally in twenty seconds (`/dev/fuse` works on the dev box, which
+  was itself a wrong assumption for a day) with `nix-store --add` of a 0755 file:
+  ext4 keeps 555, this mount produced 444. The daemon's own SETATTR trace named
+  the mechanism:
+
+```
+create      mode=0644
+chmod-in    mode=0755     <- nix's fchmod on the open handle
+getattr     mode=0755     <- correct
+getattr     mode=0644     <- REVERTED before the file was even closed
+chmod-in    mode=0444     <- nix computes its read-only pass from this answer
+```
+
+  `close()` re-stamped the metadata block from `c->meta`, captured when the
+  session began, so it wrote the create-time mode back over a chmod that happened
+  during the open. The stamp's own comment says it exists to refresh MTIME and
+  that "mode/owner/xattrs survive"; they did not. Fixed by re-reading the row
+  before stamping and keeping every field except mtime (`c890ccb`).
+
+  Confirmed in run 45775183157: `installed store init : 555`, `modes agree
+  (installer 555, volume 555)`, `nix-store --add ... on the volume: 555`, and the
+  harness workaround that had been restoring the bits by hand "fixed" 68 files it
+  could only be wrong about (shared objects are ELF too) -- so it is deleted. A
+  heuristic that outlives its cause stops being a workaround and starts editing
+  the data.

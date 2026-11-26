@@ -551,23 +551,18 @@ fi
 # touched -- a data file that stays 0444 stays 0444. This is a harness workaround
 # to make the installed system testable, not a fix for the installer; INCIDENTS.md
 # records the open question, and the numbers below are what keeps it honest.
-say "mode fixup: 0444 store files that are ELF or '#!' get their exec bits back"
-mfs=/tmp/modefix.stats
-: > "$mfs" 2>/dev/null
-# Finding and classifying must not spawn a process per file: the first version ran
-# `head`+`od` on each of them and took 56 MINUTES on the runner (2026-11-25,
-# 17:59:42 -> 18:56:09), which is absurd for a workaround and pushed the job to 80
-# minutes. grep reads the same magic bytes in one batched pass per pattern.
-find /mnt/nix/store -type f -perm 444 -print0 2>/dev/null > /tmp/modefix.list
-: > /tmp/modefix.hit
-for pat in '^ELF' '^#!'; do
-    xargs -0 -r -n 400 grep -a -l -m1 -e "$pat" < /tmp/modefix.list 2>/dev/null || true
-done | sort -u > /tmp/modefix.hit
-while IFS= read -r f; do
-    if chmod 0555 "$f" 2>/dev/null; then echo f >> "$mfs"; else echo e >> "$mfs"; fi
-done < /tmp/modefix.hit
-say "  candidates $(wc -l < /tmp/modefix.list 2>/dev/null || echo 0), fixed $(grep -c f "$mfs" 2>/dev/null || echo 0), chmod failed $(grep -c e "$mfs" 2>/dev/null || echo 0)"
-say "  /mnt/init is now $(stat -Lc '%a' /mnt/init 2>/dev/null || echo MISSING) (want 555)"
+# ---- the store's modes are the engine's business now ------------------------
+# The workaround that restored +x by content (ELF or "#!") is GONE, and the
+# reason is the run that made it obsolete: after the close-time stamp stopped
+# undoing a chmod (c890ccb), every store executable arrived 0555 on its own --
+# `installed store init : 555`, `modes agree (installer 555, volume 555)`,
+# `nix-store --add` of a 0755 file landing 555 -- and the workaround was still
+# "fixing" 68 files, which by then could only be things nix deliberately stores
+# non-executable: shared objects are ELF too. A heuristic that outlives its cause
+# stops being a workaround and starts editing the data.
+#
+# The probes above stay: they cost seconds, they print what the volume says, and
+# they are what would catch a regression in the same place.
 
 # Run invf-boot-setup to generate standalone EFI GRUB and grub.cfg on ESP
 say "running invf-boot-setup on /mnt/boot (ESP)..."
