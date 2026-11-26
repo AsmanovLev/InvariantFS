@@ -1289,6 +1289,39 @@ What follows, in order of cost:
 3. re-check ADR-012's premise against a mixed corpus before spending anything
    larger, because its conclusion is right for the corpus it measured.
 
+### The same question for SMALL files, where the reference cost is the whole story
+
+`tools/dedupe-probe.c` skips files under 64 KiB, so this was never measured. On D:
+(122 776 files, `tools/small-file-dupes.py`):
+
+| size class | files | bytes | duplicated | dup % |
+|---|---|---|---|---|
+| 0..4 KiB | 91 686 | 89.0 MiB | 29.9 MiB | **33.6%** |
+| 4..16 KiB | 21 005 | 162.2 MiB | 50.4 MiB | 31.1% |
+| 16..64 KiB | 10 085 | 310.2 MiB | 70.4 MiB | 22.7% |
+| total | | 561.4 MiB | 150.7 MiB | **26.9%** |
+
+The biggest groups are `index.js`, `README.md`, `index.d.ts`, `LICENSE`, `*.go` --
+package-cache duplication, which is what a store actually sees.
+
+Three different axes live in this and only one of them is CDC:
+
+* **discovery** -- finding a match when the content has shifted: CDC (measured above);
+* **representation** -- encoding a SMALL match cheaply: one recipe entry is 28 B, so
+  at 1 KiB granularity a reference costs 2.7% of what it saves (0.7% at 4 KiB, 0.04%
+  at 64 KiB), and a candidate index entry roughly doubles the small end. Clustering
+  members into one object -- what containerpack's `!partN` already does, and what the
+  sweep's batch lane already does for small files -- is what makes the small end
+  affordable: one reference per cluster plus a couple of bytes of offset per member;
+* **ownership** -- what happens when the donor changes: pinned recipe version vs
+  pinned extents vs copy-on-write, with the WINDOW_SRC hazard as the concrete
+  argument (a verbatim window reads the donor's CURRENT bytes, so an in-place
+  rewrite of the same length silently changes what the recipient returns).
+
+A match frees disk only when all three are answered; CDC answers one of them, which
+is why "switch dedupe to CDC" is not the change -- and why a 1 KiB-deep cluster
+design has to answer ownership before it is worth a prototype.
+
 Reproduction: `gcc -O2 -o /tmp/dedupe-probe tools/dedupe-probe.c -lzstd`, then
 `/tmp/dedupe-probe <dir> <max_files> <max_bytes>` (`@listfile` accepted; walking
 177k files through 9p costs more than the measurement itself).
