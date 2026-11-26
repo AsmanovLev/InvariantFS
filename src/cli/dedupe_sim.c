@@ -46,6 +46,17 @@
  * extent returns only when its last owner lets go) plus what the sweep's repack
  * costs. Every ratio quoted before this was logical.
  *
+ * Policy W, on the SAME volume AFTER the existing sweep ran (so it is the gain
+ * beyond today s dedupe, which is the baseline that matters):
+ *
+ *   used 13697 blocks -> 11158, B = 18.54% of used blocks returned
+ *   E = 9 of 546 extents fully freed (1.6%), 11 extents still shared
+ *
+ * and that pair is the warning Astra gave, measured: 18.5% of the blocks came back
+ * from 1.6% of the extents, because the sweep had repacked small files into large
+ * batch extents. B and E cannot stand in for each other -- a high E of tiny
+ * one-block extents can be worth less than a low E of megabytes.
+ *
  * Not modelled yet, deliberately: extent splitting and remainder re-packing (the
  * `S` column), donor pinning (V vs P), and CDC candidate ranges. Those need the
  * candidate set and the packer's rounding rules; this tool establishes the
@@ -59,7 +70,7 @@
 #include <stdint.h>
 
 /* ---- tiny open-addressing map: pba -> owners, and hash -> first inode ---- */
-typedef struct { uint64_t pba; uint32_t owners; uint64_t blocks; } own_ent;
+typedef struct { uint64_t pba; uint32_t owners; uint64_t blocks; uint8_t touched; } own_ent;
 typedef struct { own_ent *v; size_t cap, n; } own_map;
 
 static void own_init(own_map *m, size_t cap)
@@ -113,6 +124,9 @@ typedef struct {
     uint64_t ino, size, log_bytes, blocks;
     uint64_t hash;             /* decoded-stream hash (0 = not computed) */
     uint64_t own_blocks;       /* blocks of extents this inode owns alone */
+    uint64_t *pbas;            /* the extents this inode names ... */
+    uint32_t *blks;            /* ... and how many blocks each holds */
+    size_t npba;
 } finfo;
 
 static uint64_t fnv1a(const uint8_t *p, size_t n)
@@ -167,6 +181,12 @@ static int walk_cb(void *ctx_, const char *path, uint64_t ino, uint32_t type,
             }
             if (seg_extent_checked(c->v, ents[i].pba, &plen) != 0) continue;
             own_add(&c->own, ents[i].pba, plen);
+            f.pbas = realloc(f.pbas, (f.npba + 1) * sizeof *f.pbas);
+            f.blks = realloc(f.blks, (f.npba + 1) * sizeof *f.blks);
+            if (!f.pbas || !f.blks) { fprintf(stderr, "oom\n"); exit(1); }
+            f.pbas[f.npba] = ents[i].pba;
+            f.blks[f.npba] = (uint32_t)plen;
+            f.npba++;
             f.blocks += plen;
             f.log_bytes += ents[i].length;
             c->entries++;
@@ -292,6 +312,68 @@ int main(int argc, char **argv)
         printf("    (freed blocks are a lower number: an extent comes back only when\n"
                "     its last owner stops naming it -- see the owner histogram below)\n");
     }
+    /* ---- policy `W`: every duplicate loses its own copy --------------------
+     * A whole-file duplicate is the only case with no partial coverage, so the V/P
+     * distinction collapses here: the loser's whole recipe is replaced by the
+     * donor's. What it would FREE is the real question, and an extent comes back
+     * only when its last owner lets go -- so model exactly that: drop the loser's
+     * reference from every extent it names and see which extents fall to zero. */
+    if (c.do_hash && c.n > 1) {
+        uint64_t *key = malloc(c.n * sizeof *key);
+        int *loser = calloc(c.n, sizeof *loser);
+        if (key && loser) {
+            uint64_t used_after = base_blocks, freed_blocks = 0;
+            uint64_t freed_ext = 0, stuck_ext = 0, stuck_blocks = 0;
+            uint64_t meta_saved = 0;
+            size_t a, b, e;
+
+            for (k = 0; k < c.n; k++)
+                key[k] = c.files[k].hash ? (c.files[k].hash ^ (c.files[k].size * 0x9E3779B97F4A7C15ull)) : 0;
+            for (a = 0; a < c.n; a++) {
+                if (loser[a] || !key[a]) continue;
+                for (b = a + 1; b < c.n; b++)
+                    if (!loser[b] && key[b] == key[a]) loser[b] = 1;
+            }
+            for (b = 0; b < c.n; b++) {
+                if (!loser[b]) continue;
+                for (e = 0; e < c.files[b].npba; e++) {
+                    own_ent *o = own_find(&c.own, c.files[b].pbas[e]);
+                    if (!o || !o->owners) continue;
+                    o->owners--;
+                    o->touched = 1;
+                    if (o->owners == 0) { freed_blocks += o->blocks; freed_ext++; }
+                }
+            }
+            /* a shared recipe blob becomes garbage once its last inode names another
+             * one; the inode row already stores recipe_addr, so pointing it at the
+             * donor's costs nothing */
+            for (b = 0; b < c.n; b++) if (loser[b]) meta_saved++;
+
+            /* an extent that keeps at least one owner after the policy did NOT
+             * come back; count it once, not once per loser that named it */
+            for (e = 0; e < c.own.cap; e++)
+                if (c.own.v[e].pba && c.own.v[e].touched && c.own.v[e].owners > 0) {
+                    stuck_ext++;
+                    stuck_blocks += c.own.v[e].blocks;
+                }
+            used_after = base_blocks - freed_blocks;
+            printf("\n\n  policy W (whole-file dedupe: each duplicate points at its donor)\n");
+            printf("    used blocks before / after : %llu / %llu  (%.2f -> %.2f GiB)\n",
+                   (unsigned long long)base_blocks, (unsigned long long)used_after,
+                   base_blocks * 4096.0 / 1073741824.0, used_after * 4096.0 / 1073741824.0);
+            printf("    B  = (used0-usedW)/used0   : %.2f%%\n",
+                   base_blocks ? 100.0 * freed_blocks / base_blocks : 0.0);
+            printf("    E  = extents fully freed   : %llu of %zu (%.1f%%)\n",
+                   (unsigned long long)freed_ext, c.own.n,
+                   c.own.n ? 100.0 * freed_ext / c.own.n : 0.0);
+            printf("    extents still shared      : %llu (%llu blocks held by another owner)\n",
+                   (unsigned long long)stuck_ext, (unsigned long long)stuck_blocks);
+            printf("    recipe rows that stop naming their own recipe blob: %llu\n",
+                   (unsigned long long)meta_saved);
+            free(key); free(loser);
+        } else { free(key); free(loser); }
+    }
+
     {
         uint64_t hist[5] = {0, 0, 0, 0, 0};
         for (k = 0; k < c.own.cap; k++) {
