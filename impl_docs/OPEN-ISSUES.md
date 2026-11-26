@@ -1410,3 +1410,29 @@ immutable blob, not a mutable inode, so the `WINDOW_SRC` hazard does not apply.
 The order matters: step 2 is bounded, format-free and already worth ~18% of used
 blocks on the corpus available here; CDC and window sharing are a different, larger
 question whose physical value is still unmeasured.
+
+### The two gates, checked before writing any code (2026-11-26)
+
+**a. `pba_ref` counts owners PER REFERENCE -- recipe sharing is safe.** The builder
+walks the live namespace and, for every inode with `size > 0`, loads that inode's
+recipe and does `pba_ref_modify(pba, +1)` per entry (`volume.c`, the per-inode
+branch right after the recipe load). Two inode rows naming the same `recipe_addr`
+therefore add two references, the extent stays at owners=2, and it is only freed
+when the second row moves off. That is exactly the semantics a shared recipe needs,
+and it comes for free.
+
+**b. Recipe blobs are NEVER reclaimed -- a leak that predates this plan, and now
+recorded.** There is no delete path for the recipe tree: blobs are written
+content-addressed (`vol_recipe_store` computes BLAKE3 and searches the key first)
+and nothing removes one when the last inode row stops naming it. Every rewrite
+already orphans the previous blob today, at 32 bytes of address per row plus a page
+of blob. `fsck` builds FORWARD reachability of `0x04 || recipe_addr` (vol_fsck.c:
+the protected-key pass) but never reports the reverse -- unreachable blobs -- and
+nothing drops them.
+
+Consequences for the plan: it does not block recipe sharing (sharing *reduces* the
+number of distinct blobs, since the losers stop having their own), but it is its own
+defect and wants its own WP: walk the recipe tree, subtract the addresses named by
+live rows, and free the rest -- which also needs a decision about blobs referenced
+only by a savepoint or an in-flight session. Until then, treat volume metadata
+growth per rewrite as expected, not as a bug in whatever consumes it.
