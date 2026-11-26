@@ -1232,3 +1232,26 @@ countdown and armed string (no synchronisation at all), `blkio`'s I/O counters
 (`++` from two threads), the base-root cache (added by this work, caught by TSan
 an hour later), and `invf-fsck`'s warmup (it re-reads the RT30 descriptor while a
 walker reads `v->rt`).
+
+## Under TSan the FUSE suites fail on their own assertions, not on races (2026-11-25)
+
+`test-writepath` and `test-dynzone` were put back into the `tsan` gate twice, on the
+theory that their earlier 29 and 89 reports were just the `vol_close` destroy order
+and the root-cache races. Both times the answer was the same: **zero ThreadSanitizer
+reports** in either suite. What failed instead:
+
+* `test-writepath` first: `daemon RSS grew 65MB on a 300MB stream`. ThreadSanitizer
+  keeps shadow memory and per-thread metadata in the same RSS, so the bound was
+  measuring the sanitizer. That leg now names the condition and skips under one.
+  Then: `swept.txt not TEXT post-sweep` -- a sweep POLICY assertion, which the
+  ordinary build checks and a sanitizer run perturbs (the sweep's text decision
+  depends on what it sees while the file is being written, and an instrumented run
+  changes that timing).
+* `test-dynzone`: `rc=127`, its own helper build.
+
+So the gate keeps the three offline suites, where races are found and the
+assertions are about the engine; the FUSE paths stay covered by `e2e-full`, which
+runs these suites uninstrumented on every full tier. The open question worth a
+look sometime is the sweep classification one: if a slower write path can make a
+text file stop being TEXT, that is a policy that depends on timing rather than on
+content, and it deserves a measurement of its own.

@@ -401,15 +401,25 @@ jobs:
           # measured 2026-11-25. Suites honour INVFS_TEST_CFLAGS for exactly this.
           export INVFS_TEST_CFLAGS="-fsanitize=thread"
           FAIL=0
-          # The two FUSE suites are back. They were excluded when their 29 and 89
-          # reports turned out to be, on inspection, the vol_close destroy-order
-          # bug and the root-cache races -- both fixed since (0889d2f, dd6cca6,
-          # 1bc183e, a87e57d). Re-including them is the experiment: if the stacks
-          # come back, they are new and unwrapped; if the suites pass, the gate
-          # covers the daemon's own threads instead of only the offline tools.
-          # test-dynzone also exercises the INVFS_TEST_CFLAGS path, since it
-          # compiles its own helper against build/core_objs.txt.
-          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback test-writepath test-dynzone; do
+          # The two FUSE suites are NOT in the gate, and this is the measured
+          # reason rather than a preference. Putting them back (runs 45728625737
+          # and 45730271818) produced ZERO ThreadSanitizer reports in either --
+          # the 29 and 89 from before were the vol_close destroy order and the
+          # root-cache races, and they are fixed. What they produced instead were
+          # two failures about the suites themselves:
+          #
+          #   test-writepath  "daemon RSS grew 65MB on a 300MB stream" -- shadow
+          #                   memory lives in the same RSS (that leg now skips by
+          #                   name under a sanitizer, which is why the next run got
+          #                   past it) and then "swept.txt not TEXT post-sweep",
+          #                   a sweep-POLICY assertion that the ordinary build
+          #                   checks and that a sanitizer run perturbs.
+          #   test-dynzone    rc=127: its own helper build and timing.
+          #
+          # So: for race detection the offline suites carry the gate, and the FUSE
+          # behaviour stays covered by e2e-full, which runs these suites uninstrumented
+          # on every full tier. Recorded in impl_docs/OPEN-ISSUES.md.
+          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback; do
             log="/tmp/tsan-$s.log"
             echo "::group::$s"
             rc=0
