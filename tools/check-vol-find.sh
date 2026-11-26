@@ -62,10 +62,10 @@ src/cli/fuse_fs.c:3235:SKIP
 src/cli/fuse_fs.c:3456:SKIP
 src/cli/fuse_fs.c:3511:SKIP
 src/cli/fuse_fs.c:3778:SKIP
-src/cli/fuse_fs.c:3983:SKIP
-src/cli/fuse_fs.c:4070:SKIP
-src/cli/fuse_fs.c:4105:SKIP
-src/cli/fuse_fs.c:4142:SKIP
+src/cli/fuse_fs.c:3984:SKIP
+src/cli/fuse_fs.c:4071:SKIP
+src/cli/fuse_fs.c:4106:SKIP
+src/cli/fuse_fs.c:4143:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP

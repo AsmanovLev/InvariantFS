@@ -507,12 +507,6 @@ fi
 # volume:
 #   mode 444 -> nix's copy loses the bit, so our SETATTR is implicated after all
 #   mode 555 -> the copy is fine and only nixos-install's closure write drops it
-if [ -s /tmp/invfs-setattr.log ]; then
-    say "  setattr requests seen by the daemon so far: $(wc -l < /tmp/invfs-setattr.log)"
-    say "    chmod with an fd: $(grep -c 'chmod-in.*fi=1' /tmp/invfs-setattr.log 2>/dev/null || echo 0), paths that did not resolve: $(grep -c chmod-nopath /tmp/invfs-setattr.log 2>/dev/null || echo 0)"
-    say "    last 6:"
-    tail -6 /tmp/invfs-setattr.log | sed 's/^/      trace| /'
-fi
 say "  nix's own copy into the target store (--store /mnt):"
 printf '#!/bin/sh
 true
@@ -522,6 +516,21 @@ if [ -n "${_addp:-}" ]; then
     say "    source $(stat -c '%a' /tmp/exec-probe.sh) -> added '$_addp'; on the volume: $(stat -c '%a %n' "/mnt$_addp" 2>/dev/null || echo MISSING)"
 else
     say "    nix-store --add returned nothing"
+fi
+# The trace summary comes AFTER the copy, and it is a histogram of modes rather
+# than a count: "chmod arrived" is not the question, "did anything ever ask for
+# 0555" is. The per-file lines for the added path follow, so the exact op sequence
+# the copy used for one store file is visible without guessing which request it was.
+if [ -s /tmp/invfs-setattr.log ]; then
+    say "  setattr requests: $(wc -l < /tmp/invfs-setattr.log); with an fd: $(grep -c 'fi=1' /tmp/invfs-setattr.log 2>/dev/null || echo 0); unresolvable paths: $(grep -c chmod-nopath /tmp/invfs-setattr.log 2>/dev/null || echo 0)"
+    say "    modes the daemon was ASKED to chmod to:"
+    grep 'chmod-in' /tmp/invfs-setattr.log 2>/dev/null | grep -o 'mode=[0-7]*' | sort | uniq -c | sort -rn | head -6 | sed 's/^/      /'
+    say "    modes passed to create:"
+    grep '^create' /tmp/invfs-setattr.log 2>/dev/null | grep -o 'mode=[0-7]*' | sort | uniq -c | sort -rn | head -6 | sed 's/^/      /'
+    if [ -n "${_addp:-}" ]; then
+        say "    every request naming $(basename "$_addp"):"
+        grep -F "$(basename "$_addp")" /tmp/invfs-setattr.log 2>/dev/null | tail -8 | sed 's/^/      trace| /'
+    fi
 fi
 
 # ---- mode fixup -----------------------------------------------------------

@@ -3796,6 +3796,7 @@ static int invf_link(const char *from, const char *dest)
 
 static int invf_mknod(const char *path, mode_t mode, dev_t rdev)
 {
+    setattr_trace("mknod", path, (unsigned)mode, 0, 0);
     uint8_t typ;
     uint64_t nid;
     struct fuse_context *ctx = fuse_get_context();
