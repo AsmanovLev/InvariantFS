@@ -92,6 +92,7 @@ are gitignored and produced by `make docs`.
 | `impl_docs/AUDIT-PROGRAM.md` | Architectural Defect Audit Program (2026-11-19) |
 | `impl_docs/AUDIT.md` | InvariantFS — Documentation ↔ Source Consistency Audit |
 | `impl_docs/BENCH-MERKLE-DEDUP.md` | Merkle dedupe: multi-level matching versus 64-KiB-only (measurement) |
+| `impl_docs/BENCH-ARCHIVER-OPENZL.md` | Archiver lanes vs OpenZL vs PPMd: size and decode cost — measured |
 | `impl_docs/BENCH-VS-SQUASHFS.md` | An honest comparison with squashfs (space) — measured |
 | `impl_docs/BUG-RECLAIM-UNCLAIMED.md` | BUG: `unclaimed` Blocks Are Not Returned (reclaim does not free garbage) |
 | `impl_docs/CODE-MAP.md` | CODE-MAP: code-based map of the codebase (blind run) |
