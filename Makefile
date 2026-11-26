@@ -88,7 +88,7 @@ FUSE_DAEMON_LIBS := $(FUSE_LIBS)
 endif
 
 CORE    := volume vol_format vol_cpack vol_cpack_hostio helper_exec ivpack_loader tool_scratch vol_plugin_client vol_plugin_inproc pack_sig vol_png vol_seal vol_repair \
-           vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_textzone vol_cut \
+           vol_resize vol_fsck vol_crash vol_exer vol_dedupe vol_recshare vol_textzone vol_cut \
             vol_heat vol_sweep vol_migrate vol_read vol_write vol_records vol_ast \
             vol_dirs vol_tier vol_meta_merge vol_metabuf vol_btree vol_delta \
             vol_fold vol_reclaim vol_spt0 vol_anchor vol_walk \
@@ -1645,6 +1645,7 @@ test-packs: all
 e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-textzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dedupe.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-recshare.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-heat.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-seal.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh

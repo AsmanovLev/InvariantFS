@@ -1222,6 +1222,26 @@ int vol_sweep_dedupe_ex(invfs_volume *v, invfs_dedupe_stats *stats,
                         invfs_dedupe_progress_fn progress, void *progress_user);
 int vol_sweep_dedupe(invfs_volume *v);
 
+/* ---- whole-file recipe sharing (vol_recshare.c) ----
+ * Groups live inodes by the hash of their DECODED stream and points every
+ * duplicate at its donor's recipe blob. The count reported is BLOCKS whose last
+ * owner was that loser, and it is an upper bound: the share-aware drain may keep
+ * an extent another live recipe still names. See impl_docs/OPEN-ISSUES.md,
+ * "Objective: recipe sharing". */
+typedef struct {
+    uint64_t files_hashed;
+    uint64_t files_unreadable;
+    uint64_t duplicate_groups;
+    uint64_t files_shared;
+    uint64_t logical_bytes_shared;
+    uint64_t blocks_retired;
+} invfs_recshare_stats;
+
+int vol_sweep_recipe_share_ex(invfs_volume *v, invfs_recshare_stats *stats,
+                              invfs_dedupe_progress_fn progress,
+                              void *progress_user);
+int vol_sweep_recipe_share(invfs_volume *v);
+
 /* ---- WP19/WP27: heat counters + adaptive tiering ----
  * Heat lives in the record's INO2 ext as the "invfs.heat" xattr TLV
  * (invarifs.h): u16 LE read-heat (+1 per open-session touch of the inode

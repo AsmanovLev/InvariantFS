@@ -1582,6 +1582,7 @@ int main(int argc, char **argv)
     uint32_t *heal_gids = NULL;
     size_t heal_n = 0, heal_cap = 0;
     int reseal_full = 0;             /* WP404: --reseal-full escape hatch */
+    int recshare = 0;                /* --recipe-share: whole-file recipe sharing */
     int no_realize = 0, stopped = 0;
     int fast = 0;
     int migrate_on = 1;    /* WP601: migrate stage defaults on (skipped by --fast/--dry-run) */
@@ -1660,6 +1661,9 @@ int main(int argc, char **argv)
                 "                         drift / 1 on tool failure)\n"
                 "           [--stale-mode=auto|notify|off]\n"
                 "           [--heal [group ...]]\n"
+                "           [--recipe-share]  (whole-file recipe sharing:\n"
+                "                         duplicate inodes name one recipe;\n"
+                "                         reports BLOCKS retired, not logical)\n"
                 "           [--reseal-full]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
@@ -1716,6 +1720,9 @@ int main(int argc, char **argv)
                 "                         drift / 1 on tool failure)\n"
                 "           [--stale-mode=auto|notify|off]\n"
                 "           [--heal [group ...]]\n"
+                "           [--recipe-share]  (whole-file recipe sharing:\n"
+                "                         duplicate inodes name one recipe;\n"
+                "                         reports BLOCKS retired, not logical)\n"
                 "           [--reseal-full]\n"
                 "           [--redundant-blocks <f>]\n"
                 "           [--redundant-paranoic <f>[:rs-vm|rs-cauchy]]\n"
@@ -1824,6 +1831,11 @@ int main(int argc, char **argv)
         } else if (strcmp(a, "--unseal") == 0 ||
                    strcmp(a, "--free-redundant") == 0) {
             unseal = 1;
+        } else if (strcmp(a, "--recipe-share") == 0) {
+            /* Standalone leg: no sweep walk runs. Groups live inodes by the
+             * hash of their DECODED stream and points each duplicate at its
+             * donor's recipe blob. See impl_docs/OPEN-ISSUES.md. */
+            recshare = 1;
         } else if (strcmp(a, "--verify-seal") == 0) {
             /* WP401: standalone read-only scrub; no sweep walk runs. */
             verify_seal = 1;
@@ -2223,6 +2235,47 @@ int main(int argc, char **argv)
 
     /* WP20 --unseal: free all parity blocks and remove the owners; no sweep
      * walk runs (there is nothing to recompress, only seal state to drop). */
+    if (recshare && (unseal || heal || verify_seal || dry)) {
+        fprintf(stderr, "--recipe-share is a standalone mode "
+                        "(no --unseal/--heal/--verify-seal/--dry-run)\n");
+        return 2;
+    }
+
+    if (recshare) {
+        invfs_recshare_stats rs;
+        int rrc;
+        memset(&rs, 0, sizeof rs);
+        rrc = vol_sweep_recipe_share_ex(vol, &rs, NULL, NULL);
+        if (rrc == 0 && rs.files_shared) {
+            /* Durability point: the row publishes above are staged, and the
+             * extents they stop naming retire at the next fence. */
+            if (vol_flush(vol) != 0) {
+                fprintf(stderr,
+                        "FATAL: the flush after --recipe-share failed -- the "
+                        "shares just published are NOT durable.\n");
+                vol_close(vol);
+                return 1;
+            }
+        }
+        if (rrc != 0) {
+            fprintf(stderr, "recshare failed\n");
+            vol_close(vol);
+            return 1;
+        }
+        printf("[recshare] %llu files hashed, %llu duplicate groups, "
+               "%llu shared (%llu KiB logical), %llu blocks retired (upper bound)\n",
+               (unsigned long long)rs.files_hashed,
+               (unsigned long long)rs.duplicate_groups,
+               (unsigned long long)rs.files_shared,
+               (unsigned long long)(rs.logical_bytes_shared >> 10),
+               (unsigned long long)rs.blocks_retired);
+        if (rs.files_unreadable)
+            printf("[recshare] %llu files were unreadable and skipped\n",
+                   (unsigned long long)rs.files_unreadable);
+        vol_close(vol);
+        return 0;
+    }
+
     if (unseal) {
         invfs_seal_report rep;
         if (vol_seal(vol, 1, &rep) != 0) {

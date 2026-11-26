@@ -1462,3 +1462,53 @@ The only new machinery is the grouping pass: per inode, hash the DECODED stream
 (chunked reads; `invf-dedupe_sim` already does this through `vol_read_range`) into a
 key of (size, BLAKE3), sort, and take the first live inode of each group as donor.
 Everything else is one loop over the losers.
+
+### `recipe-share` implemented, and the 18.54% figure withdrawn (2026-11-26)
+
+The leg exists: `src/core/vol_recshare.c`, `invf-sweep --recipe-share`, suite
+`tools/test-recshare.sh` (registered in the `e2e` target, so e2e-full picks it up
+from `make -n e2e`). It does what "the implementation map" said: hash the decoded
+stream per inode, group by `(size, BLAKE3)`, point each loser's `recipe_addr` at the
+donor's blob, `pba_ref_invalidate`, `vol_retire_pbas(loser, pbas, n, NULL, 0)`.
+
+**What it proves (synthetic fixture, unswept volume):** 8 files, 2 duplicate groups,
+3 shared, every file reads back byte-identical, `verify --deep` clean, `fsck` clean,
+second run idempotent (0 shared), and **free blocks 120461 -> 120594** against a
+reported upper bound of 134 -- the drain kept exactly one block, as documented.
+Leg 2 rewrites one loser in place with the same length: the rewritten file returns
+its own bytes and the donor and the sibling are untouched, which is the assertion a
+shared mutable-in-place recipe would fail.
+
+**What it does NOT do on a swept corpus, measured:** the repo-corpus volume (1270
+files, 398 duplicate files, already swept) yields
+
+    [recshare] 1270 files hashed, 384 duplicate groups, 398 shared, 0 blocks retired
+    free blocks 222098 -> 222066   (the 398 republished rows cost 32 metadata blocks)
+
+so **B = 0.00%**, and the leg is a small net LOSS there. Two causes, both real:
+
+1. Where the segment dedupe already ran, the loser's recipe is byte-identical to the
+   donor's, so both inodes name the SAME content-addressed blob and there is nothing
+   to publish (`recipe_addr` equal -> skip). The share was already done, one level
+   down.
+2. Where the loser's content is in a TEXT batch, the entry's block belongs to the
+   BATCH and every member names it; the inode never owned it, `pba_ref` never counted
+   it, and the engine never retires it from an inode (splitting a batch is the `S`
+   policy, which needs the packer's rounding rules).
+
+**The withdrawn number.** `invf-dedupe_sim`'s policy-W row charged the loser for
+TEXT-zone batch blocks, which the engine does not. With the sim corrected to skip
+those entries (and report them separately) the same volume gives `B = 0.00%`,
+`E = 0 of 523`, and used blocks 8651 (the earlier 13697 included batch blocks counted
+as inode-owned). **`18.54%` is withdrawn: it was a property of the model, not of the
+filesystem.** The engine and the sim now agree to the block, and the sim prints the
+TEXT-entry count so the two cannot silently diverge again.
+
+**What recipe sharing IS worth, on the evidence:** the full duplicate size on an
+UNSWEPT volume (fixture: 133 of 134 blocks), and as the representation for
+whole-file identity *before* batching -- which is where the remaining duplicates
+actually live (26.9% of small-file bytes, 70.4 of 150.7 MiB in 16..64 KiB). That is
+a change to how text is batched, not a change to the dedupe pass: two identical text
+files must be able to point at one batch member range, or the batch must not be the
+unit that owns a member's blocks. Sequencing the two questions is the next decision,
+and the leg above is what makes it measurable.

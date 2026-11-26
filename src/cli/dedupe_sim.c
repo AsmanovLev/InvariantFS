@@ -124,6 +124,7 @@ typedef struct {
     uint64_t ino, size, log_bytes, blocks;
     uint64_t hash;             /* decoded-stream hash (0 = not computed) */
     uint64_t own_blocks;       /* blocks of extents this inode owns alone */
+    uint32_t text_entries;     /* entries pointing into a TEXT batch */
     uint64_t *pbas;            /* the extents this inode names ... */
     uint32_t *blks;            /* ... and how many blocks each holds */
     size_t npba;
@@ -143,7 +144,7 @@ typedef struct {
     size_t n, cap;
     own_map own;
     int do_hash;
-    uint64_t log_bytes, entries, windows, ref_entries;
+    uint64_t log_bytes, entries, windows, ref_entries, text_entries;
 } sim_ctx;
 
 static int walk_cb(void *ctx_, const char *path, uint64_t ino, uint32_t type,
@@ -174,6 +175,20 @@ static int walk_cb(void *ctx_, const char *path, uint64_t ino, uint32_t type,
         for (i = 0; i < nents; i++) {
             uint64_t plen = 0;
             if (!ents[i].pba) continue;
+            /* TEXT-zone entries name a block of a BATCH, which the batch's
+             * owner holds on behalf of every member -- the inode does not own
+             * it and the engine never retires it from an inode's recipe
+             * (pba_ref skips the zone for exactly this reason). Counting it as
+             * the inode's own block is how the first W number came out at
+             * 18.54% while the implemented leg retired zero blocks on a swept
+             * corpus: the model was charging the loser for blocks it never
+             * held. Reported separately, never folded into the owner map. */
+            if (ents[i].zone == INVFS_ZONE_TEXT) {
+                c->text_entries++;
+                f.text_entries++;
+                f.log_bytes += ents[i].length;
+                continue;
+            }
             if (ents[i].algo == INVFS_ALGO_WINDOW_SRC) {
                 /* a window owns no blocks itself; it names another inode */
                 c->windows++;
@@ -298,6 +313,8 @@ int main(int argc, char **argv)
     printf("  logical bytes           : %.2f GiB\n", c.log_bytes / 1073741824.0);
     printf("  recipe entries          : %llu (windows skipped: %llu)\n",
            (unsigned long long)c.entries, (unsigned long long)c.windows);
+    printf("  TEXT-zone entries       : %llu (owned by their batch, never retired "
+           "from an inode)\n", (unsigned long long)c.text_entries);
     printf("  distinct physical PBAs  : %zu\n", c.own.n);
     printf("  used blocks (4 KiB)     : %llu  = %.2f GiB\n",
            (unsigned long long)base_blocks, base_blocks * 4096.0 / 1073741824.0);
