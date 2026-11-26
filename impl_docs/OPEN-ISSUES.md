@@ -1255,3 +1255,40 @@ runs these suites uninstrumented on every full tier. The open question worth a
 look sometime is the sweep classification one: if a slower write path can make a
 text file stop being TEXT, that is a policy that depends on timing rather than on
 content, and it deserves a measurement of its own.
+
+## CDC vs fixed 4 KiB, measured on mixed user data rather than on VM images (2026-11-25)
+
+ADR-012 rejected content-defined chunking on a measurement: *"fixed 4 KiB is
+equivalent to CDC at 8 KiB (inter-image 4.60 %), and our shift sensitivity is a
+known constant"*. That measurement was taken on **VM images**. This one was taken on
+1.49 GiB sampled from a 607 GB NTFS data volume -- application directories, package
+artefacts, binaries, sources -- with `tools/dedupe-probe.c` (added with this entry,
+so the claim can be re-run):
+
+| model | unique | duplicate | saved |
+|---|---|---|---|
+| whole-file | 1.48 GiB | 0.01 GiB | 0.75% |
+| fixed-4K | 1.37 GiB | 0.13 GiB | 8.57% |
+| **cdc-8K** | 1.32 GiB | 0.18 GiB | **11.80%** |
+
+Misalignment is not a theory there: inserting ONE byte at the front of a 33 MB DLL
+leaves **0 of 8100** fixed blocks matching and **3661 of 3663** CDC chunks.
+
+And yet: compressing the unique CDC chunks with zstd-3 saves 51.7%, so end to end
+dedupe + codec keeps 0.66 GiB of 1.49 with fixed-4K against 0.64 GiB with CDC. The
+38% dedupe advantage is **1.6 points** once a codec sees what dedupe missed --
+which is the honest size of the question, and the reason it is not a rewrite.
+
+What follows, in order of cost:
+
+1. keep 4 KiB Merkle leaves as the storage/identity unit (ADR-012 §2's
+   level-independence depends on them);
+2. if the target corpus is user data rather than VM images, take CDC boundaries as
+   a **candidate-search accelerant only** in `vol_dedupe`/`chunk_index` -- computed
+   on the fly, keyed index, 4 KiB pages unchanged;
+3. re-check ADR-012's premise against a mixed corpus before spending anything
+   larger, because its conclusion is right for the corpus it measured.
+
+Reproduction: `gcc -O2 -o /tmp/dedupe-probe tools/dedupe-probe.c -lzstd`, then
+`/tmp/dedupe-probe <dir> <max_files> <max_bytes>` (`@listfile` accepted; walking
+177k files through 9p costs more than the measurement itself).
