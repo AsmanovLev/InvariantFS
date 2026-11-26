@@ -1325,3 +1325,32 @@ design has to answer ownership before it is worth a prototype.
 Reproduction: `gcc -O2 -o /tmp/dedupe-probe tools/dedupe-probe.c -lzstd`, then
 `/tmp/dedupe-probe <dir> <max_files> <max_bytes>` (`@listfile` accepted; walking
 177k files through 9p costs more than the measurement itself).
+
+### The instrument exists now: `invf-dedupe-sim` measures freed BLOCKS, not ratios
+
+Every number in the dedupe discussion above is a logical ratio. A block comes back
+only when its last owner stops naming it, so the quantity that decides is `used` --
+the union of reachable physical blocks -- before and after a policy. `commands:
+src/cli/dedupe_sim.c` (built as `bin/invf-dedupe_sim`) does exactly that from real
+recipes: per inode it loads the recipe, gets each extent's real length in blocks
+(`seg_extent_checked`), hashes the decoded stream, and builds an owner map.
+
+First run, the repository imported as a corpus (2.2 GB source tree, 1270 files,
+0.12 GiB logical):
+
+| state | PBAs | blocks | owners |
+|---|---|---|---|
+| before the current sweep | 2872 | 21806 | 1:2872 |
+| after | 546 | 13697 | 1:532, 2:3, 4+:11 |
+
+398 files duplicated an earlier one, 53.2 MiB of logical duplicates; the sweep
+reported "merged 1148 segments, freed 8091 blocks (31.6 MiB)". So 53.2 MiB of
+identical bytes turned into 31.6 MiB returned -- and that gap, not the percentage,
+is the granularity question the four-column experiment (`0`/`V`/`P`/`S`) is meant
+to divide. Note also that the sweep repacks as it goes (`swept=11`), which is why
+entries (1799) outnumber extents (546).
+
+Still to add, in this order: the candidate set (whole-file first, then CDC ranges),
+the `V`/`P` columns (pin the donor's recipe versus pin only the extents the window
+covers), and `S` (split extents at match boundaries with re-packed remainders,
+which needs the packer's rounding rules to be honest).
