@@ -393,20 +393,15 @@ jobs:
           # measured 2026-11-25. Suites honour INVFS_TEST_CFLAGS for exactly this.
           export INVFS_TEST_CFLAGS="-fsanitize=thread"
           FAIL=0
-          # The FUSE suites are deliberately NOT here yet. Adding test-writepath
-          # on 2026-11-25 produced 29 reports in one run, all reaching
-          # base_root/vol_open_inner through the daemon's threads -- real findings
-          # that need triage, not a CI knob. They are recorded in
-          # impl_docs/OPEN-ISSUES.md ("TSan on the FUSE daemon") and this list
-          # grows as each one is understood and fixed. Shipping them green-by-
-          # exclusion would be the false-green shape this project keeps paying for.
-          # test-sweep-lane-retire was excluded for 89 reports and is back:
-          # every one of them was vol_close destroying rt_root_mu BEFORE the
-          # close work that still calls base_root (vol_retire_drain_all ->
-          # dl_retire_free_list -> pba_ref_ensure -> walk -> base_root). An
-          # ordering bug of mine, not a race -- ThreadSanitizer said "use of an
-          # invalid mutex" and pointed at the destroy in the caller stack.
-          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback; do
+          # The two FUSE suites are back. They were excluded when their 29 and 89
+          # reports turned out to be, on inspection, the vol_close destroy-order
+          # bug and the root-cache races -- both fixed since (0889d2f, dd6cca6,
+          # 1bc183e, a87e57d). Re-including them is the experiment: if the stacks
+          # come back, they are new and unwrapped; if the suites pass, the gate
+          # covers the daemon's own threads instead of only the offline tools.
+          # test-dynzone also exercises the INVFS_TEST_CFLAGS path, since it
+          # compiles its own helper against build/core_objs.txt.
+          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback test-writepath test-dynzone; do
             log="/tmp/tsan-$s.log"
             echo "::group::$s"
             rc=0
