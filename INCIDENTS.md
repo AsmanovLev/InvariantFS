@@ -3588,6 +3588,33 @@ this image (the initrd built by `nixos-generate` in the guest carries a module
 built against a different kernel, or the export set differs). The other five
 distros load it, so it is specific to the NixOS initramfs build in this harness.
 
+## 2026-11-26 — the local soak tier was a NO-OP: /dev/mapper/<name> was a regular file
+
+**Status:** fixed (harness), and it changes what every earlier local soak result
+meant. Without udev — WSL, containers, some CI images — `dmsetup create` makes the
+mapping but not the device node. `tools/test-flakey.sh` created the table, tried
+`chmod 666 /dev/mapper/invfs_flakey`, printed the failure and carried on; the engine
+then created a REGULAR FILE of that name and every "chaos" write went into it while
+`dm_set` reloaded a table nobody read.
+
+Measured: after a local leg5 run, `/dev/mapper/invfs_flakey` was a 4 294 967 296-byte
+regular file (`-rw-rw-rw-`), not `b 253:*`. That is why the same seed that failed in
+CI (3621091749 → `FAIL: present but unreadable: s34.bin`) passed locally: the soak was
+exercising a healthy page cache.
+
+Now: `dm_node_ensure` builds the node from `/sys/block/dm-*/dm/name` when udev did not,
+and the create site REFUSES TO RUN if `$DM` is not a block device, naming the reason.
+With that fix the same seed reproduces the failing class locally in about a minute:
+`fsck(): inode 102 (s24.bin): data segment 0 (pba 118139) no longer decodes` — the same
+shape as the CI capture (`inode 22 (s34.bin): data segment 4 (pba 22725)`), where the
+segment's frame no longer decodes under a sound recipe and the whole file serves EIO.
+
+Still to do: the durability defect itself. The captured volume (CI artifact
+`soak-flakey-artifacts`, 835 MB, `backing.img` + `oplog.txt`) shows the write that
+failed was a REWRITE of an existing file whose previous version then stopped decoding,
+so the question is whether a failed rewrite can free or reuse a pba the live recipe
+still names. That is the next investigation, and it now has a reproducible local case.
+
 ## OPEN (2026-11-24) — soak leg5: "present but unreadable" after a torn write, and the job that tolerates it
 
 **Status:** OPEN. Informational by design in CI, which is exactly why it needs

@@ -333,7 +333,21 @@ dev_create() {
     fi
     sudo -n dmsetup create "$DEV" --table "0 $SEC flakey ${LOOP:-$BACK} 0 3600 0" \
         || { echo "dmsetup create failed" >&2; exit 2; }
-    sudo -n chmod 666 "$DM"
+    dm_node_ensure "$DEV" || true
+    sudo -n chmod 666 "$DM" 2>/dev/null || true
+    # A MISSING NODE IS NOT A NO-OP. Without udev (WSL, containers, some CI
+    # images) `dmsetup create` makes the mapping but not /dev/mapper/<name>,
+    # and every later write goes to a REGULAR FILE of that name: the engine
+    # creates it, the soak gets a perfectly healthy "device", and dm_set
+    # reloads a table nobody reads. That is how this tier spent its local runs
+    # green while the same seeds failed in CI -- measured 2026-11-26, when
+    # /dev/mapper/invfs_flakey turned out to be a 4 GB regular file. Refuse.
+    [ -b "$DM" ] || {
+        echo "FATAL: $DM is not a block device -- dm-flakey is not in effect," \
+             "so this suite would test a plain file and report a green." \
+             "No udev, and dm_node_ensure could not build the node." >&2
+        exit 2
+    }
     info "backing: $BACK (${SIZE_GB}G sparse) on $LOOP, dm: $DM ($SEC sectors)"
 }
 
@@ -1315,6 +1329,24 @@ seal_resolve() { # <label>
     verify_or_reseal "$label" || fail "$label: verify/corrupt content after recovery"
     vol_files_exact "$FLK/orig4" "$label post-recovery" || fail "$label: files not bit-exact"
     info "seal state ($label): $SEAL_STATE"
+}
+
+# Create /dev/mapper/<name> when udev did not. dm-flakey is only real if the
+# node exists; see the block-device check at the create site.
+dm_node_ensure() {   # <dm name>
+    local name=$1 n dev maj min
+    [ -b "/dev/mapper/$name" ] && return 0
+    for n in /sys/block/dm-*; do
+        [ -d "$n" ] || continue
+        [ "$(cat "$n/dm/name" 2>/dev/null)" = "$name" ] || continue
+        dev=$(cat "$n/dev" 2>/dev/null) || continue
+        maj=${dev%%:*}
+        min=${dev##*:}
+        sudo -n mknod "/dev/mapper/$name" b "$maj" "$min" 2>/dev/null || return 1
+        sudo -n chmod 666 "/dev/mapper/$name" 2>/dev/null || true
+        return 0
+    done
+    return 1
 }
 
 leg5() {
