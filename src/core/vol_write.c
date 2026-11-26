@@ -529,6 +529,18 @@ static int wsession_write_seg_n(invfs_wsession *s, uint32_t j,
         uint64_t plen = 0;
         if (seg_extent_checked(v, prev_pba, &plen) == 0)
             vol_free_blocks(v, prev_pba, plen);
+        /* CORRUPT_DEBUG: the pair that matters is (freed, allocated). A free
+         * of a block the FINAL row still names can only be seen by reading
+         * both numbers here and the committed row afterwards -- which is the
+         * leg5 trace this line exists for. */
+        CD("SEG j=%u rel=%u new=%llu freed_prev=%llu touched=%d",
+           j, rel_j, (unsigned long long)pba,
+           (unsigned long long)prev_pba,
+           rel_j < s->touched_cap ? (int)s->touched[rel_j] : -1);
+    } else {
+        CD("SEG j=%u rel=%u new=%llu freed_prev=0 touched=%d",
+           j, rel_j, (unsigned long long)pba,
+           rel_j < s->touched_cap ? (int)s->touched[rel_j] : -1);
     }
 
     s->ents[rel_j].file_offset = (uint64_t)j * SEGMENT_SIZE;
@@ -1244,6 +1256,18 @@ int vol_write_commit(invfs_wsession *ws)
     CD("COMMIT name=%s old=%llu new=%llu size=%llu nsegs=%u", s->name,
        (unsigned long long)s->old_id, (unsigned long long)s->new_id,
        (unsigned long long)s->logical_size, s->n_ents);
+#ifdef INVFS_CORRUPT_DEBUG
+    /* every pba the row is about to publish: the other half of the trace.
+     * A block freed by a SEG line that appears here is the defect shape. */
+    {
+        uint32_t ci;
+        for (ci = 0; ci < s->n_ents && ci < 16; ci++)
+            CD("ROWPBA name=%s seg=%u pba=%llu len=%llu algo=%u touched=%d",
+               s->name, ci, (unsigned long long)s->ents[ci].pba,
+               (unsigned long long)s->ents[ci].length, s->ents[ci].algo,
+               ci < s->touched_cap ? (int)s->touched[ci] : -1);
+    }
+#endif
     /* WP85: the commit is the last chance to publish the retired
      * generation's segments as a live recipe. A refused session never gets
      * here -- the caller aborts it, which frees the segments it wrote. */

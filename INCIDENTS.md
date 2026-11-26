@@ -3640,6 +3640,27 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   the free through the same fence. The trace already carries ordering (t=...), so
   logging `vol_inode_delta_put` with the recipe's pbas and correlating with the
   free of 18796 answers it in one run.
+* **The trace now names the exact order (2026-11-26, seed 3663444781).** With
+  `SEG`/`ROWPBA` logging added to the write session:
+
+  ```
+  t=224009.588  ALLOC pba=18796 n=17          SEG j=3 rel=3 new=18796 touched=0
+  t=224009.613  COMMIT name=s12.bin ...
+                ROWPBA name=s12.bin seg=3 pba=18796 len=65536      <- row PUBLISHED
+  t=224009.758  FREE pba=18796 n=17 owners=0  <- freed 145 ms later, map says ZERO
+  t=224010.859  seal ALLOC pba=18796 n=1      <- re-used, frame overwritten
+  ```
+
+  So the row that names the block is published BEFORE the free, and at free time
+  the reference map counts **0** owners for it. The free is therefore not a
+  wrong decision made from a correct map; it is a correct decision made from an
+  INCOMPLETE map. The engine registers the new segments with
+  `pba_ref_modify(+1)` at commit, so the question is now narrow: between the
+  publish and the free, something rebuilt (or invalidated and rebuilt) the map
+  and the rebuild did not count that row — either the rebuild's walk did not see
+  the delta-published row, or the count was dropped by the invalidate path. The
+  next instrument is `pba_ref_ensure`/`pba_ref_invalidate`/`pba_ref_modify`
+  logging for the one pba: three lines answer it.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,
