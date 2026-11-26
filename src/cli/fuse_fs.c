@@ -2334,6 +2334,40 @@ static int invf_open(const char *path, struct fuse_file_info *fi)
     return 0;
 }
 
+/* SETATTR TRACE (2026-11-25): the nixos store lands with every file 0444 while the
+ * same write sequence replayed by hand gives 0555, and nix's OWN copy
+ * (`nix-store --store /mnt --add`) reproduces the 444 -- so what nix does
+ * differently is the question, and it is a question about the requests the kernel
+ * actually sends us. Enabled only by INVFS_TRACE_SETATTR, written to a fixed file
+ * (not stderr) because the mount helper decides where stderr goes.
+ *
+ * Cost: one static FILE* and a fputs per setattr, and only when the variable is
+ * set. Production never sets it. */
+static FILE *setattr_trace_fp(int *opened)
+{
+    static FILE *fp;
+    static int tried;
+    if (!getenv("INVFS_TRACE_SETATTR"))
+        return NULL;
+    if (!tried) {
+        tried = 1;
+        fp = fopen("/tmp/invfs-setattr.log", "a");
+        if (fp) setvbuf(fp, NULL, _IOLBF, 0);
+    }
+    if (opened) *opened = 1;
+    return fp;
+}
+
+static void setattr_trace(const char *what, const char *path, unsigned mode,
+                          int have_fi, int rc)
+{
+    FILE *fp = setattr_trace_fp(NULL);
+    if (!fp)
+        return;
+    fprintf(fp, "%s path=%s mode=%04o fi=%d rc=%d\n", what,
+            path ? path : "(null)", mode & 07777, have_fi, rc);
+}
+
 static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     int temp;
@@ -2383,6 +2417,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
             cmode = (mode_t)(mm & 0777);
         }
     }
+    setattr_trace("create", path, (unsigned)mode, fi != NULL, (int)cmode);
     /* create empty file immediately so getattr-after-create works */
     pthread_mutex_lock(&g_io_lock);
     if (vol_replace_file(g_vol, path + 1, NULL, 0) == 0) {
@@ -3506,9 +3541,15 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     invfs_meta_pub cur;
     struct acreds c;
     int rc = perm_check_traversal(path);
-    if (rc) return rc;
-    if ((rc = meta_for_path(path, ename, sizeof ename, &cur)) != 1)
+    setattr_trace("chmod-in", path, (unsigned)mode, fi != NULL, rc);
+    if (rc) { setattr_trace("chmod-out", path, (unsigned)mode, fi != NULL, rc); return rc; }
+    if ((rc = meta_for_path(path, ename, sizeof ename, &cur)) != 1) {
+        /* the branch the 444 hypothesis lives in: a chmod whose path no longer
+         * resolves (renamed away, or never a path at all) is a chmod that does
+         * nothing, and nix ignores the error. */
+        setattr_trace("chmod-nopath", path, (unsigned)mode, fi != NULL, rc);
         return rc < 0 ? -EIO : -ENOENT;
+    }
     /* ownership rule (notify_change enforces it at VFS level already;
      * kept here as the daemon is the sole authority on everything else) */
     acreds_get(&c);

@@ -155,6 +155,12 @@ mkfs.invfs "$P2" || exit 1
 
 say "mounting root on /mnt (allow_other,survive_term,exec,dev,suid)..."
 mkdir -p /mnt
+# INVFS_TRACE_SETATTR: the daemon logs every create/chmod it receives (path, mode,
+# whether an fd came with it, result) to /tmp/invfs-setattr.log. This is the one
+# remaining fact about the 0444 store -- nix's own copy reproduces it, the same
+# sequence replayed by hand does not, so the question is what requests nix sends.
+export INVFS_TRACE_SETATTR=1
+: > /tmp/invfs-setattr.log 2>/dev/null || true
 mount.invfs -o allow_other,survive_term,exec,dev,suid "$P2" /mnt || exit 1
 mount -o remount,exec,dev,suid /mnt 2>/dev/null || true
 mkdir -p /mnt/boot
@@ -501,6 +507,12 @@ fi
 # volume:
 #   mode 444 -> nix's copy loses the bit, so our SETATTR is implicated after all
 #   mode 555 -> the copy is fine and only nixos-install's closure write drops it
+if [ -s /tmp/invfs-setattr.log ]; then
+    say "  setattr requests seen by the daemon so far: $(wc -l < /tmp/invfs-setattr.log)"
+    say "    chmod with an fd: $(grep -c 'chmod-in.*fi=1' /tmp/invfs-setattr.log 2>/dev/null || echo 0), paths that did not resolve: $(grep -c chmod-nopath /tmp/invfs-setattr.log 2>/dev/null || echo 0)"
+    say "    last 6:"
+    tail -6 /tmp/invfs-setattr.log | sed 's/^/      trace| /'
+fi
 say "  nix's own copy into the target store (--store /mnt):"
 printf '#!/bin/sh
 true

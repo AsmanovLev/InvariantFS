@@ -57,15 +57,15 @@ src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, w
 src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
 src/cli/fuse_fs.c:1802:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
 src/cli/fuse_fs.c:2107:SKIP
-src/cli/fuse_fs.c:2446:SKIP
-src/cli/fuse_fs.c:3200:SKIP
-src/cli/fuse_fs.c:3421:SKIP
-src/cli/fuse_fs.c:3476:SKIP
-src/cli/fuse_fs.c:3737:SKIP
-src/cli/fuse_fs.c:3942:SKIP
-src/cli/fuse_fs.c:4029:SKIP
-src/cli/fuse_fs.c:4064:SKIP
-src/cli/fuse_fs.c:4101:SKIP
+src/cli/fuse_fs.c:2481:SKIP
+src/cli/fuse_fs.c:3235:SKIP
+src/cli/fuse_fs.c:3456:SKIP
+src/cli/fuse_fs.c:3511:SKIP
+src/cli/fuse_fs.c:3778:SKIP
+src/cli/fuse_fs.c:3983:SKIP
+src/cli/fuse_fs.c:4070:SKIP
+src/cli/fuse_fs.c:4105:SKIP
+src/cli/fuse_fs.c:4142:SKIP
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP
