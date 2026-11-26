@@ -3439,7 +3439,29 @@ in-soak proven-exhausted accept).
   (span vs touched-block bytes) and a drain-hold time assertion on a pending
   set of ≥100 inodes.
 
-## OPEN (2026-11-23) — an installed root hangs mid-boot on InvFS: void freezes in dracut before switch_root, arch freezes in systemd after udev coldplug, gentoo boots
+## CLOSED (2026-11-25) — an installed root hangs mid-boot on InvFS: void freezes in dracut before switch_root, arch freezes in systemd after udev coldplug, gentoo boots
+
+  **Closed by measurement, not by a skip.** The root cause was the MOUNT COST, not
+  a lost wakeup: `build_file_table` walks the whole namespace and the pba_ref
+  warmup thread walked the same namespace at the same time, on the same locks.
+  On an installed nixos root that was 47.868 s inside an initramfs budget of
+  120 s; with the thread deferred until after the table is published it is
+  10.299 s (run 45625987117). The 120 s budget also became a knob
+  (`INVFS_MOUNT_TIMEOUT`, default 300 s) with a heartbeat, so a slow mount reads
+  as slow on the console instead of silent.
+
+  Confirmed where it matters: run 45715617283 is 18/18 with every distribution
+  verifying its own boot and no skip left in the matrix — alpine, arch and void
+  had theirs REMOVED once the cause was measured, and they pass:
+
+    alpine   INVFSROOT token from the booted guest (probe)
+    arch     INVFSROOT token from the booted guest (probe)
+    void     runit stage 2 + autologin + sshd/dhcp over SSH
+    gentoo   OpenRC "Entering runlevel: 3"
+    nixos    systemd, getty, root shell, INVFSROOTfuse
+
+  The original report follows, because what it ruled out is still what ruled it
+  in:
 
 **Status:** OPEN. Installation is not the problem any more (see below); the boot
 of the installed rootfs is. Found the moment the post-install fsck stopped
@@ -3590,7 +3612,19 @@ when the step ends non-zero, so the run page carries it instead of leaving it in
 the middle of a log, and any report listing this job among the green gates has to
 say what its green means. Tracking and reproducing the read failure is open work.
 
-## OPEN (2026-11-24) — the boot verification cannot observe the root on nixos and gentoo
+## CLOSED (2026-11-25) — the boot verification cannot observe the root on nixos and gentoo
+
+  Closed as a family: the probe now asks a question the guest can answer
+  (`INVFSROOT<fstype>` from the /proc/mounts line whose mountpoint is `/`),
+  re-asks every 15 s for up to 300 s, waits for an answer that names a FUSE root
+  rather than for any answer, and extracts the token with `grep -o` so the echoed
+  command cannot satisfy it. Each of those three was a real false negative found
+  by CI: a 30 s window against a 31 s answer, a `^INVFSROOT` anchor against a
+  `[guest HH:MM:SS] ` prefix, and a stale `INVFSROOTrootfs` from the initramfs
+  during the hand-off. gentoo still reports runlevel 3 instead, because that image
+  never starts a getty on ttyS0.
+
+  Original entry:
 
 **Status:** OPEN. Both harnesses now skip the check by name
 (`INVFS_ISO_BOOT_VERIFY=skip`) instead of passing it for the wrong reason.
