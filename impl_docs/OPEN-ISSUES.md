@@ -1354,3 +1354,59 @@ Still to add, in this order: the candidate set (whole-file first, then CDC range
 the `V`/`P` columns (pin the donor's recipe versus pin only the extents the window
 covers), and `S` (split extents at match boundaries with re-packed remainders,
 which needs the packer's rounding rules to be honest).
+
+## Dedupe: what is measured, what it means, and the objective that follows (2026-11-26)
+
+**Measured, with the instruments in the tree** (`tools/dedupe-probe.c`,
+`tools/small-file-dupes.py`, `bin/invf-dedupe_sim`):
+
+| question | number | where |
+|---|---|---|
+| whole-file identity, logical | 0.75% of bytes (D:, 1.49 GiB sample) | dedupe-probe |
+| fixed-4K vs cdc-8K, logical | 8.57% vs 11.80% (+38% relative) | dedupe-probe |
+| misalignment is real | one inserted byte: 0 of 8100 fixed blocks matched, 3661 of 3663 CDC chunks | dedupe-probe |
+| small files (<64 KiB) | 26.9% of their bytes are exact duplicates; 70.4 of 150.7 MiB sits in 16-64 KiB | small-file-dupes |
+| reference cost | 28 B per window entry: 2.7% of saved bytes at 1 KiB, 0.7% at 4 KiB, 0.04% at 64 KiB | invarifs.h |
+| **physical, real volume, post-sweep** | **used 13697 -> 11158 blocks; B = 18.54%; E = 9 of 546 extents (1.6%)** | invf-dedupe_sim |
+
+The last row is the one that decides things, and it is the opposite of what the
+logical ratios suggested: whole-file dedupe looked like 0.75% (worthless) and is
+**18.5% of used blocks** once the unit is the extent and the baseline is today's
+sweep. 18.5% of the blocks came back from 1.6% of the extents, because the sweep
+repacked small files into large batch extents -- B and E cannot stand in for each
+other.
+
+Two corrections to earlier notes, kept visible: the "0.66 vs 0.64 GiB" comparison
+after zstd was asymmetric (only CDC chunks were compressed) and is not a basis for
+any decision; and the `dedupe-probe` FNV hashes are for estimating candidates, not
+for publishing a shared reference.
+
+**Conclusion.** The cheapest real win is not CDC and not a new chunk index: recipes
+are already content-addressed (`vol_recipe_store` computes BLAKE3 and searches the
+key before writing), so two byte-identical files can name **one recipe blob**, which
+shares their data and needs no new ownership model -- the shared object is an
+immutable blob, not a mutable inode, so the `WINDOW_SRC` hazard does not apply.
+
+### Objective: recipe sharing, then (only if it pays) range candidates
+
+1. **Verify the two things that gate it**, before writing any code:
+   a. `pba_ref` must count owners **per reference**, not per unique recipe, when two
+      inode rows name the same `recipe_addr` -- otherwise freeing is wrong;
+   b. unreferenced recipe blobs must be **reclaimed**, not leaked (fsck/verify
+      already collect reachable `recipe_addr`; reclaim has to release the rest).
+2. **Implement `recipe-share` as a sweep leg**: group inodes by (size, hash of the
+   decoded stream), point each loser's `recipe_addr` at the donor's, retire the
+   extents that lose their last owner. Success criteria: `fsck` clean,
+   `invf-verify --deep` 0 corrupt, every deduped file reads back byte-identical,
+   and the loser's later rewrite allocates a NEW recipe without touching the shared
+   one (copy-on-write of the map, which the write path should already do).
+3. **Accept the leg only on the physical number**: B >= 10% of used blocks on the
+   corpus, measured by `invf-dedupe_sim` before/after, with the E histogram printed
+   next to it.
+4. **Then, and only then**, add range candidates (CDC) and the `V`/`P` columns to
+   `invf-dedupe_sim` to price ownership granularity; `S` (split extents,
+   re-packed remainders) needs the packer's rounding rules to be honest.
+
+The order matters: step 2 is bounded, format-free and already worth ~18% of used
+blocks on the corpus available here; CDC and window sharing are a different, larger
+question whose physical value is still unmeasured.
