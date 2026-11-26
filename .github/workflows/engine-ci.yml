@@ -359,7 +359,15 @@ jobs:
         run: bash tools/check-repo-hygiene.sh
 
       - name: build with ThreadSanitizer
-        run: make -j"$(nproc)" TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan
+        run: |
+          make -j"$(nproc)" TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan
+          # A TSan build writes its object list next to its objects (build/
+          # core_objs.txt stays the ordinary build's -- see the CORE_OBJS_FILE
+          # comment in the Makefile). Suites that compile their own helper read
+          # the default path literally, so point it at this build's list: this
+          # workspace is thrown away, and test-dynzone failed with "can't read
+          # build/core_objs.txt" without it (run 45728625737).
+          cp build/obj-tsan/core_objs.txt build/core_objs.txt
 
       # Without this check the job could build WITHOUT the instrumented runtime
       # (a knob that silently did nothing) and then report a clean run for tests
