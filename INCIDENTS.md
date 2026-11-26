@@ -3783,6 +3783,25 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   is in `delta_retire` when the fast path collects it (form, `del`, `e->seq`,
   `s->seq`, `delta_fenced_seq`)? The diagnostic to add is at the PUSH
   (`vol_retire_pbas`/`vol_retire_recipe`) rather than at the drop.
+* **Why the control regressed, and what that means (2026-11-27).** The gate
+  suppresses leg 1 because the entry that used to fire is collected by the
+  **fast path at the top of `vol_delta_drain`** (`pending == 0 && nstaged == 0`),
+  which collects and frees with **no barrier at all**. That is the same code
+  path that freed the block in leg5 -- the free is not a stray free, it is the
+  fast path's whole design.
+
+  So the control does not say "the fix breaks WP630". It says **WP630's expected
+  behaviour is a retire free on a tombstone no fence ever covered**, which is
+  the leg5 defect itself. The two cannot both be right, and the gate is the one
+  that matches the comment in that fast path ("their rows were fenced before
+  retention was freed") -- which nothing enforces today.
+
+  Consequences for the fix: it must ship WITH a change to that control (fence
+  first, then assert exactly one free), and the fast path must keep working for
+  entries whose witness WAS fenced, or every `sync` with nothing staged becomes
+  a leak. That is the shape to write, and it is small; it is not a one-line
+  gate. `_leg5-fenced-seq.patch` is regenerated clean (573 lines, LF, compiles)
+  and still parked -- it is the first half, not the fix.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,
