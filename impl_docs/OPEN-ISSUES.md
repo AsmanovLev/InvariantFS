@@ -1436,3 +1436,29 @@ defect and wants its own WP: walk the recipe tree, subtract the addresses named 
 live rows, and free the rest -- which also needs a decision about blobs referenced
 only by a savepoint or an in-flight session. Until then, treat volume metadata
 growth per rewrite as expected, not as a bug in whatever consumes it.
+
+### Implementation map for `recipe-share` (read off the code, so it starts here)
+
+The sequence already exists in the tree; a whole-file share is the small case of it.
+`dedup_remap_file_impl` (`src/core/vol_dedupe.c`) is the model, and for a whole-file
+share most of its body is unnecessary:
+
+1. `vol_inode_get(v, loser, &in)`; refuse a non-AST row (the same guard dedupe uses).
+2. Collect the loser's current PBAs from its parsed recipe -- that list is what gets
+   retired.
+3. `memcpy(in.recipe_addr, donor_recipe_addr)` and `vol_inode_delta_put(v, loser, &in)`.
+   **No `vol_recipe_store`, no serialisation, no entry rewriting** -- the donor's blob
+   already exists and is content-addressed, which is the whole point.
+4. `pba_ref_invalidate(v)` (the publish flagged the map; the retire gate rebuilds it).
+5. `vol_retire_pbas(v, loser, pbas, n, NULL, 0)` -- `nkeep == 0` is supported
+   (`vol_delta.c`: the keep copy is inside `if (keep && nkeep)`), and the drain is
+   share-aware against the live map, so an extent another live recipe still names is
+   left alone. Retiring with no keep-list is therefore safe and is the correct call for
+   "the loser stops naming its own content".
+6. Blocks are counted the way dedupe counts them: `seg_extent_checked` over the
+   distinct retired PBAs, not `logical bytes`.
+
+The only new machinery is the grouping pass: per inode, hash the DECODED stream
+(chunked reads; `invf-dedupe_sim` already does this through `vol_read_range`) into a
+key of (size, BLAKE3), sort, and take the first live inode of each group as donor.
+Everything else is one loop over the losers.
