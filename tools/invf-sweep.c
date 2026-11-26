@@ -2263,11 +2263,13 @@ int main(int argc, char **argv)
             return 1;
         }
         printf("[recshare] %llu files hashed, %llu duplicate groups, "
-               "%llu shared (%llu KiB logical), %llu blocks retired (upper bound)\n",
+               "%llu shared (%llu KiB logical; %llu of them through a TEXT batch), "
+               "%llu blocks retired (upper bound)\n",
                (unsigned long long)rs.files_hashed,
                (unsigned long long)rs.duplicate_groups,
                (unsigned long long)rs.files_shared,
                (unsigned long long)(rs.logical_bytes_shared >> 10),
+               (unsigned long long)rs.text_shares,
                (unsigned long long)rs.blocks_retired);
         if (rs.files_unreadable)
             printf("[recshare] %llu files were unreadable and skipped\n",

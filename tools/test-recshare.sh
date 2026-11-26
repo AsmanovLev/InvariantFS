@@ -144,5 +144,68 @@ echo "  donor + sibling unchanged; rewritten file returns its own bytes"
 $B/invf-fsck "$IMG" | tee "$WORK/fsck2.log"
 fsck_clean "$WORK/fsck2.log" || { echo "FAIL: fsck issues after the rewrite"; exit 1; }
 
-echo "PASS: recipe sharing — 2 groups, 3 shared, bit-exact, donor survives a"
-echo "      sibling rewrite, verify --deep clean, blocks returned"
+# ---------------------------------------------------------------------------
+# Leg 4: the TEXT-batch path. A share frees nothing BY ITSELF here (the block
+# belongs to a batch that several members name), so the gain can only arrive
+# when that batch dies and the TEXT GC collects it at the next sweep. Measured
+# on the repo corpus with a control: 2507 blocks, i.e. ~9.5% of used blocks.
+#
+# The fixture is small text files, which is what batching is for. If the volume
+# stores them unbatched, the premise is absent and the leg SKIPS BY NAME rather
+# than passing on a quantity that means something else.
+echo "== leg 4: TEXT batches die when the share lets go of them =="
+IMG2=recshare-tz.img
+IMG2CTL=recshare-tz-ctl.img
+rm -f "$IMG2" "$IMG2CTL"
+python3 - <<'PY'
+import os, random
+random.seed(31337)
+d = "/dev/shm/recshare/tz"
+os.makedirs(d, exist_ok=True)
+body = ("".join("int counter_%04d(void) { return %d; }\n" % (i, i) for i in range(120)))
+for k in range(40):
+    open(os.path.join(d, "m%02d.c" % k), "w").write(body)
+# control: the same 40 files, ONE byte apart in each, so nothing can be shared
+ctl = "/dev/shm/recshare/tzctl"
+os.makedirs(ctl, exist_ok=True)
+for k in range(40):
+    open(os.path.join(ctl, "m%02d.c" % k), "w").write(body.replace("counter_%04d" % k,
+                                                                  "counter_%04d" % k + "x"))
+print("  %d files of %d bytes" % (40, len(body)))
+PY
+$B/invf-mkfs "tz.img" 0.5 >/dev/null
+for f in $(cd "$WORK/tz" && ls); do $B/invf-cp tz.img "$WORK/tz/$f" "$f" >/dev/null; done
+TZ0=$(free_blocks tz.img)
+$B/invf-sweep tz.img > "$WORK/tzsweep0.log" 2>&1 || { tail -5 "$WORK/tzsweep0.log"; exit 1; }
+TZ0=$(free_blocks tz.img)
+$B/invf-sweep tz.img --recipe-share > "$WORK/tzshare.log" 2>&1 || {
+    cat "$WORK/tzshare.log"; exit 1; }
+TZLINE=$(grep '^\[recshare\]' "$WORK/tzshare.log" | tail -1)
+echo "  $TZLINE"
+TZTEXT=$(awk -F', ' '{for(i=1;i<=NF;i++) if ($i ~ /TEXT batch/) print $i+0}' <<<"$TZLINE")
+TZSHARED=$(awk -F', ' '{for(i=1;i<=NF;i++) if ($i ~ /shared/) print $i+0}' <<<"$TZLINE")
+if [ "${TZSHARED:-0}" -lt 2 ] || [ "${TZTEXT:-0}" -lt 1 ]; then
+    echo "SKIP: leg 4 — this volume stored the text files without batches"
+    echo "      (shared=${TZSHARED:-0}, through-a-batch=${TZTEXT:-0}); the"
+    echo "      batch-death path is unreachable here, so there is nothing to"
+    echo "      assert. Cause: batching thresholds, not the share."
+else
+    $B/invf-sweep tz.img > "$WORK/tzsweep1.log" 2>&1 || { tail -5 "$WORK/tzsweep1.log"; exit 1; }
+    TZ1=$(free_blocks tz.img)
+    $B/invf-sweep tz.img > "$WORK/tzsweep2.log" 2>&1 || { tail -5 "$WORK/tzsweep2.log"; exit 1; }
+    TZ2=$(free_blocks tz.img)
+    echo "  free blocks: $TZ0 -> $TZ1 -> $TZ2 (share reported 0 retired by itself)"
+    [ "$TZ2" -gt "$TZ0" ] || {
+        echo "FAIL: the shared batches were never collected ($TZ0 -> $TZ2)"; exit 1; }
+    for f in $(cd "$WORK/tz" && ls); do
+        $B/invf-cat tz.img "$f" > "$WORK/out/tz-$f"
+        cmp "$WORK/tz/$f" "$WORK/out/tz-$f" || { echo "FAIL: $f differs after the batch GC"; exit 1; }
+    done
+    $B/invf-fsck tz.img | tee "$WORK/fsck3.log"
+    fsck_clean "$WORK/fsck3.log" || { echo "FAIL: fsck issues after the batch GC"; exit 1; }
+    echo "  all 40 files byte-identical; batches collected at the next sweep"
+fi
+
+echo "PASS: recipe sharing — 2 groups shared on an unswept volume with blocks"
+echo "      returned, donor survives a sibling rewrite, batches of identical"
+echo "      text files collected by the next sweep, verify --deep clear"

@@ -128,7 +128,7 @@ static int rs_walk_cb(void *ctx_, const char *path, uint64_t inode_id,
  * live recipe still names is left alone there, not here. */
 static int rs_share_one(invfs_volume *v, uint64_t loser,
                         const uint8_t donor_addr[INVFS_RECIPE_ADDR_LEN],
-                        uint64_t *blocks_out)
+                        uint64_t *blocks_out, int *had_text_out)
 {
     invfs_inode in;
     uint8_t *blob = NULL;
@@ -140,6 +140,7 @@ static int rs_share_one(invfs_volume *v, uint64_t loser,
     size_t npbas = 0, produced = 0;
 
     *blocks_out = 0;
+    if (had_text_out) *had_text_out = 0;
     if (vol_inode_get(v, loser, &in) != 1) return 1;
     if (in.size == 0 || invfs_inode_content_is_raw_blob(in.type)) return 1;
     if (memcmp(in.recipe_addr, donor_addr, INVFS_RECIPE_ADDR_LEN) == 0)
@@ -155,9 +156,20 @@ static int rs_share_one(invfs_volume *v, uint64_t loser,
 
     pbas = n_ents ? (uint64_t *)malloc(n_ents * sizeof *pbas) : NULL;
     if (n_ents && !pbas) { vol_ast_recipe_parsed_free(&ah, ents); return -1; }
-    for (i = 0; i < n_ents; i++)
-        if (ents[i].pba && ents[i].zone != INVFS_ZONE_TEXT)
+    for (i = 0; i < n_ents; i++) {
+        if (ents[i].zone == INVFS_ZONE_TEXT) {
+            /* The block belongs to the BATCH: every member names it, pba_ref
+             * never counts it against the inode, and retiring it here would
+             * free a block other live members still read. The share still
+             * helps -- the loser stops naming the batch, and the TEXT GC frees
+             * it once its last member let go -- but the gain arrives at the
+             * next sweep, not in this count. */
+            if (had_text_out) *had_text_out = 1;
+            continue;
+        }
+        if (ents[i].pba)
             pbas[npbas++] = ents[i].pba;
+    }
     vol_ast_recipe_parsed_free(&ah, ents);
 
     memcpy(in.recipe_addr, donor_addr, INVFS_RECIPE_ADDR_LEN);
@@ -235,14 +247,16 @@ int vol_sweep_recipe_share_ex(invfs_volume *v, invfs_recshare_stats *stats,
             groups++;
             for (k = i + 1; k < j; k++) {
                 uint64_t one = 0;
+                int text = 0;
                 int s;
                 if (!marked && vol_mark_dirty(v) != 0) { rc = -1; i = j; break; }
                 marked = 1;
-                s = rs_share_one(v, ctx.keys[k].ino, donor_addr, &one);
+                s = rs_share_one(v, ctx.keys[k].ino, donor_addr, &one, &text);
                 if (s < 0) { rc = -1; i = j; break; }
                 if (s == 1) continue;         /* already shared / not shareable */
                 stats->files_shared++;
                 stats->logical_bytes_shared += ctx.keys[k].size;
+                if (text) stats->text_shares++;
                 blocks += one;
                 if (progress) {
                     invfs_dedupe_progress p;

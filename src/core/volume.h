@@ -1234,6 +1234,7 @@ typedef struct {
     uint64_t duplicate_groups;
     uint64_t files_shared;
     uint64_t logical_bytes_shared;
+    uint64_t text_shares;       /* shares whose loser had TEXT-zone entries */
     uint64_t blocks_retired;
 } invfs_recshare_stats;
 

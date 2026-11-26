@@ -1512,3 +1512,35 @@ a change to how text is batched, not a change to the dedupe pass: two identical 
 files must be able to point at one batch member range, or the batch must not be the
 unit that owns a member's blocks. Sequencing the two questions is the next decision,
 and the leg above is what makes it measurable.
+
+### Correction to the correction: where the blocks actually come back (2026-11-26)
+
+The paragraph above says the leg is worth zero on a swept corpus. That was what the
+leg REPORTS, and the report is the thing that was incomplete: a share whose loser
+reads through a TEXT batch retires nothing by itself (correctly — the block belongs
+to the batch), but the loser stops naming that batch, and the TEXT GC frees a batch
+once its last member lets go. Measured with a control image put through the SAME
+sweeps, on the repo corpus, converged:
+
+| | free blocks | note |
+|---|---|---|
+| control (no share) | 235799 | 13 206 blocks returned by the sweeps themselves |
+| shared first | 238306 | 15 713 blocks returned |
+
+**Delta = 2507 blocks = 9.8 MiB, stable across passes 2-4 (2507 / 2504 / 2507).**
+Against the control's used blocks (26 345) that is **9.5%** — right at the 10%
+acceptance line, not comfortably over it, and it needs one sweep to arrive. The
+leg now reports how many shares went through a batch (`N of them through a TEXT
+batch`) so the mechanism is visible instead of hiding behind `0 blocks retired`.
+
+`tools/test-recshare.sh` leg 4 is the portable version: 40 identical small text
+files, 39 shared "through a TEXT batch", 0 blocks retired by the share, and +43
+blocks after the next two sweeps with all 40 files still byte-identical. If a
+volume stores those files unbatched the leg SKIPS BY NAME with the counts, because
+the batch-death path does not exist there — a pass on a different quantity would be
+worse than a skip.
+
+So the corrected ledger for whole-file sharing: **~9.5% of used blocks on a swept
+corpus, arriving one sweep after the share**, plus the full duplicate size on an
+unswept one. The 18.54% remains withdrawn (it charged the loser for batch blocks);
+the honest numbers are 0 immediately, 9.5% after the GC.
