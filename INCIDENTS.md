@@ -3725,6 +3725,38 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   The next instrument is three lines inside `dl_retire_free_list`: the entry's
   key, the span/seq it expects, the span/seq the index actually holds, and the
   verdict. One run tells which of the two it is.
+* **ROOT CAUSE (2026-11-27, fourth instrument).** The retire collector logs its
+  verdict and both numbers it is made from. For the damaged block:
+
+  ```
+  t=224712.133  RETIRE collect key_ino=123 del=0 e_seq=1092 s_seq=1095 live=1
+  t=224712.134  FREE pba=18747 n=17 owners=0
+  ```
+
+  `key_ino=123` is s12.bin. The entry fires because the rule is
+  `still_live = (s->seq >= e->seq)`: the index says the row has moved on to seq
+  1095, so the version that superseded A is "gone" and A's blocks are declared
+  dead. But the rows at 1092/1095 were **never durable** -- they were staged
+  under an error/drop window whose fences refused (the fence log for the same
+  run shows `FENCE barrier REFUSED -> doom` around them). After a reopen the
+  durable log holds only A, so A is the live row and its blocks were freed and
+  re-used.
+
+  So the defect in one sentence: **the retire collector decides liveness from
+  the IN-MEMORY index, which contains rows that no fence ever made durable**,
+  while the comment on the fast path in `vol_delta_drain` asserts the opposite
+  premise ("their rows were fenced before retention was freed"). Nothing
+  enforces it.
+
+  Fix shape (small, and it makes the comment true rather than aspirational):
+  track the highest seq whose group was fenced successfully
+  (`v->delta_fenced_seq`, set in `vol_delta_drain` on `rc == 0` from the staged
+  set it just freed) and require `e->seq <= v->delta_fenced_seq` in
+  `dl_retire_collect`. An entry whose witness was never fenced stays queued and
+  is dropped (leak, never a wrong free) -- the same direction the collector
+  already takes on a rewound slot. Regression test: stage row B over A under a
+  failing device, force the fence to refuse, reopen, and require A to read back
+  byte-identical with fsck clean.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,

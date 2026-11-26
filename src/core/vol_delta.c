@@ -985,6 +985,25 @@ static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
         } else {
             dl_retire_free_ent(e);   /* unwound: blocks stay allocated */
         }
+        /* CORRUPT_DEBUG: the verdict itself, with the two numbers it is made
+         * from. "still_live" here does not mean the row is live -- it means
+         * the superseding row is GONE (seq >= e->seq) or the slot still names
+         * it. Reading the pair next to the free is the only way to see which
+         * branch discharged a block (leg5: a free after a refused fence). */
+        CD("RETIRE collect key_ino=%llu del=%d npbas=%zu e_seq=%llu e_seg=%llu "
+           "s_seq=%llu s_seg=%llu live=%d",
+           (unsigned long long)(e->klen >= 8 ?
+               ((uint64_t)e->key[0] << 56 | (uint64_t)e->key[1] << 48 |
+                (uint64_t)e->key[2] << 40 | (uint64_t)e->key[3] << 32 |
+                (uint64_t)e->key[4] << 24 | (uint64_t)e->key[5] << 16 |
+                (uint64_t)e->key[6] << 8 | (uint64_t)e->key[7]) : 0),
+           e->del, e->npbas, (unsigned long long)e->seq,
+           (unsigned long long)e->seg,
+           (unsigned long long)(idx != (size_t)-1 ?
+               v->delta_index->slot[idx].seq : 0),
+           (unsigned long long)(idx != (size_t)-1 ?
+               v->delta_index->slot[idx].seg : 0),
+           still_live);
     }
     free(v->delta_retire);
     v->delta_retire = NULL;
