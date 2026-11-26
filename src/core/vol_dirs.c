@@ -534,7 +534,7 @@ uint64_t vol_create_node(invfs_volume *v, const char *name,
         in.type = INVFS_ITYP_REG;
         in.mode = 0644;
         in.nlink = 1;
-        in.mtime = in.atime = (int64_t)time(NULL);
+        in.mtime = in.atime = invfs_now_packed();
     }
     if (in.nlink == 0)
         in.nlink = 1;
@@ -628,7 +628,7 @@ uint64_t vol_create_content_node(invfs_volume *v, const char *name,
         in.mode = 0644;
     if (in.nlink == 0)
         in.nlink = 1;
-    in.mtime = in.atime = (int64_t)time(NULL);
+    in.mtime = in.atime = invfs_now_packed();
     in.size = size;
     memset(&in.recipe, 0, sizeof in.recipe);
     memcpy(in.recipe_addr, recipe_addr, INVFS_RECIPE_ADDR_LEN);
@@ -717,7 +717,7 @@ uint64_t vol_mkdir(invfs_volume *v, const char *name)
     in.type = INVFS_ITYP_DIR;
     in.mode = 0755;
     in.nlink = 2;
-    in.mtime = in.atime = (int64_t)time(NULL);
+    in.mtime = in.atime = invfs_now_packed();
     if (vol_inode_delta_put(v, id, &in) != 0)
         return 0;
     if (vol_dirent_delta_put(v, id, "", id) != 0)     /* anchor */

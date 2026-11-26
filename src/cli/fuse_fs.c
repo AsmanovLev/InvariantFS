@@ -881,7 +881,7 @@ static void meta_defaults(const char *name, uint64_t size, invfs_meta_pub *m)
         m->mode = 0644;
         m->nlink = 1;
     }
-    m->mtime = (int64_t)time(NULL);
+    m->mtime = invfs_now_packed();
     m->atime = m->mtime;
     (void)size;
 }
@@ -980,8 +980,16 @@ static void fill_stat_from_meta(struct stat *st, const invfs_meta_pub *m,
     st->st_nlink = m->nlink ? m->nlink : 1;
     if (m->type != INVFS_ITYP_LNK)
         st->st_size = (off_t)size;
-    st->st_mtime = (time_t)(m->mtime ? m->mtime : (int64_t)ctime);
-    st->st_atime = (time_t)(m->atime ? m->atime : (int64_t)ctime);
+    /* mtime/atime are packed (sec<<30|nsec): unpack for the kernel, which is
+     * the only place nanoseconds can be handed to userspace at all. */
+    {
+        int64_t mt = m->mtime ? m->mtime : (int64_t)ctime;
+        int64_t at = m->atime ? m->atime : (int64_t)ctime;
+        st->st_mtime = (time_t)invfs_time_sec(mt);
+        st->st_mtim.tv_nsec = (long)invfs_time_nsec(mt);
+        st->st_atime = (time_t)invfs_time_sec(at);
+        st->st_atim.tv_nsec = (long)invfs_time_nsec(at);
+    }
     st->st_ctime = (time_t)ctime;
 }
 
@@ -1906,7 +1914,7 @@ static int invf_mkdir(const char *path, mode_t mode)
         m.uid = ctx ? ctx->uid : 0;
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 2;
-        m.mtime = m.atime = (int64_t)time(NULL);
+        m.mtime = m.atime = invfs_now_packed();
         anchor_ino = vol_apply_meta(g_vol, anchor, &m);
         if (!anchor_ino)
             fprintf(stderr, "invf: mkdir stamp FAILED %s (area full?)\n", anchor);
@@ -2454,7 +2462,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         m.uid = ctx ? ctx->uid : 0;
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 1;
-        m.mtime = m.atime = (int64_t)time(NULL);
+        m.mtime = m.atime = invfs_now_packed();
         file_ino = vol_apply_meta(g_vol, path + 1, &m);
         if (!file_ino)
             fprintf(stderr, "invf: mknod stamp FAILED %s\n", path);
@@ -2524,7 +2532,7 @@ static int invf_create(const char *path, mode_t mode, struct fuse_file_info *fi)
         c->meta.uid = cx ? cx->uid : 0;
         c->meta.gid = cx ? cx->gid : 0;
         c->meta.nlink = 1;
-        c->meta.mtime = c->meta.atime = (int64_t)time(NULL);
+        c->meta.mtime = c->meta.atime = invfs_now_packed();
     }
     fi->fh = (uint64_t)(uintptr_t)c;
     fi->keep_cache = 1;
@@ -3266,7 +3274,7 @@ static int commit_wctx(wctx *c)
             c->meta.gid = cur.gid;
             c->meta.type = cur.type;
         }
-        c->meta.mtime = (int64_t)time(NULL);
+        c->meta.mtime = invfs_now_packed();
         if (!vol_apply_meta(g_vol, c->name, &c->meta))
             fprintf(stderr, "invf: close stamp FAILED %s (area full?)\n", c->name);
     }
@@ -3533,7 +3541,7 @@ static int invf_truncate(const char *path, off_t len, struct fuse_file_info *fi)
     dirty_del_locked(c);
     if (rc == 0) {
         if (c->have_meta) {
-            c->meta.mtime = (int64_t)time(NULL);
+            c->meta.mtime = invfs_now_packed();
             /* Same shape, same handling as the close path's stamp (see
              * :2579-2580): the truncate itself is already committed, so this
              * is NOT data loss -- what is lost when it fails is the mtime, and
@@ -3566,8 +3574,9 @@ static int invf_utimens(const char *path, const struct timespec tv[2],
      * succeed silently instead of a bogus ENOSPC (see invf_chown). */
     if (strcmp(path, "/") == 0) return 0;
     memset(&patch, 0, sizeof patch);
-    patch.mtime = tv[1].tv_sec;   /* [0]=atime, [1]=mtime */
-    patch.atime = tv[0].tv_sec;
+    /* the kernel hands us nanoseconds here; keep them ([0]=atime, [1]=mtime) */
+    patch.mtime = invfs_time_pack((int64_t)tv[1].tv_sec, (int64_t)tv[1].tv_nsec);
+    patch.atime = invfs_time_pack((int64_t)tv[0].tv_sec, (int64_t)tv[0].tv_nsec);
     return meta_apply_patch(path, MM_TIMES, &patch);
 }
 
@@ -3786,7 +3795,7 @@ static int invf_symlink(const char *target, const char *linkpath)
         m.uid = ctx ? ctx->uid : 0;
         m.gid = ctx ? ctx->gid : 0;
         m.nlink = 1;
-        m.mtime = m.atime = (int64_t)time(NULL);
+        m.mtime = m.atime = invfs_now_packed();
         snprintf(m.target, sizeof m.target, "%s", target);
         if (!vol_apply_meta(g_vol, linkpath + 1, &m))
             fprintf(stderr, "invf: symlink stamp FAILED %s\n", linkpath);

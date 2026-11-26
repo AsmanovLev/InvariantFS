@@ -814,7 +814,7 @@ uint64_t vol_create_symlink(invfs_volume *v, const char *name,
     m.mode = 0777;
     m.size = tl;
     memcpy(m.target, target, tl + 1);
-    m.mtime = m.atime = (int64_t)time(NULL);
+    m.mtime = m.atime = invfs_now_packed();
     return vol_create_node(v, name, &m);
 }
 
@@ -832,7 +832,7 @@ uint64_t vol_create_special(invfs_volume *v, const char *name,
     meta_pub_from_hdr_defaults(&m, type);
     m.mode = mode;
     m.rdev = rdev;
-    m.mtime = m.atime = (int64_t)time(NULL);
+    m.mtime = m.atime = invfs_now_packed();
     return vol_create_node(v, name, &m);
 }
 

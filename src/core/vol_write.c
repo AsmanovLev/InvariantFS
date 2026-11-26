@@ -1055,7 +1055,7 @@ static int vol_write_commit_impl(invfs_wsession *s)
     size_t blen = 0;
     uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     invfs_inode in;
-    uint64_t id, now = (uint64_t)time(NULL);
+    uint64_t id, now = (uint64_t)invfs_now_packed();   /* sec<<30|nsec, see invarifs.h */
     uint32_t i;
     int rc;
 

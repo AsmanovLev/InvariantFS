@@ -1502,7 +1502,49 @@ typedef struct invfs_meta_ext_hdr {
  *
  * WP-M5 always writes xattr_len == 0: the xattr tree is WP-M7. The field
  * is frozen here so that WP does not need a format break. */
-#define INVFS_INODE_ROW_VERSION 2u
+#define INVFS_INODE_ROW_VERSION 3u   /* 3 = mtime/atime are sec<<30|nsec; see below */
+/* ---- timestamps: one i64, nanoseconds inside (row_version >= 3) --------
+ *
+ * mtime/atime used to be plain seconds, which is not enough for what this
+ * filesystem is used for: two writes in the same second look like "unchanged" to
+ * make, to rsync -t and to anything that compares mtimes -- and the close-time
+ * stamp that rewrote metadata made that aliasing observable (see fuse_fs.c).
+ *
+ * There is no room in the row for a second i64, so seconds and nanoseconds share
+ * the one field: `sec << 30 | nsec`. 30 bits of nanoseconds cover a full second,
+ * 34 bits of seconds cover until 2514, and because the packing is monotonic,
+ * ORDINARY COMPARISONS STILL WORK: a newer time is a larger integer. Arithmetic
+ * does not -- `now - mtime` must unpack first -- which is what invfs_time_sec()
+ * is for, and nothing in the tree subtracts these values directly.
+ *
+ * This is a FORMAT CHANGE and it is deliberate: rows carry row_version, ino_decode
+ * refuses a version it does not know, and nothing has shipped on this format, so a
+ * v2 volume is rejected loudly rather than read as nonsense. The rule that an
+ * existing field is never repurposed still holds for every other field; this one
+ * was repurposed on purpose, with the version to make it visible. */
+#include <time.h>
+
+#define INVFS_TIME_NS_BITS 30
+#define INVFS_TIME_NS_MASK ((int64_t)((1ll << INVFS_TIME_NS_BITS) - 1))
+
+static inline int64_t invfs_time_pack(int64_t sec, int64_t nsec)
+{
+    if (nsec < 0) { sec -= 1; nsec += 1000000000ll; }
+    if (nsec > 999999999ll) { sec += nsec / 1000000000ll; nsec %= 1000000000ll; }
+    return (sec << INVFS_TIME_NS_BITS) | (nsec & INVFS_TIME_NS_MASK);
+}
+static inline int64_t invfs_time_sec(int64_t v)  { return v >> INVFS_TIME_NS_BITS; }
+static inline int64_t invfs_time_nsec(int64_t v) { return v & INVFS_TIME_NS_MASK; }
+
+/* Now, packed. clock_gettime(CLOCK_REALTIME) rather than time(NULL): the point of
+ * the change is that the daemon stops throwing the sub-second part away. */
+static inline int64_t invfs_now_packed(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) != 0) return 0;
+    return invfs_time_pack((int64_t)ts.tv_sec, (int64_t)ts.tv_nsec);
+}
+
 #define INVFS_INODE_XATTR_MAX   4096u
 #define INVFS_RECIPE_ADDR_LEN   32u
 /* WP635: the CHLD table's stride, declared next to invfs_ast_window_entry,
