@@ -1544,3 +1544,47 @@ So the corrected ledger for whole-file sharing: **~9.5% of used blocks on a swep
 corpus, arriving one sweep after the share**, plus the full duplicate size on an
 unswept one. The 18.54% remains withdrawn (it charged the loser for batch blocks);
 the honest numbers are 0 immediately, 9.5% after the GC.
+
+## Renaming a container destroyed it; truncating one leaks its members (2026-11-26)
+
+Found in the leg5 power-loss soak and reproduced on a **healthy device with no
+fault injection at all**, which is why it is a plain defect and not a chaos red:
+
+```
+mv t.tar x.tar            # a TARR container: t.tar + t.tar!part0
+invf-cat x.tar            # different bytes than the original
+invf-verify --deep        # CORRUPT: x.tar
+invf-ls                   # t.tar!part0 still there -- the leg5 GHOST
+```
+
+Members are minted as `<container>!<tag>` and the READ path derives the member
+name from the container's CURRENT name (`vol_read.c`: the TARR/FLACR part lookup
+builds `"%s!part%u"` from the live record name). A rename moved the container and
+left the members where they were, so the container stopped decoding while its row
+and its bytes stayed allocated — a silent loss until somebody read it — and the
+leftovers became internal names with no parent, which nothing collects (the sweep
+skips internal shapes and fsck counts them as live files).
+
+**Fixed** by `vol_rename_siblings` (`vol_dirs.c`): a rename of a regular file with
+content moves every `<name>!<tag>` member into the destination directory, staged in
+the SAME delta as the rename so the FUSE layer's one fence publishes both or
+neither; a destination collision is refused (`-2`/EEXIST) rather than clobbered, and
+the collision pass runs BEFORE anything is staged. Suite:
+`tools/test-rename-siblings.sh` (in the `e2e` target) — in place, across
+directories, and a directory rename as the control that needs no cascade.
+Evidence: leg5 with the failing seed (`FLAKEY_SEED=242413183`) went from
+`FAIL: present but unreadable: r13.bin` to `SOAK: PASS rounds=420 ops=1358
+gates=106`, `deep: 34 files ok, 0 corrupt`.
+
+**Still open, same family, measured today:** the truncate path leaks the members.
+Overwriting a swept container through the mount (`printf ... > mnt/t.tar`, i.e.
+open `O_TRUNC`) leaves `t.tar!part0` (300 000 bytes) on the volume for ever, and
+`invf-verify --deep` calls the volume clean because a stale member is a valid live
+file. The offline path is correct — `invf-cp` over the same name purges it, via
+the write session's `owns_siblings` — so the gap is in
+`vol_replace_file(name, NULL, 0)`, whose FUSE caller's comment claims the siblings
+"describe bytes that are gone, so vol_replace_file drops them with it". It does
+not: `vol_replace_file` hands the NULL-data case to `vol_create_node`, which knows
+nothing about siblings. Fix belongs there (ask the OLD row's recipe via
+`ast_owns_siblings`, purge after the replace succeeds so a refused replace leaves
+them alone) and wants its own leg in the suite above.

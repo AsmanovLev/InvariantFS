@@ -1115,6 +1115,17 @@ int vol_rename(invfs_volume *v, const char *from, const char *to)
             }
         }
     }
+    /* Container members are named after their container, so they must move
+     * with it: the read path derives "<name>!partN" from the LIVE name (see
+     * vol_rename_siblings). Staged in this same delta, below the container's
+     * own move, so one fence publishes both -- and a failure here aborts the
+     * rename with the members untouched. */
+    if (f_in.type == INVFS_ITYP_REG && f_in.size > 0) {
+        int src = vol_rename_siblings(v, fn, tn);
+        if (src == -2) return -2;                  /* EEXIST: a member collides */
+        if (src != 0) goto rename_abort;
+        staged = 1;
+    }
     /* insert the new dirent BEFORE deleting the old (add-before-remove,
      * design §3): a crash between the two leaves the file under both names,
      * never under neither. */
@@ -1139,6 +1150,132 @@ rename_abort:
     if (hold_taken)
         vol_pba_ref_release(v);
     return -1;
+}
+
+/* ---- container members follow their container ----------------------------------
+ *
+ * Members are minted as "<container>!<tag>" and the READ path derives the
+ * member name from the container's CURRENT name (vol_read.c builds
+ * "%s!part%u" from the live record name). So a rename that moves the container
+ * and leaves the members behind does not merely leak names: the container
+ * stops decoding, EIO on every read, while its row and its bytes are still
+ * allocated. The leftovers are internal names with no parent, which nothing
+ * collects -- the sweep skips internal shapes and fsck counts them as live
+ * files.
+ *
+ * This is the leg5 soak finding: `rename t.tar -> r13.bin` reported ok, then
+ * r13.bin was unreadable and `t.tar!part0` was a GHOST on the volume.
+ *
+ * The moves are staged in the SAME delta as the rename itself, so one fence
+ * publishes the container and its members together (the FUSE layer pins an
+ * acked rename; vol_rename takes no barrier of its own).
+ */
+typedef struct {
+    char (*names)[600];    /* full path of each member, as the walk reports it */
+    size_t n, cap;
+    const char *prefix;    /* "<old container>!" */
+    size_t plen;
+    int oom;
+} sib_ren_ctx;
+
+static int sib_collect_cb(void *ctx_, const char *path, uint64_t ino,
+                          uint32_t type, uint64_t size, int64_t mtime)
+{
+    sib_ren_ctx *c = (sib_ren_ctx *)ctx_;
+    size_t pl;
+    (void)ino; (void)type; (void)size; (void)mtime;
+
+    if (strncmp(path, c->prefix, c->plen) != 0) return 0;
+    pl = strlen(path);
+    if (pl >= 600) return 0;
+    /* The SHAPE decides, through the one shared predicate: a name that merely
+     * carries a '!' is a user file (WP135 reserved the namespace, and the
+     * introduction funnels refuse it, but an old volume may hold one). */
+    if (!sib_suffix_is_internal(path + c->plen, pl - c->plen)) return 0;
+    if (c->n == c->cap) {
+        size_t ncap = c->cap ? c->cap * 2 : 8;
+        void *nn = realloc(c->names, ncap * sizeof *c->names);
+        if (!nn) { c->oom = 1; return 1; }
+        c->names = nn;
+        c->cap = ncap;
+    }
+    memcpy(c->names[c->n], path, pl + 1);
+    c->n++;
+    return 0;
+}
+
+int vol_rename_siblings(invfs_volume *v, const char *old_name,
+                        const char *new_name)
+{
+    char oparent[600], oleaf[INVFS_MAX_NAME + 1];
+    char nparent[600], nleaf[INVFS_MAX_NAME + 1];
+    uint64_t opino = 0, npino = 0, child = 0;
+    sib_ren_ctx c;
+    char prefix[620];
+    size_t i;
+    int rc = 0;
+
+    if (!v || !old_name || !new_name) return -1;
+    /* A member is never itself a container: moving one must not cascade. */
+    if (strchr(old_name, '!') || strchr(new_name, '!')) return 0;
+    if (split_path(old_name, oparent, sizeof oparent, oleaf, sizeof oleaf) != 0)
+        return -1;
+    if (split_path(new_name, nparent, sizeof nparent, nleaf, sizeof nleaf) != 0)
+        return -1;
+    if (snprintf(prefix, sizeof prefix, "%s!", old_name) >= (int)sizeof prefix)
+        return -1;
+
+    memset(&c, 0, sizeof c);
+    c.prefix = prefix;
+    c.plen = strlen(prefix);
+    if (vol_walk(v, sib_collect_cb, &c) != 0 && c.oom) {
+        free(c.names);
+        return -1;
+    }
+    if (!c.n) { free(c.names); return 0; }   /* the common case: no members */
+
+    if (vol_path_lookup(v, oparent, &opino) != 1 ||
+        vol_path_lookup(v, nparent, &npino) != 1) {
+        free(c.names);
+        return -1;
+    }
+
+    /* FIRST pass: every destination must be free. A container that already
+     * holds members of the same tags would otherwise be half-clobbered before
+     * the collision is noticed -- and a refusal has to leave the volume
+     * untouched, not mostly moved. -2 is vol_rename's EEXIST. */
+    for (i = 0; i < c.n; i++) {
+        char nname[600];
+        uint64_t existing = 0;
+        int erc;
+        const char *s = c.names[i] + c.plen;
+
+        if (snprintf(nname, sizeof nname, "%s!%s", new_name, s) >=
+            (int)sizeof nname) { free(c.names); return -1; }
+        erc = vol_path_lookup(v, nname, &existing);
+        if (erc < 0) { free(c.names); return -1; }
+        if (erc == 1) { free(c.names); return -2; }
+    }
+
+    /* SECOND pass: stage the moves in this delta. */
+    for (i = 0; i < c.n; i++) {
+        char suf[INVFS_MAX_NAME + 1];
+        const char *s = c.names[i] + c.plen;
+        const char *oleaf_sib = c.names[i] + strlen(oparent) +
+                                (oparent[0] ? 1 : 0);
+
+        /* Members live in the container's directory, so the leaf is the new
+         * container leaf plus the same suffix. */
+        if (snprintf(suf, sizeof suf, "%s!%s", nleaf, s) >= (int)sizeof suf) {
+            rc = -1;
+            break;
+        }
+        if (vol_path_lookup(v, c.names[i], &child) != 1) { rc = -1; break; }
+        if (vol_dirent_delta_put(v, npino, suf, child) != 0) { rc = -1; break; }
+        if (vol_dirent_delta_del(v, opino, oleaf_sib) != 0) { rc = -1; break; }
+    }
+    free(c.names);
+    return rc;
 }
 
 int vol_ensure_path(invfs_volume *v, const char *name)

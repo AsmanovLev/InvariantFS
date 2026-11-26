@@ -1646,6 +1646,7 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-textzone.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-dedupe.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-recshare.sh
+	$(TESTENV) bash tools/run-e2e.sh tools/test-rename-siblings.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-heat.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-seal.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-jxl.sh

@@ -2036,6 +2036,28 @@ int vol_exer_carve(invfs_volume *v, uint64_t inode_id,
  * scan would walk into records it had just written. */
 int vol_delete_siblings(invfs_volume *v, const char *name);
 
+/* Move a container's member/recipe names along with the container itself.
+ *
+ * Members are minted as "<container>!<tag>" (partN, recipe, coverN, mbrmap,
+ * mbrblob, mbrleaf, jxl, nbli, exrN, mbrNNNN), and the READ path derives the
+ * member name from the container's CURRENT name (vol_read.c: the TARR/FLACR
+ * part lookup builds "%s!part%u" from the live record name). A rename that
+ * moves the container and leaves the members where they were therefore does
+ * two things at once: the container stops decoding (every read EIOs) while its
+ * row and its bytes are still on the volume, and the leftovers become
+ * internal names with no parent -- which nothing collects, because the sweep
+ * skips internal shapes and fsck counts them as live files.
+ *
+ * Found in the leg5 power-loss soak: `rename t.tar -> r13.bin` succeeded, then
+ * r13.bin was unreadable and `t.tar!part0` sat on the volume as a GHOST.
+ *
+ * Returns 0 when every member moved (or when there were none), -1 when the
+ * rename must not proceed -- a name collision in the destination is a refusal,
+ * not a clobber. Staged in the SAME delta as the rename itself, so the FUSE
+ * layer's single fence publishes both or neither. */
+int vol_rename_siblings(invfs_volume *v, const char *old_name,
+                        const char *new_name);
+
 /* A transcode that gives up partway has already committed some of its
    children. Their names ("name!partN", "name!recipe", "name!coverN") stay live
    records that no pass can reach: sweep skips internal '!' names and fsck
