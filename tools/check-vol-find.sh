@@ -38,6 +38,13 @@ cd "$(dirname "$0")/.." || exit 1
 
 # ACTS = the result decides something. SKIP = merely skips work.
 # Keep this sorted; it is the ledger.
+#
+# The entries are keyed by LINE NUMBER, so any edit that shifts a file turns
+# correct entries STALE and the same sites UNMARKED -- four red builds in one day,
+# none of them a semantic change. After moving code, re-point the entries with
+# tools/check-vol-find-repoint.py --from <commit-whose-ledger-matched> instead of
+# editing them by hand: it applies the diff's line delta, which cannot attach an
+# entry to the wrong call site the way a nearest-neighbour search can.
 LEDGER="
 src/cli/acl_inherit_test.c:266:SKIP   # child_has_acl: measurement, fault spent
 src/cli/acl_inherit_test.c:291:SKIP   # setup: aborts the test if the /p anchor is not found
@@ -55,18 +62,18 @@ src/cli/crc32c_test.c:364:ACTS  # LEG 4: a miss FAILS the test. Whether the name
 src/cli/crc32c_test.c:368:ACTS  # LEG 4: the diagnostic that names the name whose lookup missed. Reached only after :364 has already failed, so it reports rather than decides.
 src/cli/crc32c_test.c:413:ACTS  # LEG 5: as :364, on the cross-machine reopen, where a miss is the reported symptom.
 src/cli/crc32c_test.c:417:ACTS  # LEG 5: as :368, on the cross-machine reopen.
-src/cli/fuse_fs.c:1821:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
-src/cli/fuse_fs.c:2126:SKIP
-src/cli/fuse_fs.c:2500:SKIP
-src/cli/fuse_fs.c:3273:SKIP
-src/cli/fuse_fs.c:3494:SKIP
-src/cli/fuse_fs.c:3549:SKIP
-src/cli/fuse_fs.c:3847:SKIP
-src/cli/fuse_fs.c:4053:SKIP
-src/cli/fuse_fs.c:4140:SKIP
-src/cli/fuse_fs.c:4175:SKIP
-src/cli/fuse_fs.c:4212:SKIP
-src/cli/fuse_fs.c:3262:SKIP   # close stamp: re-read the row so a chmod during the open survives it
+src/cli/fuse_fs.c:1829:SKIP   # readdirplus: snapshot/row miss degrades to NULL (kernel re-stats); the lookup decides nothing
+src/cli/fuse_fs.c:2134:SKIP
+src/cli/fuse_fs.c:2508:SKIP
+src/cli/fuse_fs.c:3281:SKIP
+src/cli/fuse_fs.c:3502:SKIP
+src/cli/fuse_fs.c:3557:SKIP
+src/cli/fuse_fs.c:3856:SKIP
+src/cli/fuse_fs.c:4062:SKIP
+src/cli/fuse_fs.c:4149:SKIP
+src/cli/fuse_fs.c:4184:SKIP
+src/cli/fuse_fs.c:4221:SKIP
+src/cli/fuse_fs.c:3270:SKIP   # close stamp: re-read the row so a chmod during the open survives it
 src/cli/heat_walk_test.c:365:SKIP
 src/cli/lane_release_test.c:243:SKIP
 src/cli/ls.c:121:SKIP
