@@ -1,6 +1,6 @@
 # InvariantFS
 
-[![engine-ci](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml/badge.svg?branch=main&event=push)](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml) [![release](https://img.shields.io/github/v/release/AsmanovLev/InvariantFS)](https://github.com/AsmanovLev/InvariantFS/releases) [![license](https://img.shields.io/github/license/AsmanovLev/InvariantFS)](LICENSE) [![C](https://img.shields.io/badge/dynamic/json?url=https://api.github.com/repos/AsmanovLev/InvariantFS/languages&query=%24.C&label=C&suffix=%20B&color=blue)](https://github.com/AsmanovLev/InvariantFS)
+[![engine-ci](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml/badge.svg?branch=main&event=push)](https://github.com/AsmanovLev/InvariantFS/actions/workflows/engine-ci.yml) [![release](https://img.shields.io/github/v/release/AsmanovLev/InvariantFS)](https://github.com/AsmanovLev/InvariantFS/releases) [![license](https://img.shields.io/github/license/AsmanovLev/InvariantFS)](LICENSE) [![AI:X EXECUTE](https://img.shields.io/badge/AI-EXECUTE-grey?style=flat&logoSize=auto&labelColor=13171f)](https://0rwx.com) [![C](https://img.shields.io/badge/dynamic/json?url=https://api.github.com/repos/AsmanovLev/InvariantFS/languages&query=%24.C&label=C&suffix=%20B&color=blue)](https://github.com/AsmanovLev/InvariantFS)
 
 A content-addressed filesystem built around one guarantee:
 
