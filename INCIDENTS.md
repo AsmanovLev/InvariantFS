@@ -3757,6 +3757,32 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   already takes on a rewound slot. Regression test: stage row B over A under a
   failing device, force the fence to refuse, reopen, and require A to read back
   byte-identical with fsck clean.
+* **Fix attempt (2026-11-27): implemented, NOT pushed -- one control regressed.**
+  The shape above was written: `v->delta_fenced_seq` (advanced on a successful
+  `vol_delta_drain`, on a successful `vol_flush` barrier, and set to the replay's
+  own seq at mount) and `e->seq <= v->delta_fenced_seq` added to the supersede
+  test in `dl_retire_collect`. Patch:
+  `/d/Users/User/invfs_deploy/_leg5-fenced-seq.patch` (610 lines, uncommitted).
+
+  It did **not** earn a commit:
+  - `test-fence-doom-doubleretire.sh` leg 1 (the WP630 control) went from pass to
+    `harness: leg1 final sync: 0 release(s)` / `retire never fired`. A diagnostic
+    added to the supersede drop path never fired, so the suppressed entries are
+    NOT supersede-form: either delete-form (`del=1`) or the recipe path. The
+    leak direction is the safe one, but a fix that stops legitimate retire frees
+    is not the fix.
+  - the same suite is **red on main at leg 2** (`shared pba refcount 0 under live
+    sharer`) and is **registered nowhere** (not in `make e2e`, not in CI, not in
+    run-e2e) -- so it documents a known bug nobody gates on, which is itself
+    worth a line: a suite that asserts the fix for WP630 has never run in CI.
+  - leg5 was re-run three times with the patch: twice it failed on a DIFFERENT
+    shape (base tree unreachable, the honest total-loss case), once on
+    `verify post-soak`. So the patch is unverified against the bug it targets.
+
+  Next question, precisely: which path pushes the retire entry in leg 1, and what
+  is in `delta_retire` when the fast path collects it (form, `del`, `e->seq`,
+  `s->seq`, `delta_fenced_seq`)? The diagnostic to add is at the PUSH
+  (`vol_retire_pbas`/`vol_retire_recipe`) rather than at the drop.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,
