@@ -3628,6 +3628,18 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   owner (inode 102) and its frame says `csize 32008` where the recipe expects a
   65536-byte raw segment — i.e. the block holds a DIFFERENT write's frame, and the
   recipe was never told.
+* **Hypothesis 3 — "some path frees a pba the live map still counts" — DISPROVED
+  too.** `vol_free_run` now logs the owner count at every free in a
+  `CORRUPT_DEBUG` build (`FREE pba=N n=K owners=X owners_tail=Y`). A full failing
+  run: **0 frees with owners > 0** out of 12 450 traced events, on the same seed
+  that corrupts `s12.bin`'s segment 3 at pba 18796. So no free is wrong *at the
+  moment it happens*: the reference to that block is not in the map yet.
+  That points the next instrument at the PUBLISH side, not the free side — a row
+  that is staged (delta overlay, invisible to the live-row walk `pba_ref` builds
+  from) and whose blocks are then handed back, or a row that becomes live after
+  the free through the same fence. The trace already carries ordering (t=...), so
+  logging `vol_inode_delta_put` with the recipe's pbas and correlating with the
+  free of 18796 answers it in one run.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,

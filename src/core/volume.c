@@ -3791,14 +3791,48 @@ uint64_t vol_write_guard(invfs_volume *v)
  * per part. Keeping the body in its own function (rather than recursing on
  * vol_free_blocks) is what makes that split non-recursive and the free
  * counters exact. */
+#ifdef INVFS_CORRUPT_DEBUG
+/* CORRUPT_DEBUG only: how many live recipes name this pba RIGHT NOW.
+ * -1 = the map cannot answer (not built, or the rebuild was refused), which
+ * is never a licence to free and never a number to print as zero. Used by
+ * vol_free_run to catch the one class this instrument exists for: a free of a
+ * block a live recipe still names. The map lock is recursive, so asking from
+ * inside a free is safe even when the caller already holds it. */
+static int pba_ref_owners_dbg(invfs_volume *v, uint64_t pba)
+{
+    size_t k;
+    int n = -1;
+    if (!v || !pba || pba >= v->sb.total_blocks) return -1;
+    pba_ref_lock();
+    if (v->pba_ref_on && v->pba_ref) {
+        k = (size_t)pba_ref_hash(pba) & v->pba_ref_mask;
+        while (v->pba_ref[k].pba && v->pba_ref[k].pba != pba)
+            k = (k + 1) & v->pba_ref_mask;
+        n = v->pba_ref[k].pba ? (int)v->pba_ref[k].n : 0;
+    }
+    pthread_mutex_unlock(&g_pba_ref_mu);
+    return n;
+}
+#endif
+
 static void vol_free_run(invfs_volume *v, uint64_t pba, uint64_t nblocks)
 {
     uint64_t i;
     uint64_t end = pba + nblocks;
     if (end > v->sb.total_blocks)
         end = v->sb.total_blocks;
+#ifdef INVFS_CORRUPT_DEBUG
+    /* owners > 0 is the defect this whole instrument was built to name: a
+     * live recipe still names the block being handed back, so the next
+     * allocation can overwrite it. -1 means the map could not answer. */
+    CD("FREE pba=%llu n=%llu owners=%d owners_tail=%d",
+       (unsigned long long)pba, (unsigned long long)(end - pba),
+       pba_ref_owners_dbg(v, pba),
+       end > pba ? pba_ref_owners_dbg(v, end - 1) : -1);
+#else
     CD("FREE pba=%llu n=%llu", (unsigned long long)pba,
        (unsigned long long)(end - pba));
+#endif
     /* WP25: a REAL free (retention above holds its blocks) drops the
      * redundant second copy: the dev1 mirror of a raw-zone run, or the
      * dev0 acceleration copy of a canonical dev1-shadow run. */
