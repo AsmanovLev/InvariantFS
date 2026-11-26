@@ -130,7 +130,30 @@ cmp -s "$MNT/plain2.txt" "$WORK/d/plain.txt" || fail "leg4: the plain file's byt
 mnt_down
 echo "  plain file: renamed, bytes identical"
 
-echo "== leg 5: fsck + verify =="
+echo "== leg 5: truncating a container drops its members (no leak) =="
+# FUSE's open(O_TRUNC) goes through vol_replace_file(name, NULL, 0) ->
+# vol_create_node, which used to know nothing about siblings: the truncate
+# succeeded, `name!partN` stayed live for ever, and verify called the volume
+# CLEAN because a stale member is a valid file. Measured at 300 000 bytes of
+# orphaned payload. The write path always purged them; only this branch did not.
+mnt_up "$IMG"
+printf 'now a plain file\n' > "$MNT/sub2/y.tar" || fail "leg5: overwrite of a container failed"
+[ "$(cat "$MNT/sub2/y.tar")" = "now a plain file" ] || fail "leg5: the overwritten file reads back wrong"
+mnt_down
+onvol | grep -q '^sub2/y.tar!part0$' && fail "leg5: the container's member survived the truncate (a 300 KB leak)"
+[ "$($B/invf-cat "$IMG" sub2/y.tar)" = "now a plain file" ] || fail "leg5: offline read of the truncated file differs"
+echo "  truncate: member dropped, content is the new bytes"
+
+echo "== leg 6: the offline overwrite path still purges (control) =="
+$B/invf-cp "$IMG" "$WORK/d/t.tar" again.tar >/dev/null
+$B/invf-sweep "$IMG" >/dev/null 2>&1 || fail "leg6: sweep failed"
+onvol | grep -q '^again.tar!part0$' || fail "leg6: fixture was not decomposed"
+printf 'small\n' > "$WORK/d/small.txt"
+$B/invf-cp "$IMG" "$WORK/d/small.txt" again.tar >/dev/null
+onvol | grep -q '^again.tar!part0$' && fail "leg6: invf-cp overwrite left the member behind"
+echo "  offline overwrite: member dropped too"
+
+echo "== leg 7: fsck + verify =="
 $B/invf-fsck "$IMG" | tee "$WORK/fsck.log"
 fsck_clean "$WORK/fsck.log" || fail "fsck not clean"
 $B/invf-verify "$IMG" --deep > "$WORK/verify.log" 2>&1 || { tail -5 "$WORK/verify.log"; fail "verify --deep exited non-zero"; }
