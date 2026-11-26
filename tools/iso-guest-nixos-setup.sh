@@ -492,6 +492,26 @@ if [ -n "${INVFS_SERVER:-}" ]; then
     curl -fsSL -o /mnt/boot/EFI/BOOT/BOOTX64.EFI "$INVFS_SERVER/BOOTX64.EFI" 2>/dev/null || true
 fi
 
+# The one experiment that can still settle whose bug the lost +x is, using nix's
+# OWN copy path rather than a hand replay: `nix-store --store /mnt --add` writes
+# into the target store (its answer is a store path like /nix/store/<hash>-x,
+# which is PHYSICAL at /mnt/nix/store/<hash>-x -- checking the answer as a bare
+# path tests the INSTALLER's store and proves nothing, which is what the previous
+# version of this probe did). Add an executable file and look at the file on the
+# volume:
+#   mode 444 -> nix's copy loses the bit, so our SETATTR is implicated after all
+#   mode 555 -> the copy is fine and only nixos-install's closure write drops it
+say "  nix's own copy into the target store (--store /mnt):"
+printf '#!/bin/sh
+true
+' > /tmp/exec-probe.sh && chmod 0755 /tmp/exec-probe.sh
+_addp=$(nix-store --store /mnt --add /tmp/exec-probe.sh 2>/dev/null | tail -1)
+if [ -n "${_addp:-}" ]; then
+    say "    source $(stat -c '%a' /tmp/exec-probe.sh) -> added '$_addp'; on the volume: $(stat -c '%a %n' "/mnt$_addp" 2>/dev/null || echo MISSING)"
+else
+    say "    nix-store --add returned nothing"
+fi
+
 # ---- mode fixup -----------------------------------------------------------
 # The probe above settles where the bits are lost: replaying the store's write
 # sequence by hand -- mkdir 0555, create inside it, chmod 0555 -- gives 555, so
