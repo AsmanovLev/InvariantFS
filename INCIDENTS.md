@@ -3609,6 +3609,31 @@ With that fix the same seed reproduces the failing class locally in about a minu
 shape as the CI capture (`inode 22 (s34.bin): data segment 4 (pba 22725)`), where the
 segment's frame no longer decodes under a sound recipe and the whole file serves EIO.
 
+**Where the investigation stands (2026-11-26, after the harness fix).**
+
+* Reproduced locally: `FLAKEY_ONLY=5 FLAKEY_SEED=3621091749` fails in ~1 min with
+  `fsck(): inode 102 (s24.bin): data segment 0 (pba 118139) no longer decodes` —
+  the same shape as CI's `inode 22 (s34.bin)`, segment 4, pba 22725.
+* **Hypothesis 1 — "a failed rewrite damages the previous version" — DISPROVED.**
+  Clean-room on a real dm-flakey block device: write A (up mode), reload the table
+  as `error`, rewrite with B (fails loudly, exit 1), reload as up, read back: the
+  OLD bytes come back and `fsck` says CLEAN. The engine's abort path is correct
+  when the failure is honest and the device stops.
+* **Hypothesis 2 — "the allocator hands out a block a live recipe still names" —
+  consistent, not yet proven.** On the captured image the shared extents are all
+  `bitmap=allocated` (checked with `invf-dedupe_sim`, which now prints the bitmap
+  state beside each multi-owner extent), so this is not a free block being reused
+  silently: it is a block that was freed and then legitimately re-allocated while
+  an older recipe still named it. The damaged block itself (pba 118139) has ONE
+  owner (inode 102) and its frame says `csize 32008` where the recipe expects a
+  65536-byte raw segment — i.e. the block holds a DIFFERENT write's frame, and the
+  recipe was never told.
+* **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
+  check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
+  already exact), and run the soak with it armed. The first offender names itself,
+  with the stage that freed it. That is cheap, it is the same shape as the
+  existing fault seams, and it turns a three-day forensic question into one run.
+
 Still to do: the durability defect itself. The captured volume (CI artifact
 `soak-flakey-artifacts`, 835 MB, `backing.img` + `oplog.txt`) shows the write that
 failed was a REWRITE of an existing file whose previous version then stopped decoding,

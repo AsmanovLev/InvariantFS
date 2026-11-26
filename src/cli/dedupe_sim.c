@@ -391,6 +391,42 @@ int main(int argc, char **argv)
         } else { free(key); free(loser); }
     }
 
+    /* Extents with MORE THAN ONE owner, named. Without a dedupe pass having
+     * run, an extent that two live inodes both name is an allocator handing
+     * out a block somebody still references -- the shape a data block takes
+     * when it is overwritten under a live recipe. Printing the pbas and their
+     * owners is what turns "an extent stopped decoding" into "these two\n     * inodes claim the same block". */
+    if (c.own.n) {
+        uint64_t shown = 0;
+        size_t e;
+        printf("\n  multi-owner extents (no dedupe ran unless policy W below says so):\n");
+        for (e = 0; e < c.own.cap && shown < 12; e++) {
+            size_t f, listed = 0;
+            if (!c.own.v[e].pba || c.own.v[e].owners < 2) continue;
+            printf("    pba %llu  %llu blocks  owners=%u  bitmap=%s  named by:",
+                   (unsigned long long)c.own.v[e].pba,
+                   (unsigned long long)c.own.v[e].blocks,
+                   c.own.v[e].owners,
+                   (c.v->bitmap && bit_get(c.v->bitmap, c.own.v[e].pba)) ?
+                       "allocated" : "FREE");
+            for (f = 0; f < c.n && listed < 4; f++) {
+                size_t q;
+                for (q = 0; q < c.files[f].npba; q++) {
+                    if (c.files[f].pbas[q] == c.own.v[e].pba) {
+                        printf(" ino%llu", (unsigned long long)c.files[f].ino);
+                        listed++;
+                        break;
+                    }
+                }
+            }
+            if (c.own.v[e].owners > listed) printf(" (+%u more)",
+                                                  c.own.v[e].owners - (unsigned)listed);
+            printf("\n");
+            shown++;
+        }
+        if (!shown) printf("    none\n");
+    }
+
     {
         uint64_t hist[5] = {0, 0, 0, 0, 0};
         for (k = 0; k < c.own.cap; k++) {
