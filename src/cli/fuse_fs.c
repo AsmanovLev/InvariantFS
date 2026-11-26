@@ -1651,7 +1651,7 @@ static unsigned acl_sync_mode(const uint8_t *acl, size_t alen,
 }
 
 /* ---- FUSE operations ---- */
-static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
+static int invf_getattr_traced(const char *path, struct stat *st, struct fuse_file_info *fi)
 {
     (void)fi;
     {
@@ -1709,6 +1709,25 @@ static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info
         fill_stat_from_meta(st, &m, size, ctime);
         return 0;
     }
+}
+
+/* Trace wrapper: what mode does the daemon hand back for a path? nix decides the
+ * final store mode from exactly this -- it fchmods 0755, then newfstatat()s the
+ * path, and on this filesystem the stat answered 0644 while ext4 answered 0755,
+ * so nix computed 0444 for its read-only pass (run 2026-11-26, reproduced
+ * locally in seconds). Without knowing what WE return there is no way to tell an
+ * engine bug from a caller bug. */
+static void setattr_trace(const char *what, const char *path, unsigned mode,
+                          int have_fi, int rc);
+
+static int invf_getattr(const char *path, struct stat *st, struct fuse_file_info *fi)
+{
+    int rc = invf_getattr_traced(path, st, fi);
+    if (rc == 0)
+        setattr_trace("getattr", path, (unsigned)st->st_mode, fi != NULL, 0);
+    else
+        setattr_trace("getattr-miss", path, 0, fi != NULL, rc);
+    return rc;
 }
 
 static int invf_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
@@ -3228,6 +3247,25 @@ static int commit_wctx(wctx *c)
     /* re-stamp metadata with a fresh mtime (the commit carries the old
      * ext, so mode/owner/xattrs survive; this updates the write time) */
     if (c->have_meta) {
+        /* The stamp's job is the WRITE TIME: "the commit carries the old ext, so
+         * mode/owner/xattrs survive". They did not. c->meta was captured when the
+         * session began (or at create), so a chmod that arrived during the open
+         * was written to the row and then UNDONE here by the stamp -- which is
+         * the whole of the NixOS store bug: nix creates 0644, fchmods 0755,
+         * closes, reads the mode back to compute its read-only pass, and the
+         * close stamp had put 0644 back, so it computed 0444. Every executable
+         * in an installed store landed non-executable. Reproduced locally in
+         * seconds with nix-store --add: ext4 gives 555, this mount gave 444.
+         *
+         * So re-read the row and keep every field except mtime. */
+        invfs_meta_pub cur;
+        uint64_t ino = vol_find(g_vol, c->name);
+        if (ino && vol_get_meta(g_vol, ino, &cur) == 0) {
+            c->meta.mode = cur.mode;
+            c->meta.uid = cur.uid;
+            c->meta.gid = cur.gid;
+            c->meta.type = cur.type;
+        }
         c->meta.mtime = (int64_t)time(NULL);
         if (!vol_apply_meta(g_vol, c->name, &c->meta))
             fprintf(stderr, "invf: close stamp FAILED %s (area full?)\n", c->name);
@@ -3537,7 +3575,8 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
 {
     (void)fi;
     invfs_meta_pub patch;
-    char ename[300];
+    char ename[300] = {0};   /* "" until meta_for_path fills it: the session
+                              * update at the end keys on it */
     invfs_meta_pub cur;
     struct acreds c;
     int rc = perm_check_traversal(path);
@@ -3645,7 +3684,37 @@ static int invf_chmod(const char *path, mode_t mode, struct fuse_file_info *fi)
     pthread_mutex_unlock(&g_io_lock);
     memset(&patch, 0, sizeof patch);
     patch.mode = mode & 07777;
-    return meta_apply_patch(path, MM_MODE, &patch);
+    {
+        int prc = meta_apply_patch(path, MM_MODE, &patch);
+        /* A chmod DURING an open write session has to reach that session's meta
+         * too, or the commit writes the mode it stamped at create time back over
+         * it. Reproduced locally in seconds:
+         *
+         *   after create        : 644
+         *   after fchmod(fd,755): fstat=755  stat=755
+         *   after close         : stat=644        <- reverted by the commit
+         *
+         * and that is exactly nix's sequence for every store path (create, set
+         * the exec bit, close), which is why an installed NixOS store arrived
+         * with every executable at 0444 while the same copy on ext4 keeps 0555:
+         * nix reads the mode back after close, sees no exec bit, and computes
+         * 0444 for its read-only pass.
+         *
+         * `ename` is the path the meta lookup already normalised (no leading
+         * slash), which is what the dirty-session list is keyed on. */
+        if (prc == 0 && ename[0]) {
+            pthread_mutex_lock(&g_io_lock);
+            wctx *w = dirty_find_locked(ename);
+            if (w) {
+                w->meta.mode = mode & 07777;
+                w->have_meta = 1;
+            }
+            setattr_trace(w ? "chmod-session-updated" : "chmod-session-none",
+                          ename, (unsigned)mode, 0, prc);
+            pthread_mutex_unlock(&g_io_lock);
+        }
+        return prc;
+    }
 }
 
 static int invf_chown(const char *path, uid_t uid, gid_t gid,
