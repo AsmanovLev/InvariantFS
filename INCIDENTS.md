@@ -3695,6 +3695,36 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   2. or make doom re-mark the blocks its retire discharged (a "re-alloc on
      doom" list). Cheaper to write, but it must also survive a crash between
      the doom and the re-mark, so (1) is the shape that keeps the invariant.
+* **Refinement: the free happens AFTER a REFUSED fence (2026-11-27).** With
+  fence and doom logging added, the same seed gives the order below. The device
+  is in a failing window; every barrier refuses, and the records are doomed --
+  and the retire frees happen anyway:
+
+  ```
+  224424.389  COMMIT s12.bin 784772 nsegs=12   (row A)
+  224424.396  FENCE ok                          (A durable)
+  224424.475  FREE ...            DELTA doom (staged=4)   FENCE barrier REFUSED -> doom
+  224424.480  COMMIT s12.bin 11994 nsegs=1      (row B supersedes A)
+  224424.480  DELTA doom (staged=8)  FENCE barrier REFUSED -> doom
+  224424.485  FENCE barrier REFUSED -> doom (staged=13)
+  224424.493  FREE pba=19572 n=17, 19605 n=17, 19622 n=17, 19639 n=17   <- retired blocks
+  224424.528  FREE pba=18796 n=17 owners=0                              <- A's segment 3
+  ```
+
+  So the question is no longer "fenced vs folded": it is **why the retire list
+  is discharged when the covering barrier refused**. `vol_delta_drain` looks
+  right (collect only on `rc == 0`), so the two suspects are:
+  1. the fast path at the top of `vol_delta_drain` -- `pending == 0 &&
+     nstaged == 0` after a doom, which collects and frees with **no barrier at
+     all**, justified by "their rows were fenced before retention was freed".
+     A doom makes exactly that premise false, and it also resets pending and
+     staged to 0, which is what routes the next drain into the fast path;
+  2. the witness match in `dl_retire_free_list`: after `dl_doom_entry` rolls the
+     index back, an entry whose span was rebased (`dl_retire_rebase`) can still
+     name a live span and pass a test that means "the mutation is still live".
+  The next instrument is three lines inside `dl_retire_free_list`: the entry's
+  key, the span/seq it expects, the span/seq the index actually holds, and the
+  verdict. One run tells which of the two it is.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,

@@ -2316,6 +2316,7 @@ int vol_flush(invfs_volume *v)
      * in-FUSE worker's close -- and not only on the  branch below. */
     if (v->flush_fail_at && --v->flush_fail_at == 0) {
         vol_io_error_latch(v, "flush (INVFS_FLUSH_FAIL_AT)");
+        CD("FENCE flush REFUSED (injected)");
         return -1;
     }
     /* WP24-lite: a time-travel handle never persists. Every mutation was
@@ -2335,6 +2336,7 @@ int vol_flush(invfs_volume *v)
      * returning, mirroring publish. */
     if (vol_bitmap_flush(v) != 0) {
         vol_io_error_latch(v, " bitmap flush");
+        CD("FENCE bitmap flush REFUSED");
         return -1;
     }
     /* WP607: heal retained spans before this barrier flushes them raw
@@ -2342,6 +2344,7 @@ int vol_flush(invfs_volume *v)
      * failed mutations durably -- the leg5 r17 remount-ghost). */
     vol_delta_heal(v);
     if (vmux_barrier(v, " bitmap") < 0) {
+        CD("FENCE barrier REFUSED -> doom");
         /* WP605/WP606: a refused flush barrier leaves staged delta bytes
          * (which this barrier would have covered) of unknown fate: doom
          * the staged set (failed mutations stay dead) and heal at the
@@ -2351,6 +2354,7 @@ int vol_flush(invfs_volume *v)
         vol_delta_doom(v);
         return -1;
     }
+    CD("FENCE ok");
     /* WP98: the WP25 tier/RAW-mirror indexes need no journal to be
      * durable. The ordering rule is the copies' blocks BEFORE the owner
      * record that names them, and the owner blob is published after the

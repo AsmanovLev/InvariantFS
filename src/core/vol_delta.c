@@ -714,9 +714,13 @@ void vol_delta_doom(invfs_volume *v)
 {
     if (!v)
         return;
+    CD("DELTA doom begin (staged=%zu doomed=%zu pending=%d)",
+       v->delta_nstaged, v->delta_doomed, v->delta_pending);
     pthread_mutex_lock(&g_delta_lock);
     dl_doom_locked(v);
     pthread_mutex_unlock(&g_delta_lock);
+    CD("DELTA doom end (staged=%zu doomed=%zu pending=%d)",
+       v->delta_nstaged, v->delta_doomed, v->delta_pending);
 }
 
 /* WP607 retire list bodies. Span capture + liveness match run under
