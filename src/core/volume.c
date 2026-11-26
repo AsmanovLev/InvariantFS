@@ -3029,6 +3029,7 @@ void pba_ref_invalidate(invfs_volume *v)
 {
     pba_ref_lock();
     if (v) v->pba_ref_stale = 1;
+    CD("PBAREF invalidate (next free gate rebuilds)");
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
@@ -3038,6 +3039,7 @@ void pba_ref_validate(invfs_volume *v)
 {
     pba_ref_lock();
     if (v) v->pba_ref_stale = 0;
+    CD("PBAREF validate (map claimed exact by the publisher)");
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
@@ -3089,12 +3091,22 @@ static void pba_ref_modify_locked(invfs_volume *v, uint64_t pba, int delta)
     while (v->pba_ref[k].pba && v->pba_ref[k].pba != pba)
         k = (k + 1) & v->pba_ref_mask;
     if (v->pba_ref[k].pba) {
+        uint32_t was = v->pba_ref[k].n;
         if (delta > 0) v->pba_ref[k].n++;
         else if (v->pba_ref[k].n) v->pba_ref[k].n--;
+        /* CORRUPT_DEBUG: only the TRANSITIONS are interesting and they are
+         * rare -- 0->1 is a reference appearing, 1->0 is one disappearing.
+         * A run of these next to a FREE of the same pba says which side
+         * moved first, which is the whole leg5 question. */
+        if ((was == 0) != (v->pba_ref[k].n == 0))
+            CD("PBAREF count pba=%llu %u->%u (delta=%d)",
+               (unsigned long long)pba, was, v->pba_ref[k].n, delta);
     } else if (delta > 0) {
         v->pba_ref[k].pba = pba;
         v->pba_ref[k].n = 1;
         v->pba_ref_n++;
+        CD("PBAREF count pba=%llu 0->1 (new slot)",
+           (unsigned long long)pba);
     }
 }
 
@@ -3394,9 +3406,21 @@ void invfs_vol_volume_fault_reload(void)
 int pba_ref_ensure(invfs_volume *v)
 {
     int rc;
+#ifdef INVFS_CORRUPT_DEBUG
+    uint64_t was_n = v ? v->pba_ref_n : 0;
+    int was_on = v ? v->pba_ref_on : 0;
+#endif
     pba_ref_lock();
     rc = pba_ref_ensure_locked(v);
     pthread_mutex_unlock(&g_pba_ref_mu);
+#ifdef INVFS_CORRUPT_DEBUG
+    /* A rebuild that ran and did not count a row which names the block is the
+     * leg5 shape; the number that says so is the reference count before and
+     * after. `was_on` distinguishes "rebuilt" from "reused an exact map". */
+    CD("PBAREF ensure rc=%d was_on=%d was_n=%llu now_on=%d now_n=%llu",
+       rc, was_on, (unsigned long long)was_n, v ? v->pba_ref_on : 0,
+       v ? (unsigned long long)v->pba_ref_n : 0ULL);
+#endif
     return rc;
 }
 

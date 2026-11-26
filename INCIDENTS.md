@@ -3661,6 +3661,40 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   the delta-published row, or the count was dropped by the invalidate path. The
   next instrument is `pba_ref_ensure`/`pba_ref_invalidate`/`pba_ref_modify`
   logging for the one pba: three lines answer it.
+* **ROOT CAUSE LOCATED (2026-11-26, third instrument).** The pba_ref trace of
+  the same seed settles the order, and the answer is not a wrong free: it is a
+  free made legal by a row that is later DOOMED.
+
+  ```
+  t=224171.462  COMMIT s12.bin old=123  size=784772 nsegs=12   (row A; seg3 = pba 18796)
+  t=224171.475  PBAREF count pba=18796 0->1 (new slot)          (A registered)
+  t=224171.559  COMMIT s12.bin old=123  size=11994  nsegs=1     (row B supersedes A)
+  t=224171.607  PBAREF ensure rc=0 was_on=0 was_n=119 now_on=1 now_n=98
+  t=224171.607  FREE pba=18796 n=17 owners=0                    (A's blocks, legal for B)
+  t=224172.717  seal ALLOC pba=18796 n=1                        (reused)
+  ```
+
+  Two write sessions on the SAME inode overlapped (`old=123` twice, 97 ms
+  apart), each of them a legal commit. B supersedes A, so B's commit retires A's
+  segments, and at that moment the free is CORRECT: the live row is B and it does
+  not name 18796. Then B's publish is DOOMED later (a fence failure unwinds the
+  staged row), the overlay reverts to A -- and A names 18796, which has been
+  freed and re-used by the seal in the meantime. That is the whole failure:
+  `fsck` reports A's size (784772) with a segment holding the seal's frame.
+
+  So: **the retire discharge is not undone by a doom.** A block freed on the
+  strength of a superseding row stays freed when that row is unwound, and the
+  restored row names it. The comments' ordering rule ("losers are RETIRED, not
+  freed; the drain discharges at the covering fence") protects against a fence
+  that FAILS, not against a row that is reverted AFTER its fence succeeded.
+
+  The two candidate fixes, in the order I would try them:
+  1. discharge a superseded row's retire only when the SUPERSEDING row is
+     durable in the base (folded), not merely fenced -- a fence acks a write, it
+     does not promise the row is the one readers will see after a doom;
+  2. or make doom re-mark the blocks its retire discharged (a "re-alloc on
+     doom" list). Cheaper to write, but it must also survive a crash between
+     the doom and the re-mark, so (1) is the shape that keeps the invariant.
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,
