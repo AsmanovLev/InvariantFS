@@ -1576,15 +1576,35 @@ Evidence: leg5 with the failing seed (`FLAKEY_SEED=242413183`) went from
 `FAIL: present but unreadable: r13.bin` to `SOAK: PASS rounds=420 ops=1358
 gates=106`, `deep: 34 files ok, 0 corrupt`.
 
-**Still open, same family, measured today:** the truncate path leaks the members.
-Overwriting a swept container through the mount (`printf ... > mnt/t.tar`, i.e.
-open `O_TRUNC`) leaves `t.tar!part0` (300 000 bytes) on the volume for ever, and
-`invf-verify --deep` calls the volume clean because a stale member is a valid live
-file. The offline path is correct — `invf-cp` over the same name purges it, via
-the write session's `owns_siblings` — so the gap is in
-`vol_replace_file(name, NULL, 0)`, whose FUSE caller's comment claims the siblings
-"describe bytes that are gone, so vol_replace_file drops them with it". It does
-not: `vol_replace_file` hands the NULL-data case to `vol_create_node`, which knows
-nothing about siblings. Fix belongs there (ask the OLD row's recipe via
-`ast_owns_siblings`, purge after the replace succeeds so a refused replace leaves
-them alone) and wants its own leg in the suite above.
+**Same family, second hole -- also fixed.** Truncating a container leaked its
+members. Overwriting a swept container through the mount (`printf ... > mnt/t.tar`,
+i.e. open `O_TRUNC`) left `t.tar!part0` (300 000 bytes, measured) on the volume for
+ever, and `invf-verify --deep` called the volume clean because a stale member is a
+valid live file. The offline path was already correct -- `invf-cp` over the same
+name purges it, via the write session's `owns_siblings` -- so the gap was
+`vol_replace_file(name, NULL, 0)`, whose FUSE caller's comment claimed the siblings
+"describe bytes that are gone, so vol_replace_file drops them with it": the
+NULL-data branch went straight to `vol_create_node`, which knows nothing about
+siblings.
+
+Fixed with `name_owns_siblings` + `replace_empty_content` in `vol_dirs.c`: ask the
+OLD row's recipe (`ast_owns_siblings`) BEFORE the replace, purge AFTER it succeeds,
+so a refused replace leaves the members alone. A read that does not complete answers
+"no members" on purpose -- the cost is a surviving leak on a damaged row, never a
+deleted name on the strength of a failed read. Measured after:
+`printf ... > mnt/t.tar` leaves `t.tar` (17 bytes) and nothing else, verify clean;
+and `truncate -s 100 mnt/t.tar` (the shrink path, which goes through the write
+session) was checked too: content is the first 100 bytes, member gone, verify
+clean. Both are legs 5 and 6 of `tools/test-rename-siblings.sh`.
+
+**And the first shape of that fix was O(files) per rename.** `vol_rename_siblings`
+walked the whole namespace to find the members, which is one full walk per rename
+of a regular file with content; an install does thousands of them. Measured the
+hard way: the arch ISO install step, normally 2500-2730 s, was still inside the
+same step after 90 minutes and the job would have hit its timeout. The scoped
+version asks the container's OWN directory first -- one `vol_dirent_scan` for a
+dirent whose name starts with `<leaf>!`, the same fast scan `vol_delete_siblings`
+already uses, and then walks only that directory. Measured on the install-shaped
+load (5000 files in one directory, FUSE mount): **300 renames in 2.1 s**, 300
+creates in 0.19 s. The lesson is the one the unlink cascade already encoded: a
+sibling purge is a PARENT-DIRECTORY question, never a namespace question.

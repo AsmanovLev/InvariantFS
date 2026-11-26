@@ -1171,72 +1171,122 @@ rename_abort:
  * acked rename; vol_rename takes no barrier of its own).
  */
 typedef struct {
-    char (*names)[600];    /* full path of each member, as the walk reports it */
+    char (*names)[INVFS_MAX_NAME + 1];  /* member LEAF names (same directory) */
+    uint64_t *inos;
     size_t n, cap;
-    const char *prefix;    /* "<old container>!" */
-    size_t plen;
+    const char *leaf;                   /* the container's leaf */
+    size_t llen;
     int oom;
 } sib_ren_ctx;
 
+/* Collect the members of one container out of its OWN directory.
+ *
+ * Scoped to that directory on purpose: the first shape walked the whole
+ * namespace on every rename of a file with content, which is O(files) per
+ * rename and turned an arch install (thousands of renames) from ~45 minutes
+ * into a run that was still inside the same step after 90. A container's
+ * members are entries of the directory the container is in -- vol_delete_siblings
+ * already relies on exactly that, with the same dirent fast-scan below. */
 static int sib_collect_cb(void *ctx_, const char *path, uint64_t ino,
                           uint32_t type, uint64_t size, int64_t mtime)
 {
     sib_ren_ctx *c = (sib_ren_ctx *)ctx_;
-    size_t pl;
-    (void)ino; (void)type; (void)size; (void)mtime;
+    const char *leaf = path;
+    const char *slash = strrchr(path, '/');
+    size_t ll;
+    (void)type; (void)size; (void)mtime;
 
-    if (strncmp(path, c->prefix, c->plen) != 0) return 0;
-    pl = strlen(path);
-    if (pl >= 600) return 0;
+    if (slash) leaf = slash + 1;
+    ll = strlen(leaf);
+    if (ll <= c->llen || memcmp(leaf, c->leaf, c->llen) != 0 ||
+        leaf[c->llen] != '!') return 0;
     /* The SHAPE decides, through the one shared predicate: a name that merely
      * carries a '!' is a user file (WP135 reserved the namespace, and the
      * introduction funnels refuse it, but an old volume may hold one). */
-    if (!sib_suffix_is_internal(path + c->plen, pl - c->plen)) return 0;
+    if (!sib_suffix_is_internal(leaf + c->llen + 1, ll - c->llen - 1)) return 0;
     if (c->n == c->cap) {
         size_t ncap = c->cap ? c->cap * 2 : 8;
         void *nn = realloc(c->names, ncap * sizeof *c->names);
-        if (!nn) { c->oom = 1; return 1; }
+        void *ni = realloc(c->inos, ncap * sizeof *c->inos);
+        if (!nn || !ni) { if (nn) c->names = nn; if (ni) c->inos = ni; c->oom = 1; return 1; }
         c->names = nn;
+        c->inos = ni;
         c->cap = ncap;
     }
-    memcpy(c->names[c->n], path, pl + 1);
+    memcpy(c->names[c->n], leaf, ll + 1);
+    c->inos[c->n] = ino;
     c->n++;
+    return 0;
+}
+
+typedef struct { const char *leaf; size_t llen; int found; } sib_probe_ctx;
+
+static int sib_probe_cb(void *ctx_, const char *dname, size_t dnlen, uint64_t dino)
+{
+    sib_probe_ctx *sc = (sib_probe_ctx *)ctx_;
+    (void)dino;
+    if (dnlen > sc->llen && memcmp(dname, sc->leaf, sc->llen) == 0 &&
+        dname[sc->llen] == '!') { sc->found = 1; return 1; }
     return 0;
 }
 
 int vol_rename_siblings(invfs_volume *v, const char *old_name,
                         const char *new_name)
 {
+    char onorm[600], nparent[600], nleaf[INVFS_MAX_NAME + 1];
     char oparent[600], oleaf[INVFS_MAX_NAME + 1];
-    char nparent[600], nleaf[INVFS_MAX_NAME + 1];
-    uint64_t opino = 0, npino = 0, child = 0;
+    uint64_t opino = 0, npino = 0;
     sib_ren_ctx c;
-    char prefix[620];
+    sib_probe_ctx pc;
     size_t i;
-    int rc = 0;
+    int rc = 0, plrc, s_rc;
 
     if (!v || !old_name || !new_name) return -1;
     /* A member is never itself a container: moving one must not cascade. */
     if (strchr(old_name, '!') || strchr(new_name, '!')) return 0;
-    if (split_path(old_name, oparent, sizeof oparent, oleaf, sizeof oleaf) != 0)
+
+    {
+        const char *norm = old_name[0] == '/' ? old_name + 1 : old_name;
+        size_t nl = strlen(norm);
+        if (nl >= sizeof onorm) return -1;
+        memcpy(onorm, norm, nl + 1);
+    }
+    if (split_path(onorm, oparent, sizeof oparent, oleaf, sizeof oleaf) != 0)
         return -1;
     if (split_path(new_name, nparent, sizeof nparent, nleaf, sizeof nleaf) != 0)
         return -1;
-    if (snprintf(prefix, sizeof prefix, "%s!", old_name) >= (int)sizeof prefix)
-        return -1;
+
+    /* Fast in-memory check of the CONTAINER'S OWN directory: no dirent
+     * starting with "<leaf>!" means this file owns no members, and the answer
+     * needs one directory listing rather than a namespace walk. Same rule and
+     * same fast-scan as vol_delete_siblings. */
+    if (skip_slash(oparent)[0] == 0) {
+        opino = INVFS_ROOT_INO;
+    } else {
+        plrc = vol_path_lookup(v, oparent, &opino);
+        if (plrc == 0) return 0;          /* no such directory: nothing to move */
+        if (plrc < 0) return -1;          /* unknown: the rename must not proceed */
+    }
+    memset(&pc, 0, sizeof pc);
+    pc.leaf = oleaf;
+    pc.llen = strlen(oleaf);
+    s_rc = vol_dirent_scan(v, opino, sib_probe_cb, &pc);
+    if (s_rc < 0) return -1;
+    if (!pc.found) return 0;              /* the common case: no members */
 
     memset(&c, 0, sizeof c);
-    c.prefix = prefix;
-    c.plen = strlen(prefix);
-    if (vol_walk(v, sib_collect_cb, &c) != 0 && c.oom) {
+    c.leaf = oleaf;
+    c.llen = pc.llen;
+    if (vol_walk_strict_dir(v, oparent, sib_collect_cb, &c) != 0 || c.oom) {
         free(c.names);
+        free(c.inos);
         return -1;
     }
-    if (!c.n) { free(c.names); return 0; }   /* the common case: no members */
+    if (!c.n) { free(c.names); free(c.inos); return 0; }
 
-    if (vol_path_lookup(v, oparent, &opino) != 1 ||
-        vol_path_lookup(v, nparent, &npino) != 1) {
+    if (vol_path_lookup(v, nparent, &npino) != 1) {
         free(c.names);
+        free(c.inos);
         return -1;
     }
 
@@ -1245,36 +1295,43 @@ int vol_rename_siblings(invfs_volume *v, const char *old_name,
      * the collision is noticed -- and a refusal has to leave the volume
      * untouched, not mostly moved. -2 is vol_rename's EEXIST. */
     for (i = 0; i < c.n; i++) {
-        char nname[600];
+        char nname[INVFS_MAX_NAME + 1];
         uint64_t existing = 0;
         int erc;
-        const char *s = c.names[i] + c.plen;
 
-        if (snprintf(nname, sizeof nname, "%s!%s", new_name, s) >=
-            (int)sizeof nname) { free(c.names); return -1; }
-        erc = vol_path_lookup(v, nname, &existing);
-        if (erc < 0) { free(c.names); return -1; }
-        if (erc == 1) { free(c.names); return -2; }
+        if (snprintf(nname, sizeof nname, "%s!%s", nleaf,
+                     c.names[i] + c.llen + 1) >= (int)sizeof nname) {
+            free(c.names); free(c.inos);
+            return -1;
+        }
+        erc = vol_path_lookup(v, nname[0] ? nname : nname, &existing);
+        /* vol_path_lookup resolves relative to root: a member in a
+         * subdirectory needs its parent prefix. */
+        if (erc == 0) {
+            char nfull[600];
+            if (nparent[0])
+                snprintf(nfull, sizeof nfull, "%s/%s", nparent, nname);
+            else
+                snprintf(nfull, sizeof nfull, "%s", nname);
+            erc = vol_path_lookup(v, nfull, &existing);
+        }
+        if (erc < 0) { free(c.names); free(c.inos); return -1; }
+        if (erc == 1) { free(c.names); free(c.inos); return -2; }
     }
 
     /* SECOND pass: stage the moves in this delta. */
     for (i = 0; i < c.n; i++) {
         char suf[INVFS_MAX_NAME + 1];
-        const char *s = c.names[i] + c.plen;
-        const char *oleaf_sib = c.names[i] + strlen(oparent) +
-                                (oparent[0] ? 1 : 0);
-
-        /* Members live in the container's directory, so the leaf is the new
-         * container leaf plus the same suffix. */
-        if (snprintf(suf, sizeof suf, "%s!%s", nleaf, s) >= (int)sizeof suf) {
+        if (snprintf(suf, sizeof suf, "%s!%s", nleaf,
+                     c.names[i] + c.llen + 1) >= (int)sizeof suf) {
             rc = -1;
             break;
         }
-        if (vol_path_lookup(v, c.names[i], &child) != 1) { rc = -1; break; }
-        if (vol_dirent_delta_put(v, npino, suf, child) != 0) { rc = -1; break; }
-        if (vol_dirent_delta_del(v, opino, oleaf_sib) != 0) { rc = -1; break; }
+        if (vol_dirent_delta_put(v, npino, suf, c.inos[i]) != 0) { rc = -1; break; }
+        if (vol_dirent_delta_del(v, opino, c.names[i]) != 0) { rc = -1; break; }
     }
     free(c.names);
+    free(c.inos);
     return rc;
 }
 
@@ -1507,6 +1564,64 @@ int vol_list_dir(invfs_volume *v, const char *dir, invfs_dirent *ents, int max)
  * relied on exactly this ordering all along).
  *
  * Returns the new inode id, or 0 with the volume untouched. */
+/* Does the LIVE row for `name` own "<name>!..." members?
+ *
+ * Asked BEFORE a replace, because the row is the only thing that knows: after
+ * the replace the old recipe is gone and nothing on the volume says the
+ * members were ever that file's.
+ *
+ * A read that does not complete answers 0 -- "no members" -- on purpose. The
+ * alternative, purging on uncertainty, deletes names on the strength of a
+ * failed read; the cost of this direction is that the leak survives a damaged
+ * row, and the leak is what the caller is trying to stop, not data. */
+static int name_owns_siblings(invfs_volume *v, const char *name)
+{
+    uint64_t id = 0;
+    invfs_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t nents = 0;
+    int owns = 0;
+
+    if (vol_path_lookup(v, name, &id) != 1 || !id) return 0;
+    if (vol_inode_get(v, id, &in) != 1) return 0;
+    if (in.type != INVFS_ITYP_REG || in.size == 0) return 0;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0 || !ents) {
+        free(blob);
+        return 0;
+    }
+    owns = ast_owns_siblings(&ah, ents, nents);
+    vol_ast_recipe_parsed_free(&ah, ents);
+    free(blob);
+    return owns;
+}
+
+/* The empty-content half of a replace: create/truncate to nothing, then drop
+ * the members the OLD row owned.
+ *
+ * This is FUSE's open(O_TRUNC) path (fuse_fs.c invf_create). Its comment says
+ * the old transcode siblings "describe bytes that are gone, so
+ * vol_replace_file drops them with it" -- but the NULL-data branch went
+ * straight to vol_create_node, which knows nothing about siblings, so a
+ * truncated container left `name!partN` (300 000 bytes in the measured case)
+ * on the volume for ever while invf-verify called the volume CLEAN, a stale
+ * member being a perfectly valid live file. The write path has always purged
+ * them (the session's owns_siblings); only this branch did not.
+ *
+ * Purge AFTER the replace succeeds, so a refused replace leaves them alone. */
+static uint64_t replace_empty_content(invfs_volume *v, const char *name,
+                                      const invfs_meta_pub *meta)
+{
+    int owned = name_owns_siblings(v, name);
+    uint64_t id = vol_create_node(v, name, meta);
+    if (id && owned)
+        vol_delete_siblings(v, name);
+    return id;
+}
+
 uint64_t vol_replace_file(invfs_volume *v, const char *name,
                         const uint8_t *data, size_t len)
 {
@@ -1517,7 +1632,7 @@ uint64_t vol_replace_file(invfs_volume *v, const char *name,
      * invf-cp (cp.c:100) are the callers -- so '!' is refused here. */
     if (name_refused_internal_ns(name)) return 0;
     return (data && len) ? vol_write_bulk(v, name, data, len, NULL)
-                         : vol_create_node(v, name, NULL);
+                         : replace_empty_content(v, name, NULL);
 }
 
 
@@ -1529,7 +1644,7 @@ uint64_t vol_replace_file_with_meta(invfs_volume *v, const char *name,
      * this is a user-name boundary; see vol_replace_file above. */
     if (name_refused_internal_ns(name)) return 0;
     return (data && len) ? vol_write_bulk(v, name, data, len, meta)
-                         : vol_create_node(v, name, meta);
+                         : replace_empty_content(v, name, meta);
 }
 
 
