@@ -4347,3 +4347,66 @@ noted here rather than silently fixed.
 Not yet claimed: the dm-flakey soak's own failure. The mechanism above explains
 the shape it produced (a live row losing a block), but the soak has not been
 re-run against this build. It stays the last gate before a release.
+
+## The orphan driver wrote a namespace with no root, and only gcc 14 says so
+
+Found while fixing the two suites that were red on this box and green in CI. Two
+findings, one of them mine to apologise for.
+
+### 1. A stale driver pairing (fixed)
+
+`tools/test-orphan-reclaim.sh` built its driver with `if [ ! -x "$T" ]`, so a
+five-day-old `bin/invf-orphan_test` (11-22 15:44) ran against `invf-fsck` and
+`invf-ls` from the same hour as the tree. The reported failure was
+
+    FAIL: fsck exited nonzero after collect
+
+on a volume that was fine: with the driver rebuilt from the same commit, the same
+three steps give 41 names and `fsck: OK`. This is the "stale test + binary pair"
+candidate, and it is worse in the other direction — a stale pair can also print a
+convincing PASS. `test-batch-owner.sh` and `test-meta-anchor.sh` had the same
+guard; all three now call `make` unconditionally (incremental: a current target
+costs one stat).
+
+### 2. On this box the driver's fixture has names but no root inode (open)
+
+After the stale-driver fix the suites are still red, and the reason is **not**
+stale binaries: five fresh volumes, five times, deterministic —
+
+    $ invf-orphan_test build r.img 40 60      # rc=0, PAGES_ORPHAN=121
+    $ invf-ls r.img                          # cannot list /: Input/output error
+    $ invf-vnode r.img get 1                 # absent id=1     <-- root row
+    $ invf-vnode r.img dirent get 1 f0       # absent parent=1 name=f0
+    $ invf-cat  r.img f0                     # 199 bytes       <-- name resolves
+    $ invf-orphan_test verify r.img 40       # VERIFY OK files=40 byte-identical
+    $ invf-fsck r.img                        # DAMAGED (namespace walk failed)
+
+So the name→inode rows are there and the real read path serves them, while the
+root inode row and the dirents are absent: the namespace walk has nothing to walk
+from, `vol_nlink_audit` returns -1, and `fsck` says DAMAGED — correctly, given an
+unreachable namespace.
+
+**The CI job on the same commit passes that leg** (`fsck OK after collect`, run
+772). The difference between the two environments that matters here:
+
+    this box:   gcc 14.2.1, glibc 2.41 (void linux, WSL)
+    CI:         ubuntu-24.04 runner, gcc 13.x
+
+A forced rebuild (`make -B`, 72 translation units) reproduces it, so it is not a
+mixed-object tree. The fixture path is `orphan_test.c` → `vol_create_*` with
+explicit ids; on this compiler the root row does not land. That is either an
+uninitialised field or a bitfield/struct-layout assumption that gcc 13 honours and
+gcc 14 does not — the engine accepts the volume and the read path works, which is
+what makes it silent.
+
+Next step is one command on each compiler:
+
+    rm -f /dev/shm/x.img && bin/invf-mkfs /dev/shm/x.img 0.3 \
+      && bin/invf-orphan_test build /dev/shm/x.img 40 60 \
+      && bin/invf-vnode /dev/shm/x.img get 1
+
+`absent id=1` on gcc 14 and a row on gcc 13 pins the compiler as the variable; if
+both give `absent`, CI's green is the anomaly and the CI log has to explain it. Do
+not "fix" the driver before that runs: a fixture that writes a parentless namespace
+is a fixture bug, but a root row that vanishes by compiler is an engine bug, and
+the two have different owners.

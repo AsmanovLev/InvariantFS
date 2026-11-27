@@ -54,10 +54,13 @@ cd "$WORK" || exit 1
 fail() { echo "FAIL: $*" >&2; exit 1; }
 field() { printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2=//p" | head -1; }
 
-if [ ! -x "$T" ]; then
-    make -C "$REPO" bin/invf-batch_owner_test >/dev/null 2>&1 \
-        || fail "cannot build bin/invf-batch_owner_test"
-fi
+# ALWAYS ask make for the driver, not just when it is absent. A stale
+# driver paired with fresh tools produced a red here on a healthy volume
+# (measured: bin/invf-batch_owner_test five days old, invf-fsck from the same hour as the
+# tree, "fsck exited nonzero after collect" on a volume that was clean).
+# make is incremental: a current target costs one stat call.
+make -C "$REPO" bin/invf-batch_owner_test >/dev/null 2>&1 \
+    || fail "cannot build bin/invf-batch_owner_test"
 for b in invf-mkfs invf-cp invf-sweep invf-verify invf-fsck; do
     [ -x "$B/$b" ] || fail "bin/$b missing (run make)"
 done

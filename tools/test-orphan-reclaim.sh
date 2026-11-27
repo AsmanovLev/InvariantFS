@@ -66,10 +66,13 @@ cd "$WORK" || exit 1
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
 # The driver is a normal `make` target but be tolerant of a bare checkout.
-if [ ! -x "$T" ]; then
-    make -C "$REPO" bin/invf-orphan_test >/dev/null 2>&1 \
-        || fail "cannot build bin/invf-orphan_test"
-fi
+# ALWAYS ask make for the driver, not just when it is absent. A stale
+# driver paired with fresh tools produced a red here on a healthy volume
+# (measured: bin/invf-orphan_test five days old, invf-fsck from the same hour as the
+# tree, "fsck exited nonzero after collect" on a volume that was clean).
+# make is incremental: a current target costs one stat call.
+make -C "$REPO" bin/invf-orphan_test >/dev/null 2>&1 \
+    || fail "cannot build bin/invf-orphan_test"
 [ -x "$B/invf-fsck" ] || fail "bin/invf-fsck missing (run make)"
 
 mkvol() {  # mkvol <img>
