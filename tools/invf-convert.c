@@ -69,6 +69,7 @@
 
 #include "volume.h"
 #include "invarifs.h"
+#include "vol_delta.h"
 #include "blake3.h"
 
 /* exit codes. 3 is "refused": the source is one this pipeline will not
@@ -733,6 +734,7 @@ static strvec *g_fail;
  * 0 folds nothing (--fold-every=0), which is the control leg for measuring this. */
 static unsigned g_fold_every = 8192;
 static uint64_t g_free_blocks, g_total_blocks;
+static uint64_t g_delta_left;
 static unsigned long long g_folds, g_fold_failed, g_fold_records_last;
 static unsigned long long g_files_since_fold;
 
@@ -1919,6 +1921,21 @@ static int cmd_convert(int argc, char **argv)
             meta_of(&rm, &rst);
             (void)vol_apply_meta(g_vol, "", &rm);
         }
+        /* One last fold, so the finished volume does not leave the tail of the
+         * import (up to --fold-every files) in the delta log: a conversion is a
+         * one-shot job, and the first thing an operator does with the result is
+         * mount it, sweep it or fsck it -- all of which would otherwise pay for
+         * that tail. */
+        if (g_fold_every) {
+            uint64_t recs = 0, segs = 0, bytes = 0;
+            int frc_ = vol_fold(g_vol);
+            /* vol_fold_trigger() answers the THRESHOLDS, not the current
+             * state; the residual delta is vol_delta_stats() (both live in
+             * src/core/vol_delta.c). */
+            vol_delta_stats(g_vol, &recs, &segs, &bytes);
+            g_delta_left = recs;
+            if (frc_ == 0) g_folds++; else g_fold_failed++;
+        }
         /* Free-space accounting, before the volume is closed: a destination
          * that arrives 99% full is not a converted filesystem, it is a trap.
          * Measured on the 2.5 GiB Ubuntu rootfs with the first sizing estimate:
@@ -2048,9 +2065,12 @@ static int cmd_convert(int argc, char **argv)
                    g_folds);
             if (g_fold_failed)
                 printf(", %llu fold(s) REFUSED by the engine (see the report's "
-                       "findings)\n", g_fold_failed);
+                       "findings)", g_fold_failed);
+            if (g_fold_every)
+                printf("; %llu delta record(s) left after the final fold\n",
+                       (unsigned long long)g_delta_left);
             else
-                printf("\n");
+                printf("; nothing folded (--fold-every=0)\n");
         }
         if (unmatched)
             printf("unmatched  : %zu inode(s), %llu B, with NO dirent in the source "
