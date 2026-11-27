@@ -1718,6 +1718,13 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs-big.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-vdi.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-resize.sh
+# WP-CONVERT-EXT4: `invf-convert` — an ext4 image -> a fresh InvFS volume, and
+# the comparison that has to come with it (every path: type, size, mode, uid,
+# gid, mtime to the nanosecond, BLAKE3 of the content, symlink targets,
+# hardlink partition, xattrs). LOCKED (sudo + losetup + a fuse mount). Its
+# real-world leg is opt-in (INVFS_CONVERT_REAL=1): ~700 s to convert and
+# ~180 s to verify a 2.5 GiB rootfs is a measurement, not a per-push gate.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-convert-ext4.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rollback.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-watermark.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-usr1-savepoint.sh
