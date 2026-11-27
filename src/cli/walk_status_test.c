@@ -768,7 +768,16 @@ int main(int argc, char **argv)
         ok(strstr(hit, " files ok, 0 corrupt") == NULL,
            "2d. and its summary line never reports a clean run over a "
            "namespace it could not walk");
-        ok(strstr(hit, "deep: 0 files ok, 1 corrupt") != NULL,
+        /* WP-VERIFY-N-OF-M changed the summary to carry its denominator:
+         *   "deep: %llu of %llu live inode(s): %llu ok, %llu corrupt, ..."
+         * so the literal "deep: 0 files ok, 1 corrupt" is gone, and the CHECK
+         * must follow the CLAIM rather than the old wording: the stopped walk
+         * is reported as corruption (0 ok, a non-zero corrupt count) and the
+         * count is not a bare number without a denominator. */
+        ok(strstr(hit, "deep: 0 of ") != NULL &&
+           strstr(hit, "0 ok, ") != NULL &&
+           strstr(hit, " corrupt") != NULL &&
+           strstr(hit, ", 0 corrupt") == NULL,
            "2e. it reports the stopped walk AS the corruption, which is what "
            "makes the exit code non-zero");
     }
