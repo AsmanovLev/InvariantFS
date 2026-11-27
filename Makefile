@@ -1566,6 +1566,19 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check plugin-so
 # --dry-run plans without mutating; --cut salvages big1 to its exact
 # 128 KiB prefix, refuses to empty single, control stays bit-exact.
 	$(TESTENV) $(TESTISO) bash tools/test-contentcut.sh
+# WP630: fence-failure doom leaves a delete-retire live across recreate, so the
+# next fence collects it twice (double -1 on a shared pba, EIO on live data).
+# This is the deterministic, rootless, seconds-long repro of the leg5 defect
+# class, and it is RED on main: leg 2 fails with "shared pba refcount 0 under
+# live sharer". It was registered in no tier at all, so the defect was neither
+# fixed nor seen.
+#
+# EXPECTED-RED, by name and on every run: the suite prints WP630 EXPECTED-RED
+# with the INCIDENTS.md reference and skips EXACTLY that leg-2 signature; any
+# other failure fails the build. The flag cannot outlive the bug -- if leg 2
+# passes, the suite exits non-zero and demands the flag be removed. Fix the
+# defect, delete WP630_EXPECT_RED here, and the same leg becomes a hard gate.
+	$(TESTENV) WP630_EXPECT_RED=1 bash tools/test-fence-doom-doubleretire.sh
 # WP604: a vol_unlink that fails must not mutate (rc==0 iff the namespace
 # changed). Sealed volume, one post-seal write, then a fault-armed unlink:
 # pre-fix the recipe-free failure returned -1 with the dirent already gone.

@@ -134,13 +134,13 @@ set +e
 $B/invf-verify --list-damaged "$IMG" > damaged-verify.log 2>&1
 vrc=$?
 set -e
-[ "$vrc" = "3" ] || { cat damaged-verify.log; fail "verify --list-damaged rc=$vrc (damage present => 3)"; }
+[ "$vrc" = "2" ] || { cat damaged-verify.log; fail "verify --list-damaged rc=$vrc (content damage => 2, docs/EXIT-CODES.md)"; }
 grep -E '^damaged	' damaged-before.log  > damaged-fsck.lines
 grep -E '^damaged	' damaged-verify.log > damaged-verify.lines
 diff -u damaged-fsck.lines damaged-verify.lines \
     || { cat damaged-verify.lines; fail "verify and fsck disagree about the ledger"; }
 [ -s damaged-verify.lines ] || fail "verify --list-damaged printed nothing on a damaged volume"
-echo "  verify --list-damaged prints fsck's ledger, byte for byte (rc=3)"
+echo "  verify --list-damaged prints fsck's ledger, byte for byte (rc=2: content damage)"
 
 echo "== [C] dry-run plans, changes nothing =="
 $B/invf-fsck "$IMG" --cut --dry-run > cut-plan.log 2>&1 || fail "dry-run rc=$?"

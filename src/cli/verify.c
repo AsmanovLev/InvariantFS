@@ -473,7 +473,7 @@ int main(int argc, char **argv)
                             "complete list exists -- failing closed\n");
             return 1;
         }
-        return nd ? 3 : 0;
+        return nd ? 2 : 0;   /* 2 = content damage (docs/EXIT-CODES.md) */
     }
 
     /* WP401 --verify-seal: standalone scrub mode. Runs after the same
@@ -502,6 +502,7 @@ int main(int argc, char **argv)
     if (deep) {
         invfs_volume *vol;
         uint64_t live = 0, bad = 0;
+        uint64_t audit_live = 0;   /* na.inodes: the volume's live-inode count */
         uint64_t total_bytes = 0;
         int parity_bad = 0;
         deep_ent *ents = NULL;
@@ -598,6 +599,7 @@ int main(int argc, char **argv)
                 bad++;
             } else {
                 uint64_t fi;
+                audit_live = na.inodes;
                 printf("deep: names walked: %llu over %llu live inode(s)\n",
                        (unsigned long long)na.names,
                        (unsigned long long)na.inodes);
@@ -693,13 +695,51 @@ int main(int argc, char **argv)
                 printf("mirror: in sync (both devices)\n");
             }
         }
-        printf("deep: %llu files ok, %llu corrupt, %llu bytes verified\n",
-               (unsigned long long)live, (unsigned long long)bad,
-               (unsigned long long)total_bytes);
+        /* WP-VERIFY-N-OF-M: the summary carries its own denominator, and the
+         * denominator is the VOLUME's live-inode count -- not the walk's own
+         * collection. "30 files ok" of how many? A pass that collected 30 of
+         * 34 live inodes and read all 30 prints a perfect score, and the gap
+         * has causes (orphan rows have no name to read them by). Each cause is
+         * named above; the number itself must not be a tautology.
+         *
+         * Now: "29 of 34 live inode(s): 29 ok, 1 corrupt". And if the inodes
+         * actually attempted do not equal what the walk collected, that is a
+         * fault of its own, counted into `bad`. */
+        {
+            uint64_t claimed = audit_live ? audit_live : (uint64_t)nents;
+            uint64_t attempted = live + bad;
+            if (attempted != (uint64_t)nents) {
+                printf("  CORRUPT: the deep walk collected %llu inode(s) but "
+                       "accounted for %llu -- %llu unaccounted\n",
+                       (unsigned long long)nents,
+                       (unsigned long long)attempted,
+                       (unsigned long long)((uint64_t)nents - attempted));
+                bad++;
+            }
+            printf("deep: %llu of %llu live inode(s): %llu ok, %llu corrupt, "
+                   "%llu bytes verified\n",
+                   (unsigned long long)live, (unsigned long long)claimed,
+                   (unsigned long long)live, (unsigned long long)bad,
+                   (unsigned long long)total_bytes);
+            if (claimed > (uint64_t)nents)
+                printf("deep: %llu live inode(s) were never attempted by the "
+                       "read walk; the causes are named above (an orphan row "
+                       "has no name to be read by)\n",
+                       (unsigned long long)(claimed - (uint64_t)nents));
+        }
         vol_close(vol);
-        return (bad || parity_bad || errors) ? 1 : 0;
+        /* Exit vocabulary, one meaning per code (docs/EXIT-CODES.md):
+         *   0  clean AT THE LEVEL PERFORMED (--deep: every live file read)
+         *   1  the check itself could not run -- no claim either way
+         *   2  content damage found (a file does not read back)
+         *   3  structure damage found (superblock/bitmap/parity)
+         * A volume can have both; structure wins because it is the larger
+         * claim. What was found is named in the text either way. */
+        if (errors || parity_bad) return 3;
+        if (bad) return 2;
+        return 0;
     }
 
     blkio_close(&io);
-    return errors ? 1 : 0;
+    return errors ? 3 : 0;
 }
