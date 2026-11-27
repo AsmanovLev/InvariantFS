@@ -1734,8 +1734,9 @@ int main(int argc, char **argv)
                    pi.n_ent, (unsigned long long)pi.block_size);
             printf("  meta_structure : %14llu B  %s\n",
                    (unsigned long long)pi.bytes[0], human((double)pi.bytes[0], b1, sizeof b1));
-            printf("  garbage        : %14llu B  %s (zero-verified %s)\n",
+            printf("  garbage        : %14llu B  %s (zero-verified %llu B, %s)\n",
                    (unsigned long long)pi.bytes[1], human((double)pi.bytes[1], b2, sizeof b2),
+                   (unsigned long long)pi.zero_garbage,
                    human((double)pi.zero_garbage, b3, sizeof b3));
             printf("  member         : %14llu B  %s\n",
                    (unsigned long long)pi.bytes[2], human((double)pi.bytes[2], b4, sizeof b4));
@@ -1969,8 +1970,9 @@ static int cmd_convert(int argc, char **argv)
                (unsigned long long)pi.image_size, (unsigned long long)pi.block_size, pi.n_ent);
         printf("  meta_structure %14llu B  %s\n", (unsigned long long)pi.bytes[0],
                human((double)pi.bytes[0], b1, sizeof b1));
-        printf("  garbage        %14llu B  %s (zero-verified %s)\n",
+        printf("  garbage        %14llu B  %s (zero-verified %llu B, %s)\n",
                (unsigned long long)pi.bytes[1], human((double)pi.bytes[1], b2, sizeof b2),
+               (unsigned long long)pi.zero_garbage,
                human((double)pi.zero_garbage, b3, sizeof b3));
         printf("  member         %14llu B  %s\n", (unsigned long long)pi.bytes[2],
                human((double)pi.bytes[2], b4, sizeof b4));
