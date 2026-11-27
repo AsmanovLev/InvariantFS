@@ -4464,3 +4464,31 @@ Two instruments are missing before a cause can be named, and both are cheap:
 
 Until one of those runs, this stays open and is NOT to be "fixed" by weakening the
 suite: its leg 2 exists to catch exactly a namespace that stops being walkable.
+
+### Narrowed further: two listing paths, one of them strict (2026-11-27)
+
+Whoever picks this up should start here rather than at the matrix above.
+
+    invf-ls /                     -> 40 file(s)                 (vol_list_dir, by PATH)
+    invf-sweep --realize          -> "stopped before delivering ANY entry"
+    invf-vnode <img> nlink audit  -> vol_nlink_audit failed (rc=-1)
+    invf-fsck                     -> DAMAGED
+
+All four run on the same untouched image in fresh processes, with `env -i` (no
+INVFS_* at all), so this is not the fault seam (`INVFS_FAULT`) and not an
+inherited variable. The two that fail go through `walk_dir()` in
+`src/core/vol_dirs.c`, which lists with **`vol_ino_list_dir(v, dir_ino, ...)`**;
+the one that works goes through **`vol_list_dir(v, "/", ...)`** in `src/cli/ls.c`.
+They are different implementations, and `walk_dir` runs in **strict** mode, where
+"a row read that fails" is -1 rather than `continue`.
+
+That is the shape to explain: the walk fails at THE FIRST entry (0 delivered), so
+it is the root's own listing or the root row, not a deep recursion limit. And
+`vol_walk_strict` is the walk behind `pba_ref`'s liveness gates and the sweep's
+refusal, which is why one listing bug surfaces as DAMAGED + a refused sweep rather
+than as a bad `ls`.
+
+`fsck`'s own walk reports `pages walked: 8, bad pages: 0, torn slots: 0`, so the
+base tree reads; the failure is in the dirent listing the walker uses, and the
+delta (which `vol_list_dir` may consult and `vol_ino_list_dir` may not) is the
+first suspect now that base+delta is established as the truth.
