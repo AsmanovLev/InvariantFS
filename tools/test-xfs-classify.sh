@@ -816,6 +816,12 @@ truncate -s 64M "$WORK/img/extlog.log"
 mkimg refuse-extlog 320M -l logdev="$WORK/img/extlog.log",size=64m \
     -m reflink=0,rmapbt=0 -i nrext64=0,exchange=0 -n parent=0 >/dev/null
 refuse "$WORK/img/refuse-extlog.img" refuse-extlog 'external log|logstart'
+# a 2048-byte block size: this pack is 4096-only (a v1 restriction, named in
+# its header), so classify must say so instead of walking a filesystem whose
+# geometry it cannot address.
+mkimg refuse-bsize2048 320M -b size=2048 -m reflink=0,rmapbt=0 \
+    -i nrext64=0,exchange=0 -n parent=0 >/dev/null
+refuse "$IMG" refuse-bsize2048 'blocksize 2048|not supported'
 # not an XFS image at all
 head -c 1M /dev/urandom > "$WORK/img/notxfs.img"
 IMGS+=("$WORK/img/notxfs.img")
