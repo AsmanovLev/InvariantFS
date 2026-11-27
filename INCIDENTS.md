@@ -4096,3 +4096,33 @@ chmod-in    mode=0444     <- nix computes its read-only pass from this answer
   could only be wrong about (shared objects are ELF too) -- so it is deleted. A
   heuristic that outlives its cause stops being a workaround and starts editing
   the data.
+
+## FIXED (WP-CONVERT-EXT4) — `invf-import` wrote raw seconds into the packed mtime field, so every imported timestamp read back as 1970
+
+  **Date:** Nov 27, 2026
+  **Severity:** High for anything that compares a tree by mtime (make, rsync -t,
+  every package manager); invisible to `invf-fsck`, which checks structure, not
+  intent.
+  **Status:** FIXED, measured.
+
+  **Symptom.** A source file stamped `2020-01-02 03:04:05.123456789` reads back
+  through the FUSE mount as `1970-01-01 07:00:01.504167221`. Not "close" and not
+  "truncated to the second" — a different decade, with the discarded seconds
+  reappearing as nanoseconds.
+
+  **Mechanism.** `INVFS_INODE_ROW_VERSION 3` made `mtime`/`atime` one i64 holding
+  `sec << 30 | nsec` (`src/core/invarifs.h`), and the FUSE path packs on the way
+  in (`fuse_fs.c:3578`). `tools/invf-import.c` did not: all four of its
+  metadata sites wrote `st_mtim.tv_sec` verbatim, so `1577934245` landed in the
+  field and `invfs_time_sec()` read it back as `1577934245 >> 30 == 1` second,
+  with `1577934245 & (2^30-1)` left over as another inode's nanoseconds. The
+  engine had no way to notice: a packed value and a raw one are both plausible
+  i64s, and nothing in the format carries "was this packed".
+
+  **Fix.** The four sites pack through `invfs_time_pack()`, the same helper the
+  daemon uses. Measured after the fix, same source, same volume, through the
+  mount: `1577909045.123456789` — the correct epoch value for local
+  `2020-01-02 03:04:05.123456789` on this +0700 box, nanoseconds intact. The
+  `invf-convert` suite asserts exactly that (`tools/test-convert-ext4.sh`, leg A)
+  and its verifier compares mtime at nanosecond granularity on every path, so the
+  regression cannot come back silently.
