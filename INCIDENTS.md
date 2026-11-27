@@ -4273,3 +4273,35 @@ the write path must not emit two entries for one pba.
 Recorded here because the difference matters: the previous three attempts at this
 defect (fenced-seq watermark, retire liveness, map staleness after a doom) all
 assumed the charge happened twice. It happens once, on a doubled reference.
+
+### leg5: the recipes are identical, the release is single, the count still halves
+
+The next print (A's and B's recipe entries, in the fast repro) closes the last
+cheap theory — that one file names the same pba twice:
+
+    dump A.bin (id=2 size=102400): 2 entr(ies)
+      ent[0] pba=8706 len=65536 algo=0 zone=0
+      ent[1] pba=8733 len=36864 algo=0 zone=0
+    dump B.bin (id=4 size=102400): 2 entr(ies)
+      ent[0] pba=8706 len=65536 algo=0 zone=0
+      ent[1] pba=8733 len=36864 algo=0 zone=0
+    step dedupe refcount=2 → unlink#1 → 2 → doom+restore → 2 → unlink#2 → 2
+    final sync: 1 release(s)
+    step final refcount=0
+
+One pba per entry, two live rows naming it, one release fires — and the count
+still falls by two. So the second decrement is inside the final sync but NOT
+inside `vol_free_recipe_blocks` (which would have been counted by the wrapper:
+`nrel` is 1). The retire drain logged `drained 1 ent(s); pushes=3`, so two
+entries were dropped as stale and one fired.
+
+The instrument that settles it is a wrapper on `pba_ref_modify` itself: count and
+log every (pba, delta) during the final sync. That is a 15-line addition to the
+same harness, and it names the caller by construction instead of by inference.
+
+Path travelled on this defect, all measured, all on the fast repro now: retire
+liveness (refuted), map staleness after a doom (refuted: the count is right at
+every step until the drain), doubled reference inside a recipe (refuted: the
+recipes are byte-identical and each names the pba once). What remains is the
+drain itself charging one block twice through two different code paths, and the
+wrapper will say which.

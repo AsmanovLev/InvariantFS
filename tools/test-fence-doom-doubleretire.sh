@@ -69,6 +69,8 @@ cat > "$WORK/dd_harness.c" <<'EOF'
 
 static void die(const char *m) { fprintf(stderr, "HARNESS-FAIL: %s\n", m); exit(1); }
 
+static void dump_recipe(invfs_volume *v, const char *name);   /* WP630 forensics */
+
 /* ---- --wrap ledgers ---- */
 #define MAXFREES 4096
 static uint64_t freed_pba[MAXFREES];
@@ -197,6 +199,39 @@ static void assert_gone(invfs_volume *v, const char *name)
     if (vol_find(v, name)) die("file should be gone");
 }
 
+static void dump_recipe(invfs_volume *v, const char *name)
+{
+    uint64_t id = vol_find(v, name);
+    invfs_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0, i;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t nents = 0;
+    if (!id) { fprintf(stderr, "harness: dump %s: absent\n", name); return; }
+    if (vol_inode_get(v, id, &in) != 1) {
+        fprintf(stderr, "harness: dump %s: row unreadable\n", name);
+        return;
+    }
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) {
+        fprintf(stderr, "harness: dump %s: recipe unloadable\n", name);
+        return;
+    }
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0 || !ents) {
+        fprintf(stderr, "harness: dump %s: recipe unparseable\n", name);
+        free(blob);
+        return;
+    }
+    fprintf(stderr, "harness: dump %s (id=%llu size=%llu): %zu entr(ies)\n",
+            name, (unsigned long long)id, (unsigned long long)in.size, nents);
+    for (i = 0; i < nents; i++)
+        fprintf(stderr, "harness:   ent[%zu] pba=%llu len=%llu algo=%u zone=%u\n",
+                i, (unsigned long long)ents[i].pba,
+                (unsigned long long)ents[i].length,
+                (unsigned)ents[i].algo, (unsigned)ents[i].zone);
+    free(blob);
+}
+
 static void assert_content(invfs_volume *v, const char *name, size_t len,
                            uint64_t seed)
 {
@@ -278,6 +313,13 @@ static int cmd_share(const char *img)
         fprintf(stderr, "harness: step dedupe        shared pba=%llu refcount=%u\n",
                 (unsigned long long)p, pba_ref_count(v, p));
     }
+    /* Which entries does A's recipe actually carry? A count of 2 for a pba two
+     * files share is "one reference each"; a count of 2 with the pba named
+     * TWICE by one file is "that file owns it twice" -- and one release of it
+     * then drives the count to 0 under the live sharer. This print decides
+     * which of those two worlds we are in. */
+    dump_recipe(v, "A.bin");
+    dump_recipe(v, "B.bin");
     if (vol_unlink(v, "A.bin") != 0) die("first unlink failed");
     {
         uint64_t p = survivor_pba(v, "B.bin");
