@@ -223,7 +223,7 @@ FRB_T := $(CURDIR)/build/frbtest
 HD_T := $(CURDIR)/build/hdtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-fuse invf-import invf-sweep \
+           invf-zip invf-fuse invf-import invf-convert invf-sweep \
            invf-stats invf-verbatim invf-reconsolidate invf-resize invf-rollback invf-pack \
            invf-vnode invf-plugin-host
 
@@ -386,6 +386,15 @@ $(OBJ)/tmpstore.o: $(SRC)/cli/tmpstore.c | $(OBJ)
 $(OUT)/invf-import: $(OBJ)/invf-import.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-import.o: tools/invf-import.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# invf-convert (WP-CONVERT-EXT4): the ext4 -> InvFS pipeline and its
+# verification harness. One binary for both halves because the comparison is
+# the deliverable, not an afterthought: `convert` cannot claim a result the
+# same tool will not check.
+$(OUT)/invf-convert: $(OBJ)/invf-convert.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-convert.o: tools/invf-convert.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OUT)/invf-sweep: $(OBJ)/invf-sweep.o $(CORE_O)
