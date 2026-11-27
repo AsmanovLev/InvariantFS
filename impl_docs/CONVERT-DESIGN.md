@@ -260,21 +260,31 @@ Proved by `tools/test-convert-ext4.sh` today (all legs green, 7 s wall):
 * a real 2.5 GiB rootfs converts and verifies IDENTICAL. Measured twice, which
   is also the fold A/B (§9 question 4):
 
-  | | no folding (`--fold-every=0`) | folding every 8192 files (default) |
-  |---|---|---|
-  | convert, total | 702 s | **845 s** |
-  | — of which import | 691 s | 826 s (includes 8 folds) |
-  | delta left on the volume | 179 299 records / 32 MiB | **0 records** |
-  | `invf-fsck` on the result | `fold: FAILED … at #72794 of 179299` | OK |
-  | volume free after | 5 882 of 660 193 blocks (23 MiB) | 497 905 of 746 048 blocks (1.90 GiB) |
-  | verify, total | 176 s | 275 s |
-  | verify per file | p50 0.86 ms, p95 1.42 ms | p50 1.28 ms, p95 2.17 ms |
-  | DIFFS | 0 (IDENTICAL) | **0 (IDENTICAL)** |
+  | | no folding, dense | folding 8192, dense | folding 8192, holes (default) |
+  |---|---|---|---|
+  | convert, total | 702 s | 845 s | **782 s** |
+  | — of which import | 691 s | 826 s (8 folds) | 767 s (9 folds) |
+  | — of which gates | 8 s | 17 s | 12 s |
+  | delta left on the volume | 179 299 records / 32 MiB | 0 | **0** |
+  | `invf-fsck` on the result | `fold: FAILED … at #72794 of 179299` | OK | **OK** |
+  | volume free after | 5 882 of 660 193 blocks (23 MiB) | 497 905 of 746 048 (1.90 GiB) | **515 108 of 746 048 (1.96 GiB)** |
+  | verify, total | 176 s | 275 s | **206 s** |
+  | verify per file | p50 0.86 ms, p95 1.42 ms | p50 1.28 ms, p95 2.17 ms | **p50 0.91 ms, p95 1.50 ms** |
+  | p99 / max | — | 4.84 ms / 1 051 ms | **2.68 ms / 794 ms** |
+  | DIFFS | 0 (IDENTICAL) | 0 | **0 (IDENTICAL)** |
 
-  So folding costs ~20 % of the import and is the difference between a volume
-  that can be compacted and one that cannot; the per-file verification cost is
-  dominated by reading 1.40 GiB twice through a loop mount and a FUSE mount
-  (p99 4.84 ms, max 1 051 ms — the 117 MiB kernel image).
+  Folding costs ~20 % of the import and is the difference between a volume that
+  can be compacted and one that cannot; preserving holes then gives most of that
+  back (bytes not written, 782 s), and reading 1.40 GiB twice through a loop
+  mount and a FUSE mount is what the per-file verification cost is made of. The
+  max is the 117 MiB kernel image.
+
+* sparseness is preserved, and it is a READ property, not a space one: LZ4 makes
+  a megabyte of zeros nearly free, and the measured volume usage is identical
+  between the sparse and `--dense` runs (27 149 free blocks of 36 123 in both,
+  fixture corpus). What differs is the work: 11 918 284 B written against
+  24 497 100 B logical on the fixture, i.e. the holes are never decoded on read.
+  `--dense` is the control leg, and both volumes verify IDENTICAL.
 
 Not proved, and out of phase 0's reach: nothing above touches the source's own
 blocks, so **no crash-matrix row has been tested yet** — the fault-injection knob
@@ -324,7 +334,16 @@ the sweep's dedupe (which rewrites blocks the old image still names).
    or it must clear the save point so a later `invf-rollback` cannot pretend to
    undo a conversion (safe). Deciding this needs an ADR, and the answer is not
    obviously "reuse SPT0".
-7. **A 1 KiB-block ext4.** InvFS's bitmap at blocks 1..B lands on the ext4
+7. **Holes pass through, so phase 1 inherits the same write path — but the
+   old-image file is a different shape.** §8 shows the import preserves holes
+   (data extents only + `vol_write_truncate`). The old-image file cannot use
+   that trick: its bytes are exactly the source's non-zero runs, which are not
+   "data extents" in the source filesystem's sense — a zero-verified garbage run
+   inside an ext4 *allocated* block is a hole for the image file but not a hole
+   in ext4's block map. Whose notion of "hole" the recipe should record is an
+   open question, and getting it wrong is silent: the file would read zeros over
+   bytes that were not zeros.
+8. **A 1 KiB-block ext4.** InvFS's bitmap at blocks 1..B lands on the ext4
    superblock itself (block 1 for `-b 1024`), not just the GDT, so relocation
    covers one more critical structure. Phase 0 converts 1 KiB images fine
    (`mkfs.ext4 -b 1024` is in the suite's fixture matrix via leg C's refusal
