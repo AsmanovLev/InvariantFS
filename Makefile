@@ -1696,6 +1696,15 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ext4fs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
+# WP-XFS-CLASSIFY: the xfs pack's CLI-only `classify` command (GCFG table).
+# Fixtures are real, populated XFS images (loop-mounted to write the tree, then
+# classified as files) under the geometries the pack's walk has distinct code
+# for, and every table is checked against `xfs_db -r` rather than against
+# itself: garbage must lie in the by-block btree's free space and must cover it
+# exactly, member must be allocated, and zero_verified is re-read here and then
+# poked (one byte written into a garbage block must flip the flag and split the
+# run). LOCKED by pattern: it mounts, and it uses sudo.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs-classify.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs-big.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-vdi.sh
