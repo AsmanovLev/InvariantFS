@@ -718,6 +718,44 @@ static invfs_volume *g_vol;
 static convstats g_st;
 static strvec *g_fail;
 
+/* Fold every N created files.
+ *
+ * A conversion writes 2-3 delta records per file and the fold trigger is 262 144
+ * records / 64 MiB (measured on the Ubuntu corpus: 179 299 records / 32 MiB
+ * after 69 373 files, i.e. never triggered). Opening that volume then leaves
+ * every read served out of the delta overlay -- correct, but it means the first
+ * `invf-fsck`/sweep that DOES fold has to replay the whole import at once, and
+ * on that corpus the fold refused at #168117 of 179299 after consuming every
+ * free block the volume had. Folding in batches keeps the delta small for the
+ * whole run, bounds the recovery a crash would have to replay, and leaves the
+ * finished volume compacted instead of one fold away from an ENOSPC.
+ *
+ * 0 folds nothing (--fold-every=0), which is the control leg for measuring this. */
+static unsigned g_fold_every = 8192;
+static uint64_t g_free_blocks, g_total_blocks;
+static unsigned long long g_folds, g_fold_failed, g_fold_records_last;
+static unsigned long long g_files_since_fold;
+
+static void fold_if_due(void)
+{
+    int rc;
+    uint64_t bytes = 0, recs = 0, age = 0;
+    if (!g_fold_every || !g_vol) return;
+    if (++g_files_since_fold < g_fold_every) return;
+    g_files_since_fold = 0;
+    rc = vol_fold(g_vol);
+    vol_fold_trigger(&bytes, &recs, &age);
+    g_fold_records_last = recs;
+    if (rc == 0) {
+        g_folds++;
+    } else {
+        /* NOT fatal, and not silent: a fold that refuses is an engine-side
+         * condition (see CONVERT-DESIGN.md's open questions), the data already
+         * written is unaffected, and the report says how far it got. */
+        g_fold_failed++;
+    }
+}
+
 /* Every UNIQUE regular inode the walk carried: (ext4 inode number, i_size).
  * One entry per inode, not per name, so a hardlink pair is one member — which
  * is also how the pack counts it. */
@@ -1021,6 +1059,7 @@ static void imp_file(const char *sp, const char *vn, const struct stat *st)
     g_st.content_bytes += (unsigned long long)st->st_size;
     if ((unsigned long long)st->st_size > g_st.max_file) g_st.max_file = (unsigned long long)st->st_size;
     imp_xattrs(sp, vn);
+    fold_if_due();
     return;
 
 abort:
@@ -1194,19 +1233,36 @@ static void imp_dir(const char *spath, const char *vname, int depth)
     closedir(d);
 }
 
-/* Destination sizing. The floor is the source image's own size rounded up: a
- * conversion that only fits when the source was half empty is a land mine for
- * the operator, and btrfs-convert's shape (same size out) is the least
- * surprising one. The engine needs, per the measurements in AGENTS.md §2.7,
- * ~2.03 META blocks (8.3 KiB) per file plus the file's own bytes, so the
- * estimate is content + 16 KiB/inode + 64 MiB of working room. */
+/* Destination sizing, from measurement rather than from a percentage.
+ *
+ * The floor is the source image's own size: a conversion that only fits when
+ * the source was half empty is a land mine for the operator, and
+ * btrfs-convert's shape (same size out) is the least surprising one. On top of
+ * the content the engine needs its own metadata, and the first version of this
+ * estimate (content + 16 KiB/inode + 64 MiB) was measured to be TOO TIGHT on a
+ * real rootfs: the 2.5 GiB Ubuntu 24.04 cloud-image rootfs (1.40 GiB of
+ * content, 75 888 live inodes) landed in a 2.52 GiB volume with 5 882 free
+ * blocks -- 23 MiB -- and `invf-fsck` then refused its own fold
+ * ("fold: FAILED applying records at #168117 of 179299"), so the volume could
+ * not be compacted at all. Measured overhead on that corpus: used 2 680 057 856
+ * B against 1 500 838 175 B of content = 15.5 KiB per inode, and a fold needs
+ * room to move base pages, so the estimate is:
+ *
+ *     content + 20 KiB/inode + max(128 MiB, 5% of content)
+ *
+ * which for that corpus is 3.04 GiB: ~360 MiB of headroom instead of 23 MiB.
+ * An explicitly sized destination (--size) skips this entirely. */
 static double dest_size_gb(uint64_t src_image_bytes, convstats *st)
 {
-    double need = (double)st->content_bytes
-                + 16.0 * 1024.0 * (double)(st->reg_inodes + st->dirs + st->links + st->specials)
-                + 64.0 * 1024.0 * 1024.0;
-    double src = (double)src_image_bytes;
-    double gb = (need > src ? need : src) / (1024.0 * 1024.0 * 1024.0);
+    double content = (double)st->content_bytes;
+    double per_inode = 20.0 * 1024.0 * (double)(st->reg_inodes + st->dirs + st->links +
+                                                st->specials);
+    double headroom = content * 0.05;
+    double need, src, gb;
+    if (headroom < 128.0 * 1024.0 * 1024.0) headroom = 128.0 * 1024.0 * 1024.0;
+    need = content + per_inode + headroom;
+    src = (double)src_image_bytes;
+    gb = (need > src ? need : src) / (1024.0 * 1024.0 * 1024.0);
     /* mkfs accepts a fractional GiB and refuses < 64 MiB. */
     if (gb < 0.0625) gb = 0.0625;
     return gb;
@@ -1603,6 +1659,8 @@ static void usage(FILE *f, const char *me)
 "                     content + 16 KiB/inode) in GiB)\n"
 "  --meta-frac=N      INVFS_META_FRAC for invf-mkfs (default: leave mkfs's own\n"
 "                     default; rootfs imports want 16 per AGENTS.md 2.7)\n"
+"  --fold-every=N     fold the delta every N created files (default 8192;\n"
+"                     0 = never, which leaves the whole import in the delta log\n"
 "  --keep-partial     keep the destination image when the run fails\n"
 "  --no-gates         skip invf-fsck / invf-verify --deep\n"
 "  --mount-root=DIR   where the loop / fuse mounts are created (default\n"
@@ -1722,6 +1780,7 @@ static int cmd_convert(int argc, char **argv)
         else if (strncmp(argv[i], "--size=", 7) == 0) size_opt = argv[i] + 7;
         else if (strncmp(argv[i], "--meta-frac=", 12) == 0) meta_frac = atoi(argv[i] + 12);
         else if (strncmp(argv[i], "--mount-root=", 13) == 0) mount_root_opt = argv[i] + 13;
+        else if (strncmp(argv[i], "--fold-every=", 13) == 0) g_fold_every = (unsigned)atoi(argv[i] + 13);
         else if (strcmp(argv[i], "--keep-partial") == 0) keep_partial = 1;
         else if (strcmp(argv[i], "--no-gates") == 0) gates = 0;
         else if (argv[i][0] == '-') { die("unknown option %s", argv[i]); return XV_ERR; }
@@ -1859,6 +1918,33 @@ static int cmd_convert(int argc, char **argv)
             meta_of(&rm, &rst);
             (void)vol_apply_meta(g_vol, "", &rm);
         }
+        /* Free-space accounting, before the volume is closed: a destination
+         * that arrives 99% full is not a converted filesystem, it is a trap.
+         * Measured on the 2.5 GiB Ubuntu rootfs with the first sizing estimate:
+         * 5 882 free blocks (23 MiB) of 660 193, after which invf-fsck refused
+         * to fold the 179 299-record delta at all. A fold needs room to move
+         * base pages, so the floor is max(2% of the volume, 64 MiB) and a
+         * destination below it FAILS the run with the numbers. */
+        {
+            uint64_t total = vol_sb(g_vol)->total_blocks;
+            uint64_t freeb = vol_free_blocks_cached(g_vol);
+            uint64_t floor_b = total / 50;                 /* 2% */
+            if (floor_b < (64ull * 1024 * 1024) / 4096) floor_b = (64ull * 1024 * 1024) / 4096;
+            g_free_blocks = freeb;
+            g_total_blocks = total;
+            if (freeb < floor_b) {
+                char b1[32], b2[32];
+                sv_push(&fail, "the destination is %.1f%% full after the import "
+                               "(%llu of %llu blocks free; %s of %s). A volume this "
+                               "tight cannot fold its delta, so it is not a usable "
+                               "result: raise --size (default sizing is content + "
+                               "20 KiB/inode + max(128 MiB, 5%%)) or shrink the source.",
+                        total ? 100.0 * (double)(total - freeb) / (double)total : 0.0,
+                        (unsigned long long)freeb, (unsigned long long)total,
+                        human((double)freeb * 4096.0, b1, sizeof b1),
+                        human((double)total * 4096.0, b2, sizeof b2));
+            }
+        }
         vol_flush(g_vol);
         vol_close(g_vol);
         g_vol = NULL;
@@ -1950,6 +2036,20 @@ static int cmd_convert(int argc, char **argv)
         }
         printf("nk match   : %zu of %llu member inode(s) carried byte-for-byte\n",
                pi.n_mem - unmatched, (unsigned long long)pi.n_mem);
+        if (g_total_blocks) {
+            char b1[32];
+            printf("volume     : %llu of %llu blocks free (%s, %.1f%% used), "
+                   "%llu fold(s)",
+                   (unsigned long long)g_free_blocks, (unsigned long long)g_total_blocks,
+                   human((double)g_free_blocks * 4096.0, b1, sizeof b1),
+                   100.0 * (double)(g_total_blocks - g_free_blocks) / (double)g_total_blocks,
+                   g_folds);
+            if (g_fold_failed)
+                printf(", %llu fold(s) REFUSED by the engine (see the report's "
+                       "findings)\n", g_fold_failed);
+            else
+                printf("\n");
+        }
         if (unmatched)
             printf("unmatched  : %zu inode(s), %llu B, with NO dirent in the source "
                    "(ext4's own reserved inodes and unlink debris; nothing a path can "
