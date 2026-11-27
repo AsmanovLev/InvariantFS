@@ -4560,3 +4560,34 @@ SHORTER than the length being compared. Two independent answers, both mechanical
 
 Wired into `make check-hygiene` and into the three CI hygiene steps, so the shape
 cannot come back quietly.
+
+## Three claims retracted in one day, and the measurement trap behind two of them
+
+By the end of 2026-11-27 three "known defects" turned out to be wrong, and the shape
+of the mistake is the same each time: a proxy that had stopped standing for the
+property, still failing or passing loudly.
+
+| claim | how it was carried | what the measurement said |
+|---|---|---|
+| "recipe blobs are never reclaimed" | a line in OPEN-ISSUES, never measured | flat: 4 MiB file × 10 rewrites and 32 MiB file × 7 rewrites, allocated blocks do not move (inline and out-of-line recipes, lazy reclaim on and off) |
+| "convert loses hardlink identity" | my own acceptance run | **one row, four names**: source ext4 `ino=13 nlink=4`; destination `inode 3` for `a`, `h1`, `h2`, `sub/h3`, content through any name, fsck OK, nlink audit OK |
+| "`invf-fsck` prints DAMAGED and exits 0" | two runs that "measured" it | exit 3, and `--deep` exits 1; the earlier reading came from `$?` being eaten by `wsl -d void -- bash -c '…'` on this box |
+
+### The trap, stated so it stops costing days
+
+**On a FUSE mount, `stat -c %i` is the KERNEL's inode number, not the filesystem's.**
+With `use_ino` off the kernel assigns its own numbers per inode object, so two names
+that share one row legitimately report different `st_ino` values — and my live-mount
+probe reported `2, 3, 4, 6` for a group that the FS holds as one row (id 3). The same
+probe also read a **cached** page (`cat a` after writing through `h2` showed the old
+content) and a cached attribute (`nlink` appearing to grow link by link, because it was
+read once per creation).
+
+Both traps disappear when the volume is read **offline**: `invf-ls` prints ids the
+filesystem owns, and `invf-cat` reads through the real path with no kernel cache. Every
+identity claim about this filesystem must be made that way, and any live-mount
+measurement of `st_ino`/`nlink`/content must be marked as a kernel-cache observation.
+
+The three retractions share one remedy, and it is why `tools/check-literal-lengths.py`
+carries a red control and `tools/bench-opt.sh` refuses to compare variants that produce
+different results: a check has to be able to come back the other way.
