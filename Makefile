@@ -57,6 +57,8 @@ vpath %.c $(SRCDIRS)
 # Also: a flag change is a change to generated code in a filesystem, and the last
 # layout-dependent defect in this tree (vol_spt0) produced EIO under one flag set
 # and a healthy volume under another.
+# Full reasoning + protocol: impl_docs/BENCH-OPTIMISATION.md; re-measure with
+# tools/bench-opt.sh (it fails if the variants do not produce the same result).
 OPT     ?= -O2
 CFLAGS  := -std=gnu11 $(OPT) -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -include $(SRC)/core/glibc_compat.h \

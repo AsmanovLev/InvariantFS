@@ -58,6 +58,7 @@ are gitignored and produced by `make docs`.
 | `docs/INSTALL-MATRIX.md` | Install matrix: what is actually installable, and what was actually run |
 | `docs/SECURITY.md` | Security Considerations |
 | `docs/EXIT-CODES.md` | One meaning per exit code (0/1/2/3) across the checkers, the "never 0 after finding damage" rule, and why fsck's 3 and verify's 2 are different axes |
+| `impl_docs/BENCH-OPTIMISATION.md` | Why `-O2` and not `-O3`: the measured A/B (28% slower on sweep, 27% more code), the syscall-bound trap that makes a small corpus look like a tie, and the protocol for changing it |
 | `docs/VOID-INSTALL.md` | Void Linux on InvariantFS — Install Guide |
 | `docs/adr/ADR-001-meta-v3-btree-delta-model.md` | ADR-001: metadata store B+ Tree and Delta Log Architecture |
 | `docs/adr/ADR-002-fold-watermark-ordering.md` | ADR-002: Fold Watermark Invariant for Lock-Free Read Consistency |
