@@ -7,6 +7,16 @@ VER="${TAG#v}"
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT_DIR"
 
+# USE THIS SCRIPT, never a hand edit of one file. Every packaging lane derives
+# the version from its own file (PKGBUILD pkgver, the spec, the ebuild name, the
+# nix version, the header fallback) AND from `git describe`, so bumping one of
+# them ahead of a tag splits the tree in two. Measured 2026-11-27: the header was
+# hand-bumped to v0.7.0 while the tree was untagged, and both packaging jobs died
+# with a missing DIRECTORY rather than a version complaint:
+#   PKGBUILD  cd .../arch/src/invfs-v0.6.12-x86_64: No such file or directory
+#   ebuild    packaging/gentoo/invfs-0.7.0.ebuild: No such file or directory
+# Order that works: tag first, then run this, then commit the stamped files.
+
 # 1. invarifs.h
 if [ -f src/core/invarifs.h ]; then
     sed -i "s/#define INVFS_VERSION_STRING .*/#define INVFS_VERSION_STRING \"v$VER\"/" src/core/invarifs.h
