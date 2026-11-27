@@ -292,6 +292,35 @@ static int write_reserve(const char *gcfg, const char *out_path,
     return 1;
 }
 
+/* Is the pack's binary OLDER than the source it claims to be built from? Then the
+ * map this tool is about to believe came from code that no longer exists.
+ *
+ * Measured twice in one day: `bin/ext4fs` from 11-23 predated the reserved-inode fix,
+ * so an absorbed image came out with a zeroed journal and e2fsck refused it; and
+ * `bin/xfs` from 11-19 had no `classify` verb at all, which made three measurements
+ * read "the pack refuses with no reason". Both were LOCAL trees where `make` had been
+ * run but not `make helpers` -- which is exactly what a person does. `all` does not
+ * build the pack CLIs by design (CI runs both), so the tool says it out loud instead
+ * of producing a confident wrong answer. */
+static void warn_if_pack_stale(const char *packdir, const char *binrel,
+                               const char *name)
+{
+    struct stat sb, ss;
+    char bin[512], src[512];
+
+    if (snprintf(bin, sizeof bin, "%s/%s", packdir, binrel) >= (int)sizeof bin)
+        return;
+    if (snprintf(src, sizeof src, "%s/%s.c", packdir, name) >= (int)sizeof src)
+        return;
+    if (stat(bin, &sb) != 0 || stat(src, &ss) != 0)
+        return;
+    if (sb.st_mtime < ss.st_mtime)
+        fprintf(stderr,
+                "invf-absorb: WARNING: %s is older than %s -- the map below comes "
+                "from a binary that predates the source it claims to be. Run "
+                "`make helpers`.\n", bin, src);
+}
+
 int absorb_pack_load(const char *packdir, absorb_pack_desc_t *out)
 {
     pack_t pk;
@@ -371,6 +400,16 @@ int absorb_pack_pick(const char *packs_dir, const char *image,
         copy_val(cand.classify, sizeof cand.classify, pk.classify);
         copy_val(cand.enumerate, sizeof cand.enumerate, pk.enumerate);
         copy_val(cand.extract, sizeof cand.extract, pk.extract);
+        {
+            const char *rel = cand.classify[0] ? cand.classify : cand.enumerate;
+            char binrel[256];
+            int k;
+            for (k = 0; rel[k] && rel[k] != ' ' && k < (int)sizeof binrel - 1; k++)
+                binrel[k] = rel[k];
+            binrel[k] = 0;
+            if (binrel[0])
+                warn_if_pack_stale(cand.dir, binrel, cand.name);
+        }
         m = absorb_pack_matches(&cand, image);
         if (m < 0) {
             closedir(d);

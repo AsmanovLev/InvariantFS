@@ -4659,3 +4659,20 @@ half is the reference.
 leg tests the claim that holds, and the divergence is named here instead of producing a
 red suite with no explanation. When the divergence is fixed, the `unset` goes away and
 the leg runs under both policies.
+
+### Correction: the stale pack binary was LOCAL, and `all` is not supposed to fix it
+
+An earlier version of this section blamed the build system for not rebuilding pack CLI
+binaries. That was wrong: a generated `HELPER_RULE` covers every pack in `CPACKS`,
+`HELPERS` depends on them, and `helpers` builds them. CI runs `make -j6 && make helpers`.
+
+What actually happened is duller: this box ran `make` and not `make helpers`, so
+`tools/codecpacks/ext4fs.codecpack/bin/ext4fs` stayed at 11-23, predating the
+reserved-inode fix. Proof it was that binary and nothing else: with a current pack the
+same fixture produces a **reserve list of 8 ranges instead of 4** (the journal and the
+resize inode reappear), `old.ext4` comes out byte-identical, and `e2fsck -fn` exits 0.
+
+The tool now says so instead of producing a confident wrong answer:
+`invf-absorb: WARNING: <bin> is older than <src> ... Run 'make helpers'.` And
+`tools/test-absorb-commit.sh` runs `make helpers` itself, the way the other suites
+build the driver they need -- a test that depends on a build product must ask for it.

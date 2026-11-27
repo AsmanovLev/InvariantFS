@@ -57,6 +57,17 @@ data-loss class in the reclaim path was found and fixed.
   instead of replacing it (a command-line override loses every `-I` and dies in
   `zconf.h`). This is the instrument that found the `vol_spt0` bug in one run.
 - `mkfs --absorb`, `mkfs --reserve`, and an `absorb prefix:` line in the summary.
+- **`invf-absorb commit <image|device> <reserve.list>`** — the in-place adoption, end
+  to end: stage the used bytes outside the device, save the prefix, `mkfs --reserve`,
+  publish the old filesystem as `old.<fs>`, verify the read-back. On a 128 MiB ext4
+  fixture the result is byte-identical to the source and `e2fsck -fn` opens it. The
+  staging step is the design: reading the ranges from the target while writing into
+  the target's own free space destroys source the copy has not read yet (measured).
+  `tools/test-absorb-commit.sh` holds five legs, including "a source with no room is
+  refused by name" and "the staging copy is kept when mkfs fails".
+- `invf-absorb` warns when a pack's binary is older than the source it was built from:
+  a stale `bin/ext4fs` produced a reserve list with no journal in it, and the absorbed
+  image was refused by e2fsck while every suite that builds its own pack was green.
 
 ### Changed
 - **One exit-code vocabulary** (`docs/EXIT-CODES.md`): 0 clean at the level

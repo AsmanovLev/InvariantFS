@@ -45,6 +45,13 @@ pass() { echo "  ok: $*"; }
 command -v e2fsck >/dev/null || { echo "SKIP (loud): e2fsck is not installed"; exit 0; }
 [ -x "$B/invf-absorb" ] || { echo "SKIP (loud): $B/invf-absorb is not built"; exit 0; }
 
+# The pack binary this tool execs is a BUILD PRODUCT in the tree, and `all` does not
+# build it -- `helpers` does. A stale one produced a wrong reserve list (4 ranges
+# instead of 8: no journal) and an absorbed image e2fsck refused, while every suite
+# that builds its own pack was green. Ask for it, the way the other suites ask for
+# their driver.
+make -C "$REPO" helpers >/dev/null 2>&1     || echo "  note: 'make helpers' failed; the pack binary in the tree may be stale"
+
 # LAZY RECLAIM OFF IS A NAMED EXCLUSION, with the measurement behind it: with
 # INVFS_LAZY_RECLAIM=0 the published image is NOT byte-identical (e2fsck: "journal
 # superblock is corrupt"), while the default policy gives an identical image and
