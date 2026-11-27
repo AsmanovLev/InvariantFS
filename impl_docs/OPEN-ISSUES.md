@@ -1653,3 +1653,38 @@ Two ways out, and the choice is a promise, not an implementation detail:
 Until one of them lands, `invf-absorb publish` produces a file that is exact on
 what the map called allocated and does NOT mount: `mkfs --absorb` stays
 plan-only, which is why that refusal exists.
+
+### Where the journal fix goes, and the trap that stopped it here (2026-11-27)
+
+The two ways out above are the decision; this is the map, because the attempt made
+in this session got one step from working and the step is not obvious.
+
+Reserved inodes are read by nobody: `scan_inodes` starts at `s_first_ino`, so the
+journal (inode 8) is correctly excluded from MEMBERS and, as a side effect, never
+enters the `fs->meta` interval proof. The fix is to walk them and add their
+extents, which needs three things in the pack:
+
+1. `read_inode(fs, ino, ib)` for `ino < fs->first_ino` while the inode bitmap
+   says used (1..10 are mostly empty slots, so the mode check is the filter);
+2. `walk_inode_extents(fs, &w, ib)` with a `member_t` context;
+3. **`m.usize` must be set to something larger than the inode**, because the
+   depth-0 branch only collects extents whose logical range is BELOW
+   `w->m->usize`:
+
+   ```
+   if (lo < w->m->usize) { ... mext_push(w->m, lo, phys*bs, chi - lo) ... }
+   ```
+
+   With `memset(&m, 0, ...)` that is zero, so the walk collects ZERO extents and
+   returns success -- measured as `extents=0 rc=0` for inode 8, and the table
+   comes out byte-identical to before. Nothing declines, nothing warns: the
+   collection is silently empty, which is exactly the failure mode this pack's
+   own header is written to avoid.
+
+The attempt in this session wired 1 and 2 and died on 3, then was reverted rather
+than left half-applied: the pack is back to its committed state, so the next
+change starts from a clean `git diff`. Wiring it is ~40 lines, needs the
+`[dbg] extents=` print to confirm non-zero, and then the acceptance is a single
+command -- `e2fsck -fn` on the absorbed image must open it (today: "Superblock has
+an invalid journal (inode 8)"). `XFS_MAYBE_UNUSED`-style care applies: the pack
+also builds as `libext4fs.so` under `-Werror`.
