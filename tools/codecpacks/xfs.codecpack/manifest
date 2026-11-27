@@ -40,6 +40,13 @@ rebuild = bin/xfs rebuild {recipe} {dir} {out}
 # WP16b: the map command makes the pack SEEKABLE (CAP_SEEK): reads splice
 # locally from the recipe + member siblings and never exec the pack.
 map = bin/xfs map {in} {out}
+# CLI-only manifest command, NOT an ABI command (the plugin ABI carries five;
+# ext4fs declares its classify the same way). Emits the GCFG table: what every
+# byte range of the image IS -- meta_structure vs garbage, and whether the
+# pack READ the garbage and found it all zero (so it can be reproduced without
+# being stored). The core must probe for this command and fall back to "no
+# classification" when a pack lacks it -- packs in the wild predate it.
+classify = bin/xfs classify {in} {out}
 # Opt into the FS-owned decomposition generation. This pack renders a v1
 # (MRMP) map today, so the stamp is a no-op -- but a pack that emits v2
 # without this key gets a map header whose generation is whatever the
