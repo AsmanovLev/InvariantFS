@@ -269,10 +269,34 @@ static int cmd_share(const char *img)
             (unsigned long long)free_before, (unsigned long long)free_merged);
     if (free_merged <= free_before)
         die("dedupe did not merge (control: no shared pba, leg invalid)");
+    /* WP630-FORENSICS: the count at every step, because the failure line
+     * (refcount 0 at the end) says WHAT but not WHEN. A shared pba must read 2
+     * the moment two live rows name it; the step where it drops is the step
+     * that loses an owner. */
+    {
+        uint64_t p = survivor_pba(v, "B.bin");
+        fprintf(stderr, "harness: step dedupe        shared pba=%llu refcount=%u\n",
+                (unsigned long long)p, pba_ref_count(v, p));
+    }
     if (vol_unlink(v, "A.bin") != 0) die("first unlink failed");
+    {
+        uint64_t p = survivor_pba(v, "B.bin");
+        fprintf(stderr, "harness: step unlink#1       shared pba=%llu refcount=%u\n",
+                (unsigned long long)p, pba_ref_count(v, p));
+    }
     vol_delta_doom(v);
     if (!vol_find(v, "A.bin")) die("doom did not restore the row (control)");
+    {
+        uint64_t p = survivor_pba(v, "B.bin");
+        fprintf(stderr, "harness: step doom+restore    shared pba=%llu refcount=%u\n",
+                (unsigned long long)p, pba_ref_count(v, p));
+    }
     if (vol_unlink(v, "A.bin") != 0) die("second unlink failed");
+    {
+        uint64_t p = survivor_pba(v, "B.bin");
+        fprintf(stderr, "harness: step unlink#2       shared pba=%llu refcount=%u\n",
+                (unsigned long long)p, pba_ref_count(v, p));
+    }
     nfreed = 0;
     nrel = 0;
     record_on = 1;

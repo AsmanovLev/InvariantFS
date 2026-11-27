@@ -4230,3 +4230,46 @@ Tooling gotcha, recorded because it cost two wrong conclusions in one session:
 on this box, `$?` and `$VAR` inside `wsl -d void -- bash -c '<string>'` do not
 survive -- put the commands in a script file and run
 `wsl -d void -- sudo bash /mnt/.../script.sh`.
+
+### leg5: the double decrement is inside ONE release, not two retires
+
+The fast repro (`tools/test-fence-doom-doubleretire.sh` leg 2) now prints the
+shared pba's refcount at every step, and the numbers refute the suite's own
+stated mechanism:
+
+    step dedupe         shared pba=8706 refcount=2   two live rows name it
+    step unlink#1       shared pba=8706 refcount=2   the retire is deferred
+    step doom+restore   shared pba=8706 refcount=2   the doom is clean
+    step unlink#2       shared pba=8706 refcount=2
+    final sync          shared pba=8706 refcount=0   <-- two decrements
+    harness: leg2 final sync: 1 release(s)           <-- one release
+
+One `vol_free_recipe_blocks` call, one release, and the count falls by two.
+The retire drain is not the stage: `[retire] drained 1 ent(s); freed 27 blk`
+is the CUMULATIVE dedupe count, and `assert_single_release()` passes — exactly
+one recipe release fires per unlink.
+
+So the parked 573-line `delta_fenced_seq` patch (which gated retire collection on
+a fence watermark) was aimed at the wrong stage, and its collateral damage on
+leg 1 ("retire never fired") was the signal that it was: liveness was never the
+problem here.
+
+The shape that fits the numbers is a mismatch between how many times a pba
+appears in a recipe and how many times the release decrements it:
+`free_recipe_level` walks ENTRIES and does `pba_ref_modify(v, pba, -1)` per entry,
+then frees only when the count reaches 0. If one file's recipe names the same
+pba in two entries — which content-addressed writing makes possible inside a
+single file when two spans hash equal — then a count of 2 can be "A owns it
+twice", and a single release of A drives it 2 -> 0 while B still names it.
+
+The next measurement is one print, in the harness: dump the entries of A's
+recipe (pba, len, algo) before the unlink. If one pba appears twice, the fix is
+in the accounting, not in the retire machinery: the count must be per REFERENCE
+(it already is elsewhere: `dl_retire_free_list` "counts per entry, not per unique
+block") and either the release must decrement per occurrence and free only at 0
+(what it does) while something else already decremented the same reference, or
+the write path must not emit two entries for one pba.
+
+Recorded here because the difference matters: the previous three attempts at this
+defect (fenced-seq watermark, retire liveness, map staleness after a doom) all
+assumed the charge happened twice. It happens once, on a doubled reference.
