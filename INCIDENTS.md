@@ -4126,3 +4126,71 @@ chmod-in    mode=0444     <- nix computes its read-only pass from this answer
   `invf-convert` suite asserts exactly that (`tools/test-convert-ext4.sh`, leg A)
   and its verifier compares mtime at nanosecond granularity on every path, so the
   regression cannot come back silently.
+
+## leg5: one span of an up-mode write, and the pba that holds somebody else's segment
+
+Artifact: `tools/flakey/artifacts/leg5-soak-20261127-101426` (seed 3663444781,
+commit c4e5eb4), preserved with `backing.img`, `model.json`, `oplog.txt`.
+
+### What the five lines of oplog say
+
+    +44.0  op write s12.bin 301132B sha=17570e0e… ok (mode=drop)
+    +50.4  chaos -> up
+    +51.1  cli sweep rc=0 (mode=up)
+    +51.3  op write s12.bin 784772B sha=a63dc722… ok (mode=up)     <-- the promise
+    +51.3  op delete s00.bin ok (mode=up)
+    +51.3  op write s19.bin 982789B ok (mode=up)
+    +51.4  chaos -> error
+    +51.4  op write s12.bin -> ERR Input/output error (mode=error)
+    +62.8  exhausted: damage names: ['s12.bin']
+
+The up-mode write was ACKed on a healthy device. After it, the file is 784772 B
+of 12 × 64 KiB spans, and **span 3 alone** does not decode:
+
+    raw segment header corrupt (csize 1681, want 65536)
+
+`want 65536` is the recipe's claim: this span is RAW, 65536 bytes. `csize 1681` is
+what the block actually holds — the header of a *compressed* segment of some other
+writer. A block cannot be both, so **pba 18766 was handed out twice**.
+
+Both of the volume's own tools then tell the truth, and this matters for the
+release note: there is no silent corruption anywhere in this artifact.
+
+    invf-fsck  --list-damaged:  damaged  123  s12.bin  segment-torn  784772
+                                verdict DAMAGED; "intact-but-unreadable: nothing
+                                is lost beyond the torn span" (--cut keeps 196608 B)
+    invf-verify --deep:         CORRUPT: s12.bin
+                                deep: 29 files ok, 1 corrupt, 19 037 255 bytes
+
+### Why the soak calls this a failure, and why that is still correct
+
+`diff_manifest` accepts an unreadable file only when it is `drop_touched` AND in
+the damage set. s12.bin's `drop_touched` was **cleared** by the up-mode ack at
++51.3 — by design, "an acked write under up mode re-pins history strictly". So the
+gate fails a file whose damage the engine itself named. The gate is not wrong to
+fail: an acked write on a healthy device is a promise, and one span of it did not
+survive.
+
+But two harness facts must be recorded with it, because they cost days:
+
+1. In the LIVE gate the damage-named branch can never fire: `diff_manifest` gets
+   `self.damage_names(verify_out)`, which parses `CORRUPT: <name>` out of the
+   VERIFY output — and a gate that reaches the manifest diff has already required
+   verify to be clean, so the set is empty by construction. The code says so:
+   "verify is clean here, so the damage set is empty". `fsck --list-damaged` is
+   consulted only in `exhausted_gate_body`. Any "damage-named" acceptance is
+   therefore exercised by replay, never by a live soak.
+2. The seed no longer reproduces on `main` (seed 3621091749 now passes in 97 s).
+   That is not evidence of a fix; the artifact is the evidence, and it replays
+   deterministically (`soak.py --replay` → `REPLAY: FAIL … present but unreadable:
+   s12.bin`), which is what makes this a usable repro without chaos.
+
+### The next measurement, and it is one command
+
+`make CORRUPT_DEBUG=1` puts `ALLOC-OVER-LIVE pba=%llu owners=%d` at every
+alloc (`volume.c:2625`). Replaying this artifact's op sequence against a
+`CORRUPT_DEBUG` build should print `pba=18766` with `owners > 0` at the moment of
+the second allocation, which names the stage — and the pids — instead of leaving a
+corpse for forensics. Until that prints, the mechanism is: representational
+mismatch at a shared pba, reached within one second of an up-mode ack following a
+drop-mode lie.
