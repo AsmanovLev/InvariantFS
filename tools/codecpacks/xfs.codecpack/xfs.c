@@ -148,6 +148,16 @@
  *   payload: the RECIPE ranges' bytes, concatenated in range order
  * kind 0 = RECIPE (bytes at the running payload offset), 1 = MEMBER
  * (bytes of member idx at logical offset src). */
+/* `classify` is a CLI-only manifest command: the plugin C ABI carries five
+ * (enumerate/extract/strip/rebuild/map). Under -DIVPACK_SHARED_LIB nothing
+ * references it, so -Werror=unused-function rejects the .so -- which is exactly
+ * what the engine tier caught the first time this pack was merged. */
+#if defined(__GNUC__)
+#define XFS_MAYBE_UNUSED __attribute__((unused))
+#else
+#define XFS_MAYBE_UNUSED
+#endif
+
 #define RECIPE_MAGIC "XFSRCP01"
 #define RECIPE_HDR   32
 #define RECIPE_MENT  16
@@ -1690,7 +1700,7 @@ static void cls_write(const char *path, const cls_ent *tab, size_t n,
         die("close %s: %s", path, strerror(errno));
 }
 
-static void cmd_classify(const char *in, const char *out)
+static XFS_MAYBE_UNUSED void cmd_classify(const char *in, const char *out)
 {
     img_t *im = parse_image_ex(in, 0);
     cls_ctx c;
