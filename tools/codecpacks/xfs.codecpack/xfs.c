@@ -57,10 +57,10 @@
  * time proves every emitted byte range against the original anyway).
  *
  * classify additionally declines (see cmd_classify): an external log, a log
- * that does not fit sb_dblocks, and any contradiction between the free-space
- * B+trees, the inode B+trees and the AG headers -- because a GCFG table that
- * calls a needed block garbage is data loss for whoever converts with it,
- * while a refusal costs nothing.
+ * that does not fit inside its own AG, and any contradiction between the
+ * free-space B+trees, the inode B+trees and the AG headers -- because a GCFG
+ * table that calls a needed block garbage is data loss for whoever converts
+ * with it, while a refusal costs nothing.
  */
 
 #define _POSIX_C_SOURCE 200809L
