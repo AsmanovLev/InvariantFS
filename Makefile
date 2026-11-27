@@ -223,7 +223,7 @@ FRB_T := $(CURDIR)/build/frbtest
 HD_T := $(CURDIR)/build/hdtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
-           invf-zip invf-fuse invf-import invf-sweep \
+           invf-zip invf-fuse invf-import invf-convert invf-sweep \
            invf-stats invf-verbatim invf-reconsolidate invf-resize invf-rollback invf-pack \
            invf-vnode invf-plugin-host
 
@@ -386,6 +386,15 @@ $(OBJ)/tmpstore.o: $(SRC)/cli/tmpstore.c | $(OBJ)
 $(OUT)/invf-import: $(OBJ)/invf-import.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-import.o: tools/invf-import.c | $(OBJ)
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+# invf-convert (WP-CONVERT-EXT4): the ext4 -> InvFS pipeline and its
+# verification harness. One binary for both halves because the comparison is
+# the deliverable, not an afterthought: `convert` cannot claim a result the
+# same tool will not check.
+$(OUT)/invf-convert: $(OBJ)/invf-convert.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+$(OBJ)/invf-convert.o: tools/invf-convert.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(OUT)/invf-sweep: $(OBJ)/invf-sweep.o $(CORE_O)
@@ -1709,6 +1718,13 @@ e2e: all $(OUT)/meta_probe
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ntfs-big.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-vdi.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-resize.sh
+# WP-CONVERT-EXT4: `invf-convert` — an ext4 image -> a fresh InvFS volume, and
+# the comparison that has to come with it (every path: type, size, mode, uid,
+# gid, mtime to the nanosecond, BLAKE3 of the content, symlink targets,
+# hardlink partition, xattrs). LOCKED (sudo + losetup + a fuse mount). Its
+# real-world leg is opt-in (INVFS_CONVERT_REAL=1): ~700 s to convert and
+# ~180 s to verify a 2.5 GiB rootfs is a measurement, not a per-push gate.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-convert-ext4.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-rollback.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-watermark.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-usr1-savepoint.sh

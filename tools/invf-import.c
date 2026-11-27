@@ -150,8 +150,20 @@ static void apply_meta_or_die(const char *vname, const struct stat *st,
         m.uid   = 0;
         m.gid   = 0;
     }
-    m.mtime = (int64_t)st->st_mtim.tv_sec;
-    m.atime = (int64_t)st->st_atim.tv_sec;
+    /* PACKED (sec << 30 | nsec). The row's i64 does not hold plain seconds on
+     * this format: INVFS_INODE_ROW_VERSION 3 made mtime/atime a packed
+     * seconds+nanoseconds value (src/core/invarifs.h), and writing raw seconds
+     * into that field makes every imported mtime read back as the wrong decade.
+     * Measured before this fix, on a fresh volume: a source file stamped
+     * 2020-01-02 03:04:05.123456789 read back through the FUSE mount as
+     * 1970-01-01 07:00:01.504167221 — 1577934245 seconds interpreted as
+     * 1577934245 >> 30 = 1 second, with the leftovers showing up as nanoseconds.
+     * The FUSE path always packed (fuse_fs.c:3578); this tool and every other
+     * offline writer did not, so an import silently destroyed the one metadata
+     * field a rootfs is compared by (mtime is what make, rsync -t and every
+     * package manager read). */
+    m.mtime = invfs_time_pack((int64_t)st->st_mtim.tv_sec, (int64_t)st->st_mtim.tv_nsec);
+    m.atime = invfs_time_pack((int64_t)st->st_atim.tv_sec, (int64_t)st->st_atim.tv_nsec);
     m.nlink = 0;                       /* engine default per type */
     if (target) snprintf(m.target, sizeof(m.target), "%s", target);
     nid = vol_apply_meta(vol, vname, &m);
@@ -226,8 +238,8 @@ static void import_file(const char *spath, const char *vname)
     m.mode  = st.st_mode & 07777;
     m.uid   = getenv("INVFS_IMPORT_KEEP_OWNER") ? st.st_uid : 0;
     m.gid   = getenv("INVFS_IMPORT_KEEP_OWNER") ? st.st_gid : 0;
-    m.mtime = (int64_t)st.st_mtim.tv_sec;
-    m.atime = (int64_t)st.st_atim.tv_sec;
+    m.mtime = invfs_time_pack((int64_t)st.st_mtim.tv_sec, (int64_t)st.st_mtim.tv_nsec);
+    m.atime = invfs_time_pack((int64_t)st.st_atim.tv_sec, (int64_t)st.st_atim.tv_nsec);
     m.nlink = 1;
 
     vol_ensure_path(vol, vname);
@@ -310,8 +322,8 @@ static void import_entry(const char *spath, const char *vname, int depth)
             m.uid   = st.st_uid;
             m.gid   = st.st_gid;
         }
-        m.mtime = (int64_t)st.st_mtim.tv_sec;
-        m.atime = (int64_t)st.st_atim.tv_sec;
+        m.mtime = invfs_time_pack((int64_t)st.st_mtim.tv_sec, (int64_t)st.st_mtim.tv_nsec);
+        m.atime = invfs_time_pack((int64_t)st.st_atim.tv_sec, (int64_t)st.st_atim.tv_nsec);
         m.nlink = 1;
         snprintf(m.target, sizeof(m.target), "%s", tgt);
         if (vol_create_file_with_meta(vol, vname, NULL, 0, &m) == 0) {
@@ -448,8 +460,10 @@ int main(int argc, char **argv)
         rm.mode = root_st.st_mode & 07777;
         rm.uid  = root_st.st_uid;
         rm.gid  = root_st.st_gid;
-        rm.mtime = (int64_t)root_st.st_mtim.tv_sec;
-        rm.atime = (int64_t)root_st.st_atim.tv_sec;
+        rm.mtime = invfs_time_pack((int64_t)root_st.st_mtim.tv_sec,
+                                   (int64_t)root_st.st_mtim.tv_nsec);
+        rm.atime = invfs_time_pack((int64_t)root_st.st_atim.tv_sec,
+                                   (int64_t)root_st.st_atim.tv_nsec);
         vol_apply_meta(vol, "", &rm);   /* root anchor meta (best effort) */
     }
     import_dir(src, prefix ? prefix : "", 0);

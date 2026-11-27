@@ -26,6 +26,7 @@ and **not committed**: it is a view of the current tree, so a stale copy answers
 | dedupe, heat, tiering | `vol_dedupe.c`, `vol_heat.c`, `vol_tier.c` | — |
 | crash recovery, fsck, seal | `vol_crash.c`, `vol_fsck.c`, `src/cli/fsck.c`, `vol_seal.c`, `vol_repair.c` | ADR-009 |
 | FUSE surface, Linux rootfs | `fuse_fs.c`, `tools/mkinitramfs.sh` | `docs/ARCH-INSTALL.md`, `docs/GENTOO-INSTALL.md` (rootfs recipes; `docs/architecture/OVERVIEW.md` is a zone summary, not a FUSE or rootfs doc) |
+| foreign-filesystem conversion (ext4 -> InvFS, phase 0 today) | `tools/invf-convert.c`, `tools/codecpacks/ext4fs.codecpack` (`classify`/`enumerate`), `tools/test-convert-ext4.sh` | `impl_docs/CONVERT-DESIGN.md` |
 
 Windows (dokan/winfsp) is parked; those sources still exist under
 `src/legacy/`. NFS is served by exporting the image (iSCSI/NBD/virtio-blk),
@@ -97,6 +98,7 @@ are gitignored and produced by `make docs`.
 | `impl_docs/BUG-RECLAIM-UNCLAIMED.md` | BUG: `unclaimed` Blocks Are Not Returned (reclaim does not free garbage) |
 | `impl_docs/CODE-MAP.md` | CODE-MAP: code-based map of the codebase (blind run) |
 | `impl_docs/CONCEPTS.md` | InvariantFS Concepts |
+| `impl_docs/CONVERT-DESIGN.md` | ext4 -> InvariantFS: phase 1 (in-place) design, the commit set, the crash matrix, and the space rule derived from measurement |
 | `impl_docs/DOCMAP.md` | DOCMAP — subsystem → code map |
 | `impl_docs/FILEMAP.md` | File Map — `src` (foldered layout, 2026-09-04) |
 | `impl_docs/INVARIANTS.md` | InvariantFS Invariants |
