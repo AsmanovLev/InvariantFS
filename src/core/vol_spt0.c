@@ -682,9 +682,23 @@ static spn_set_rc spn_inode_block_set(invfs_volume *v,
     *blen = 0;
     *ents = NULL;
     *n_ents = 0;
-    if (memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0",
-               INVFS_RECIPE_ADDR_LEN) == 0)
-        return SPN_SET_NONE;          /* no recipe: names no blocks */
+    /* "is the recipe address all zero" must be asked of a buffer that is
+     * INVFS_RECIPE_ADDR_LEN long. This compared against the 8-character
+     * literal "\0\0\0\0\0\0\0\0" -- nine bytes including the terminator --
+     * for 32 bytes, so 23 bytes of whatever .rodata followed were part of
+     * the answer, and the answer therefore depended on the LINK LAYOUT.
+     * Measured: the same volume was fine under a CORRUPT_DEBUG build and
+     * lost its directory under -O2 on the same compiler; ASan named it
+     * (global-buffer-overflow, spn_inode_block_set, vol_spt0.c:685) on
+     * the walker path that refused to sweep. This is the save point's
+     * protected set deciding whether a block a live row still needs may
+     * be reclaimed, so a layout-dependent answer is silent data loss. */
+    {
+        static const uint8_t spn_zero_addr[INVFS_RECIPE_ADDR_LEN] = { 0 };
+        if (memcmp(in->recipe_addr, spn_zero_addr,
+                   sizeof spn_zero_addr) == 0)
+            return SPN_SET_NONE;      /* no recipe: names no blocks */
+    }
     if (vol_recipe_load(v, in->recipe_addr, &b, &l) != 0 || !b) {
         if (why && whylen)
             snprintf(why, whylen, "inode's pinned recipe is unreadable");

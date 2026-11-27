@@ -4492,3 +4492,52 @@ than as a bad `ls`.
 base tree reads; the failure is in the dirent listing the walker uses, and the
 delta (which `vol_list_dir` may consult and `vol_ino_list_dir` may not) is the
 first suspect now that base+delta is established as the truth.
+
+## FOUND (ASan, one run): the save point decided "no recipe" by reading past a string literal
+
+The defect behind the whole dirent matrix above, named by AddressSanitizer on the
+first run of the path that refused to sweep:
+
+    ERROR: AddressSanitizer: global-buffer-overflow ... in memcmp
+      #2 spn_inode_block_set  src/core/vol_spt0.c:685
+      #3 spn_walk_ino         src/core/vol_spt0.c:727
+
+The line asked "is this recipe address all zero" by comparing a 32-byte address
+against an 8-character literal:
+
+    memcmp(in->recipe_addr, "\0\0\0\0\0\0\0\0", INVFS_RECIPE_ADDR_LEN)
+
+That literal is **nine** bytes (eight NULs plus the terminator) and the length is
+**32**, so 23 bytes of whatever `.rodata` happened to follow joined the comparison.
+The answer therefore depended on the LINK LAYOUT — which is exactly why the same
+volume was fine under a `CORRUPT_DEBUG` build and lost its directory under `-O2` on
+the same compiler, and why a forced rebuild never changed anything.
+
+Consequence, and it is the silent kind: this function computes the save point's
+**protected block set**. A wrong answer there lets a block a live row still needs be
+reclaimed, and the directory that lived in it stops being readable — `invf-ls` EIO,
+`vol_nlink_audit` -1, `fsck` DAMAGED, `invf-sweep` refusing to run.
+
+Fix: compare against a zero array of the length being compared, the idiom the rest
+of the tree already uses (`vol_ast.c`: `static const uint8_t zero_addr[...] = {0}`).
+
+Measured after the change, normal `-O2` build, same fixture:
+
+| | before | after |
+|---|---|---|
+| `invf-ls` | `cannot list /: Input/output error` | `40 file(s)` |
+| `invf-fsck` | `DAMAGED` | `OK` |
+| `invf-sweep --realize` | refused (walk delivered nothing) | `rc=0` |
+| `invf-ls` after realize | — | `40 file(s)` |
+
+Also landed, because it is what made this findable in one run instead of a week:
+`make SAN=address,undefined OUT=bin-san OBJ=build/obj-san`. Passing
+`CFLAGS="-fsanitize=..."` on the command line replaces this Makefile's CFLAGS and
+loses every `-I`, which dies in `/usr/include/zconf.h`; two runs were spent on that
+before the knob existed. The codecpack rules take `SAN_FLAGS` as well, for the same
+reason the TSAN note gives.
+
+Left over, and NOT the same defect: `invf-vnode <img> nlink audit` now prints one
+fault with an absurd inode id (`8070450532247928847`) while `fsck` says OK — a row
+whose id looks uninitialised. Worth one ASan run of the audit path; recorded here so
+it is not lost.

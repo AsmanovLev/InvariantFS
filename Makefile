@@ -67,6 +67,26 @@ ifeq ($(TSAN),1)
 TSAN_FLAGS := -fsanitize=thread -fno-omit-frame-pointer -g -O1
 CFLAGS     += $(TSAN_FLAGS)
 endif
+# Sanitizer build for memory and undefined behaviour:
+# `make SAN=address,undefined OUT=bin-san OBJ=build/obj-san`.
+#
+# Why this exists as its own knob and not as a command-line override: passing
+# `CFLAGS="-fsanitize=address ..."` on the command line REPLACES the file's
+# CFLAGS, which carries every -I flag in this tree, and the build dies in
+# /usr/include/zconf.h with "conflicting type qualifiers for 'voidpc'". Two runs
+# were spent on that before the knob existed.
+#
+# The case that made it necessary: a volume built by bin/invf-orphan_test lists
+# its directory under a CORRUPT_DEBUG build and answers EIO under the normal one,
+# on the same machine and compiler, while `make -B` reproduces the failure. A
+# defect that flips with a build flag is the signature of an uninitialised or
+# out-of-bounds read, and ASan/UBSan names it in one run instead of a week of
+# bisecting flags.
+SAN_FLAGS :=
+ifneq ($(strip $(SAN)),)
+SAN_FLAGS := -fsanitize=$(SAN) -fno-omit-frame-pointer -g -O1
+CFLAGS    += $(SAN_FLAGS)
+endif
 # gprof build: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof`, then
 # `bin-prof/invf-verify ...` writes gmon.out and `gprof bin-prof/invf-verify
 # gmon.out` says where the time went. This exists because "the walk is slow"
@@ -437,6 +457,12 @@ PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
 # qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
 PLUGIN_CFLAGS += $(TSAN_FLAGS)
+# A sanitizer build must instrument the shared objects too, and with a SHARED
+# -fsanitize=address the packs need the runtime linked in: leave them
+# uninstrumented and every later plugin test fails on an undefined
+# __asan_* symbol from a stock zlib object built with $(CFLAGS) -- the same
+# failure mode the TSAN note above records, so the same fix applies.
+PLUGIN_CFLAGS += $(SAN_FLAGS)
 PLUGIN_CFLAGS_qcow2 := $(PLUGIN_CFLAGS) -I$(SRC)/zlib -DZ_PREFIX
 PLUGIN_EXTRA_qcow2 := $(OBJ)/deflate_repro.o $(OBJ)/deflate_backend_system.o \
                       $(OBJ)/deflate_backend_stock.o $(STOCK_ZLIB_O)
