@@ -192,24 +192,11 @@ int main(int argc, char **argv)
                    (unsigned long long)crep.verify_failed,
                    (unsigned long long)crep.cut_bytes,
                    (unsigned long long)crep.drop_bytes);
-        if (list_damaged) {
-            invfs_damaged_file dmg[INVFS_DMG_MAX];
-            int nd, k;
-            memset(dmg, 0, sizeof dmg);
-            nd = vol_damaged_files(v, dmg, INVFS_DMG_MAX);
-            if (nd < 0) {
-                fprintf(stderr, "invf-fsck: damaged-partial: the "
-                                "damage walk could not complete, so no "
-                                "complete list exists\n");
-            } else {
-                for (k = 0; k < nd; k++)
-                    printf("damaged\t%llu\t%s\t%s\t%llu\n",
-                           (unsigned long long)dmg[k].id,
-                           dmg[k].name,
-                           vol_damaged_kind(dmg[k].kind),
-                           (unsigned long long)dmg[k].size);
-            }
-        }
+        if (list_damaged &&
+            vol_damaged_ledger(stdout, v, INVFS_DMG_MAX) < 0)
+            fprintf(stderr, "invf-fsck: damaged-partial: the "
+                            "damage walk could not complete, so no "
+                            "complete list exists\n");
         vol_close(v);
         /* The fsck vocabulary: 0 = every torn file salvaged (or a dry
          * plan printed), 3 = damage remains (named above), 1 = the
@@ -539,24 +526,11 @@ int main(int argc, char **argv)
              * OK verdict means nothing is damaged. A partial enumeration
              * fails closed on stderr and never prints a short list as
              * complete. */
-            if (list_damaged) {
-                invfs_damaged_file dmg[INVFS_DMG_MAX];
-                int nd, k;
-                memset(dmg, 0, sizeof dmg);
-                nd = vol_damaged_files(v, dmg, INVFS_DMG_MAX);
-                if (nd < 0) {
-                    fprintf(stderr, "invf-fsck: damaged-partial: the "
-                            "damage walk could not complete, so no "
-                            "complete list exists\n");
-                } else {
-                    for (k = 0; k < nd; k++)
-                        printf("damaged\t%llu\t%s\t%s\t%llu\n",
-                               (unsigned long long)dmg[k].id,
-                               dmg[k].name,
-                               vol_damaged_kind(dmg[k].kind),
-                               (unsigned long long)dmg[k].size);
-                }
-            }
+            if (list_damaged &&
+                vol_damaged_ledger(stdout, v, INVFS_DMG_MAX) < 0)
+                fprintf(stderr, "invf-fsck: damaged-partial: the "
+                                "damage walk could not complete, so no "
+                                "complete list exists\n");
             (void)degraded;
         }
         vol_close(v);

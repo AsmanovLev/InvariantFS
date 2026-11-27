@@ -4,7 +4,7 @@ invf-verify \- verify an InvariantFS volume's integrity
 .SH SYNOPSIS
 .B invf-verify
 .IR image | device
-.RB [ \-\-deep | \-\-verify\-seal ]
+.RB [ \-\-deep | \-\-verify\-seal | \-\-list\-damaged ]
 .RB [ \-\-ignore\-missing\-codecs ]
 .SH DESCRIPTION
 .B invf-verify
@@ -28,6 +28,23 @@ systemd unit runs a weekly deep verify over the volumes listed in
 .TP
 .B \-\-deep
 Decode and compare every file's content, not just the structures.
+.TP
+.B \-\-list\-damaged
+Print the per-file damage ledger: one tab-separated line per live file the
+volume cannot read back fully, as
+.IR "damaged<TAB>id<TAB>name<TAB>reason<TAB>size" .
+This is the same ledger, from the same core function and in the same format,
+that
+.BR invf-fsck (8)
+.B \-\-list\-damaged
+prints; the two outputs are byte-identical for the same image. It reads
+recipe blobs (not file content), which is the expensive half of fsck, so it is
+a mode of its own and does not combine with
+.B \-\-deep
+or
+.BR \-\-verify\-seal .
+Exits 0 when the list is empty, 3 when it is not, 1 when the walk could not
+complete (fail closed: a short list proves nothing).
 .TP
 .B \-\-verify\-seal
 Read-only seal scrub: report per-group parity drift, change nothing.

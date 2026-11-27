@@ -177,10 +177,11 @@ int main(int argc, char **argv)
     int deep = 0;
     int verify_seal = 0;   /* WP401: --verify-seal seal scrub */
     int ignore_missing_codecs = 0;
+    int list_damaged = 0;   /* --list-damaged: the SAME ledger fsck prints */
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal]\n"
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal|--list-damaged]\n"
                     "  --verify-seal: WP401 seal scrub (read-only per-group parity\n"
                     "                 report; exits 0 clean / 3 on drift / 1 on failure)\n");
             return 2;
@@ -196,6 +197,8 @@ int main(int argc, char **argv)
             deep = 1;
         if (strcmp(argv[i], "--verify-seal") == 0)
             verify_seal = 1;
+        if (strcmp(argv[i], "--list-damaged") == 0)
+            list_damaged = 1;
     }
 
     /* count positional args (skip flags) */
@@ -205,12 +208,18 @@ int main(int argc, char **argv)
             if (argv[i][0] != '-') positional++;
         }
         if (positional < 1 || positional > 2) {
-            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal]\n");
+            fprintf(stderr, "usage: invf-verify [--ignore-missing-codecs] <image|device> [--deep|--verify-seal|--list-damaged]\n");
             return 2;
         }
     }
     if (deep && verify_seal) {
         fprintf(stderr, "--deep and --verify-seal are standalone modes\n");
+        return 2;
+    }
+    if (list_damaged && (deep || verify_seal)) {
+        fprintf(stderr, "--list-damaged is a standalone mode: it reads recipes,\n"
+                        "not file content, so it does not combine with --deep\n"
+                        "or --verify-seal\n");
         return 2;
     }
 
@@ -415,11 +424,11 @@ int main(int argc, char **argv)
          * stays in both forms, because the suites grep for it. */
         if (deep)
             printf("OK: %s is a valid InvariantFS volume "
-                   "(structure, and --deep read every live file)\n", argv[1]);
+                   "(structure, and --deep read every live file)\n", path);
         else
             printf("OK: %s is a valid InvariantFS volume "
                    "(STRUCTURE ONLY: no file content was read; "
-                   "use --deep to read every live file)\n", argv[1]);
+                   "use --deep to read every live file)\n", path);
         printf("  state: %s, uuid: ", sb.state == INVFS_STATE_CLEAN ? "CLEAN"
                 : sb.state == INVFS_STATE_DIRTY ? "DIRTY" : "RECOVERY");
         for (i = 0; i < 16; i++)
@@ -434,6 +443,37 @@ int main(int argc, char **argv)
                (unsigned long long)sb.metadata_zone_blocks,
                (unsigned long long)sb.raw_zone_blocks,
                (unsigned long long)sb.shadow_zone_blocks);
+    }
+
+    /* --list-damaged: the SAME ledger `invf-fsck --list-damaged` prints, from
+     * the same core function, in the same wire format. It exists because the
+     * question a shallow verdict provokes is "which files can this volume not
+     * read back", and answering it must not be a second implementation: two
+     * tools printing two lists for one volume is the drift this tree keeps
+     * paying for.
+     *
+     * Cost, said out loud: this reads recipe blobs (not file content), which is
+     * the expensive half of fsck -- so it is a MODE, never folded into the
+     * default verdict that promises to be cheap. Exit: 0 when the list is
+     * empty, 3 when it is not, 1 when the walk could not complete (fail closed:
+     * a short list proves nothing). */
+    if (list_damaged) {
+        invfs_volume *vol;
+        int open_err = 0, nd;
+        blkio_close(&io);
+        vol = vol_open(path, &open_err);
+        if (!vol) {
+            fprintf(stderr, "list-damaged: cannot open volume (err %d)\n", open_err);
+            return 1;
+        }
+        nd = vol_damaged_ledger(stdout, vol, INVFS_DMG_MAX);
+        vol_close(vol);
+        if (nd < 0) {
+            fprintf(stderr, "list-damaged: the walk could not complete, so no "
+                            "complete list exists -- failing closed\n");
+            return 1;
+        }
+        return nd ? 3 : 0;
     }
 
     /* WP401 --verify-seal: standalone scrub mode. Runs after the same

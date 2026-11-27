@@ -126,6 +126,22 @@ grep -q "segment-torn" damaged-before.log || { cat damaged-before.log; fail "led
 grep -c "segment-torn" damaged-before.log | grep -q "2" || { cat damaged-before.log; fail "ledger must name 2 segment-torn files"; }
 echo "  fsck --list-damaged names both segment-torn"
 
+# [B2] the SAME ledger through the other front door. invf-verify --list-damaged
+# calls vol_damaged_ledger(), the function fsck now prints from, so the two
+# outputs must be byte-identical on the same image -- a second implementation
+# would drift, and sharing one is the whole reason the mode lives in the core.
+set +e
+$B/invf-verify --list-damaged "$IMG" > damaged-verify.log 2>&1
+vrc=$?
+set -e
+[ "$vrc" = "3" ] || { cat damaged-verify.log; fail "verify --list-damaged rc=$vrc (damage present => 3)"; }
+grep -E '^damaged	' damaged-before.log  > damaged-fsck.lines
+grep -E '^damaged	' damaged-verify.log > damaged-verify.lines
+diff -u damaged-fsck.lines damaged-verify.lines \
+    || { cat damaged-verify.lines; fail "verify and fsck disagree about the ledger"; }
+[ -s damaged-verify.lines ] || fail "verify --list-damaged printed nothing on a damaged volume"
+echo "  verify --list-damaged prints fsck's ledger, byte for byte (rc=3)"
+
 echo "== [C] dry-run plans, changes nothing =="
 $B/invf-fsck "$IMG" --cut --dry-run > cut-plan.log 2>&1 || fail "dry-run rc=$?"
 grep -q "WOULD cut" cut-plan.log || { cat cut-plan.log; fail "plan names no cut"; }

@@ -1060,6 +1060,34 @@ int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap)
     return n;
 }
 
+/* The ledger's wire format, in ONE place. `invf-fsck` prints it from two
+ * different paths (report-mode and cut-mode) and `invf-verify --list-damaged`
+ * from a third; three copies of a format string is how two tools start
+ * disagreeing about the same file. Returns the number of rows printed, or -1
+ * when the walk could not complete -- the caller must then fail closed and say
+ * so, never print a short list as if it were complete. */
+int vol_damaged_ledger(FILE *out, invfs_volume *v, int cap)
+{
+    invfs_damaged_file *dmg;
+    int nd, k;
+
+    if (!out || !v || cap <= 0)
+        return -1;
+    dmg = (invfs_damaged_file *)calloc((size_t)cap, sizeof *dmg);
+    if (!dmg)
+        return -1;
+    nd = vol_damaged_files(v, dmg, cap);
+    if (nd >= 0)
+        for (k = 0; k < nd; k++)
+            fprintf(out, "damaged\t%llu\t%s\t%s\t%llu\n",
+                    (unsigned long long)dmg[k].id,
+                    dmg[k].name,
+                    vol_damaged_kind(dmg[k].kind),
+                    (unsigned long long)dmg[k].size);
+    free(dmg);
+    return nd;
+}
+
 /* WP86: the -f repair. Excise the quarantined ranges, publish the new root,
  * reclaim what the dropped subtrees held, and fold the delta back in so every
  * quarantined key the delta still covers comes back.

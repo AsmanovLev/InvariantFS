@@ -5,6 +5,7 @@
 #include "invarifs.h"
 #include "arc.h"
 #include "vol_format.h"
+#include <stdio.h>   /* FILE, for vol_damaged_ledger's stream argument */
 
 typedef struct invfs_volume invfs_volume;
 
@@ -749,6 +750,10 @@ typedef struct {
 } invfs_damaged_file;
 const char *vol_damaged_kind(uint32_t kind);
 int vol_damaged_files(invfs_volume *v, invfs_damaged_file *out, int cap);
+/* The ledger's wire format, in one place: `damaged<TAB>id<TAB>name<TAB>kind
+ * <TAB>size` per row. Returns rows printed, or -1 when the walk could not
+ * complete (fail closed: never present a short list as complete). */
+int vol_damaged_ledger(FILE *out, invfs_volume *v, int cap);
 
 /* ---- WP613: explicit content-cut for torn data segments ----
  * A torn data segment (framed CRC or length-exact decode fails) makes the
