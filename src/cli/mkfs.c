@@ -49,6 +49,7 @@
 
 #include "invarifs.h"
 #include "vol_anchor.h"
+#include "absorb.h"   /* WP-ABSORB: in-place adoption, pack-driven */
 #include "blkio.h"
 
 static void gen_uuid(uint8_t u[16])
@@ -174,6 +175,48 @@ int main(int argc, char **argv)
      * bitmap. */
     uint64_t anchor_pba_mkfs = 0;
 
+    /* WP-ABSORB: options that are not part of the positional grammar.
+     * `--reserve <file>` pre-marks block extents ALLOCATED (the shape an
+     * in-place conversion needs: the blocks the old filesystem still uses must
+     * never be handed out by the new one). Each line is "<start> <count>".
+     * Stripping them here keeps the long-standing `argc == 4 || argc > 5`
+     * grammar exactly as it was, which is why this reads the way it does. */
+    const char *reserve_path = NULL;
+    int defer_commit = 0;
+    int absorb = 0, absorb_yes = 0, absorb_commit = 0;
+    {
+        char *posv[8];
+        int npos = 0, i;
+        for (i = 1; i < argc; i++) {
+            if (strcmp(argv[i], "--reserve") == 0 && i + 1 < argc) {
+                reserve_path = argv[++i];
+                continue;
+            }
+            if (strcmp(argv[i], "--defer-commit") == 0) {
+                defer_commit = 1;
+                continue;
+            }
+            if (strcmp(argv[i], "--absorb") == 0) {
+                absorb = 1;
+                continue;
+            }
+            if (strcmp(argv[i], "--yes") == 0) {
+                absorb_yes = 1;
+                continue;
+            }
+            if (strcmp(argv[i], "--absorb-commit") == 0) {
+                absorb_commit = 1;
+                continue;
+            }
+            if (npos < 8)
+                posv[npos++] = argv[i];
+        }
+        argc = npos + 1;
+        for (i = 0; i < npos; i++)
+            argv[i + 1] = posv[i];
+    }
+    (void)defer_commit;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
@@ -220,6 +263,61 @@ int main(int argc, char **argv)
     }
     path = blkio_normalize(argv[1], devbuf, sizeof devbuf);
     is_dev = blkio_looks_like_device(path);
+
+    /* WP-ABSORB: probe the target with the packs, print the plan, and REFUSE to
+     * touch it until the commit stage exists. Nothing below runs for an absorb:
+     * this stage is deliberately read-only, because an absorb that overwrites
+     * block 0 before a verified old.<fs> exists is worse than no absorb. */
+    if (absorb) {
+        absorb_plan_t ap;
+        char tmp[] = "/tmp/invfs-absorb-reserve-XXXXXX";
+        int fd, prc, nres;
+
+        memset(&ap, 0, sizeof ap);
+        prc = absorb_probe(path, NULL, &ap);
+        if (prc <= 0) {
+            fprintf(stderr, "invf-mkfs --absorb: refused: %s\n",
+                    ap.why[0] ? ap.why : "the target could not be probed");
+            return 1;
+        }
+        fd = mkstemp(tmp);
+        if (fd < 0) {
+            fprintf(stderr, "invf-mkfs --absorb: cannot create a scratch file\n");
+            return 1;
+        }
+        close(fd);
+        nres = absorb_write_reserve_list(path, &ap, tmp);
+        remove(tmp);
+        if (nres <= 0) {
+            fprintf(stderr, "invf-mkfs --absorb: refused: %s\n",
+                    ap.why[0] ? ap.why : "no reserve map");
+            return 1;
+        }
+        printf("[absorb] %s claims %s\n", ap.pack_name, path);
+        printf("  old image      : %s (%llu B, %.1f MiB)\n", ap.out_name,
+               (unsigned long long)ap.bytes, ap.bytes / 1048576.0);
+        printf("  reserve        : %llu range(s), %llu block(s) of 4096 B "
+               "(%.1f MiB) stay allocated\n",
+               (unsigned long long)ap.used_extents,
+               (unsigned long long)ap.used_blocks,
+               ap.used_blocks * 4096.0 / 1048576.0);
+        printf("  for the volume : %llu block(s) (%.1f MiB) of garbage\n",
+               (unsigned long long)ap.free_blocks,
+               ap.free_blocks * 4096.0 / 1048576.0);
+        printf("  prefix to save : ~%llu block(s) (the region mkfs overwrites)\n",
+               (unsigned long long)ap.prefix_blocks);
+        if (ap.check_cmd[0])
+            printf("  second opinion : %s\n", ap.check_cmd);
+        printf("[absorb] plan only: the commit stage (save prefix, mkfs with the\n"
+               "         reserve, publish %s, verify, drop the prefix) is not\n"
+               "         implemented yet, so NOTHING was written.%s\n",
+               ap.out_name, absorb_commit ? "" : "");
+        if (absorb_commit)
+            fprintf(stderr, "invf-mkfs --absorb: --absorb-commit is not "
+                            "implemented; refusing to destroy a filesystem\n");
+        (void)absorb_yes;
+        return absorb_commit ? 1 : 0;
+    }
 
     /* A device is opened exclusively: locked and dismounted, so the
        filesystem currently living there stops writing its own metadata over
@@ -643,6 +741,40 @@ int main(int argc, char **argv)
     /* v0.3.0: mark first metadata extent only (mapper is system reserved, not in bitmap) */
     for (i = 0; i < extent_blocks; i++)
         bitmap[(first_extent_pba + i) / 8] |= (uint8_t)(1u << ((first_extent_pba + i) % 8));
+    /* WP-ABSORB: blocks the caller reserved (an in-place conversion's source
+     * extents) are allocated and stay allocated: the new volume must never
+     * hand out a block the old filesystem still reads. Counted and REPORTED,
+     * because a silent reservation is indistinguishable from a bug that
+     * happens to be harmless until somebody writes 8 MiB and wonders why. */
+    if (reserve_path) {
+        FILE *rf = fopen(reserve_path, "r");
+        uint64_t res_blocks = 0;
+        unsigned long long ra, rb;
+        if (!rf) {
+            fprintf(stderr, "cannot read the reserve list %s\n", reserve_path);
+            free(bitmap);
+            if (twodev) blkio_close(&io2);
+            blkio_close(&io);
+            return 1;
+        }
+        while (fscanf(rf, "%llu %llu", &ra, &rb) == 2) {
+            unsigned long long k;
+            for (k = 0; k < rb; k++) {
+                uint64_t b = (uint64_t)ra + k;
+                if (b >= total_blocks)
+                    break;
+                if (!(bitmap[b / 8] & (uint8_t)(1u << (b % 8)))) {
+                    bitmap[b / 8] |= (uint8_t)(1u << (b % 8));
+                    res_blocks++;
+                }
+            }
+        }
+        fclose(rf);
+        printf("  reserved:      %llu block(s) (%llu MiB) kept allocated, from %s\n",
+               (unsigned long long)res_blocks,
+               (unsigned long long)(res_blocks * INVFS_BLOCK_SIZE / 1048576),
+               reserve_path);
+    }
     if (blkio_seek(&io, sb.metadata_zone_start * INVFS_BLOCK_SIZE) != 0 ||
         blkio_write(&io, bitmap, bitmap_bytes) != 0) {
         fprintf(stderr, "bitmap write failed\n");

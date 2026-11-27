@@ -40,4 +40,13 @@ map = bin/ext4fs map {in} {out}
 # for this command and fall back to "no classification" when a pack lacks it --
 # packs in the wild predate it.
 classify = bin/ext4fs classify {in} {out}
+
+# WP-ABSORB: this pack's image is a FILESYSTEM that `invf-mkfs --absorb`
+# may adopt in place. The core reads the sniff magic above to decide whether
+# it claims an image, asks `classify` for the used-byte map, and reserves
+# everything the map does not call garbage. absorb_name/absorb_check are
+# optional: the name of the file the old image keeps inside the new volume,
+# and a checker for a second opinion.
+absorb = 1
+absorb_name = old.ext4
 estimate = bin/ext4fs estimate {in}

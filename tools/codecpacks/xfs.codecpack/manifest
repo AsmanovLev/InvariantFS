@@ -49,6 +49,15 @@ map = bin/xfs map {in} {out}
 # being stored). The core must probe for this command and fall back to "no
 # classification" when a pack lacks it -- packs in the wild predate it.
 classify = bin/xfs classify {in} {out}
+
+# WP-ABSORB: this pack's image is a FILESYSTEM that `invf-mkfs --absorb`
+# may adopt in place. The core reads the sniff magic above to decide whether
+# it claims an image, asks `classify` for the used-byte map, and reserves
+# everything the map does not call garbage. absorb_name/absorb_check are
+# optional: the name of the file the old image keeps inside the new volume,
+# and a checker for a second opinion.
+absorb = 1
+absorb_name = old.xfs
 # Opt into the FS-owned decomposition generation. This pack renders a v1
 # (MRMP) map today, so the stamp is a no-op -- but a pack that emits v2
 # without this key gets a map header whose generation is whatever the

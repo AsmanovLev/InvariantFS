@@ -297,12 +297,12 @@ FUSE_LINKED := acl_eio_test acl_inherit_test chmod_acl_write_test \
 $(foreach t,$(FUSE_LINKED),$(eval $(t)_FUSE = 1))
 
 define TOOL_RULE
-$(OUT)/invf-$(1): $$(OBJ)/$(1).o $(CORE_O) | $(OUT)
-	$$(CC) $$(CFLAGS) $$(if $$($(1)_FUSE),$$(FUSE_CFLAGS)) -o $$@ $$< $$(CORE_O) $$(LDLIBS) $$(2) $$(if $$($(1)_FUSE),$$(FUSE_LIBS))
+$(OUT)/invf-$(1): $$(OBJ)/$(1).o $$($(1)_EXTRA) $(CORE_O) | $(OUT)
+	$$(CC) $$(CFLAGS) $$(if $$($(1)_FUSE),$$(FUSE_CFLAGS)) -o $$@ $$< $$($(1)_EXTRA) $$(CORE_O) $$(LDLIBS) $$(if $$($(1)_FUSE),$$(FUSE_LIBS))
 endef
 
 # CLI tools (main in src/cli/<name>.c)
-CLI_MAINS := mkfs verify fsck cp cat ls why dedupe_sim arctest blkio_test resize \
+CLI_MAINS := verify fsck cp cat ls why dedupe_sim arctest blkio_test resize \
              metabuf_test btree_test btree_repair_test vnode overlay_test fold_test concurrency_test \
              sweep_test sweep_orig_len_test sweep_collect_test symlink_test large_file_test dedupe_test deflate_repro_test window_test \
              read_parallel_bitexact_test arc_concurrency_test \
@@ -323,6 +323,13 @@ table_sync_evict_test write_create_path_test tz_registry_test \
 otrunc_test sib_walk_test chmod_acl_write_test bang_name_test sweep_bang_test \
 read_named_test sweep_report_bang_test sweep_tree_bang_test \
 crc32c_test handler_doom_test
+# WP-ABSORB: mkfs is the only tool that links the absorb module (a niche
+# in-place adoption; see src/cli/absorb.h). It is defined explicitly rather than
+# from CLI_MAINS, and the extra object travels in mkfs_EXTRA so the shared rule
+# can see it as both a prerequisite and an input to the link.
+mkfs_EXTRA := $(OBJ)/absorb.o
+$(eval $(call TOOL_RULE,mkfs))
+
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 
 # reclaim_reader_epoch_test was, for one commit, a red control that built but
