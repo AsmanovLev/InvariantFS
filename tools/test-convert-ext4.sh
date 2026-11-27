@@ -48,10 +48,17 @@ export REPO
 . "$REPO/tools/lib-loopmount.sh"
 
 B=${INVFS_BIN:-$REPO/bin}
-PACKDIR=$REPO/tools/codecpacks/ext4fs.codecpack
+# The pack helper is built into a COPY under $W, never into the repo tree.
+# tools/test-ext4fs.sh rebuilds tools/codecpacks/ext4fs.codecpack/bin/ext4fs in
+# place, and it is an ISOLATED suite that can run CONCURRENTLY with this LOCKED
+# one: two writers to one executable is how a run dies with "Text file busy"
+# (measured while adding this suite). The pack SOURCE is still the in-tree
+# one, so the code under test is the same code the engine ships.
+SRCPACK=$REPO/tools/codecpacks/ext4fs.codecpack
 CONVERT=$B/invf-convert
 W=${INVFS_CONVERT_WORK:-$(invfs_scratch_root)/wp-convert-$$}
 MNT=$W/mnt
+PACKDIR=$W/ext4fs.codecpack
 export INVFS_CONVERT_PACK=$PACKDIR
 
 pass() { echo "  ok: $*"; }
@@ -110,14 +117,16 @@ sudo -n true 2>/dev/null || { echo "FAIL: this suite needs passwordless sudo (lo
 [ -x "$B/invf-fuse" ] || fail "$B/invf-fuse is missing: run make"
 [ "$(id -u)" != 0 ] || note "running as root; the suite assumes the invoking user has sudo"
 
-echo "== build the ext4fs pack helper (-Wall -Wextra -Werror) =="
-mkdir -p "$PACKDIR/bin"
-WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACKDIR/bin/ext4fs" "$PACKDIR/ext4fs.c" 2>&1) \
+rm -rf "$W" && mkdir -p "$W" "$MNT" "$PACKDIR/bin"
+echo "== build the ext4fs pack helper (-Wall -Wextra -Werror, output under \$W) =="
+# Compiled FROM the in-tree source (its #include paths are relative to its own
+# directory) with the BINARY written under $W, so two suites can never race on
+# the executable that tools/test-ext4fs.sh also writes.
+cp "$SRCPACK/manifest" "$PACKDIR/"
+WARN=$(cc -std=c11 -O2 -Wall -Wextra -Werror -o "$PACKDIR/bin/ext4fs" "$SRCPACK/ext4fs.c" 2>&1) \
     || { echo "FAIL: pack build failed"; echo "$WARN"; exit 1; }
 [ -z "$WARN" ] || { echo "FAIL: pack build not warning-clean:"; echo "$WARN"; exit 1; }
-pass "pack helper built clean"
-
-rm -rf "$W" && mkdir -p "$W" "$MNT"
+pass "pack helper built clean (in $PACKDIR)"
 cd "$W"
 
 # populates a mounted ext4 root at $1 with the corpus every leg reuses
