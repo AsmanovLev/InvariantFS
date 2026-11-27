@@ -613,9 +613,9 @@ static int absorb_copy_range(invfs_volume *v, FILE *src,
 }
 
 uint64_t absorb_publish(const char *volume, const char *out_name,
-                        const char *prefix_src, const char *reserve_list,
-                        uint64_t prefix_blocks, uint64_t file_size,
-                        absorb_plan_t *p)
+                        const char *prefix_src, const char *range_src,
+                        const char *reserve_list, uint64_t prefix_blocks,
+                        uint64_t file_size, absorb_plan_t *p)
 {
     invfs_volume *v;
     invfs_ast_block_entry *ents = NULL;
@@ -624,7 +624,7 @@ uint64_t absorb_publish(const char *volume, const char *out_name,
     size_t blen = 0;
     uint8_t addr[INVFS_RECIPE_ADDR_LEN];
     uint64_t ino = 0;
-    FILE *rl, *src;
+    FILE *rl, *src, *rsrc;
     int err = 0;
 
     if (!volume || !out_name || !prefix_src || !reserve_list || !p)
@@ -634,6 +634,19 @@ uint64_t absorb_publish(const char *volume, const char *out_name,
     if (!src) {
         snprintf(p->why, sizeof p->why, "cannot read the source %s", prefix_src);
         return 0;
+    }
+    /* The ranges may live in a DIFFERENT file than the prefix: in an in-place
+     * absorb the prefix has to come from the copy saved before mkfs ran, while the
+     * ranges are still exactly where they were, inside the target itself. */
+    if (range_src && strcmp(range_src, prefix_src) != 0) {
+        rsrc = fopen(range_src, "rb");
+        if (!rsrc) {
+            snprintf(p->why, sizeof p->why, "cannot read %s", range_src);
+            fclose(src);
+            return 0;
+        }
+    } else {
+        rsrc = src;
     }
     v = vol_open(volume, &err);
     if (!v) {
@@ -664,7 +677,7 @@ uint64_t absorb_publish(const char *volume, const char *out_name,
                 off += skip;
                 len -= skip;
             }
-            if (len && absorb_copy_range(v, src, &ents, &nents, off, len, p) != 0) {
+            if (len && absorb_copy_range(v, rsrc, &ents, &nents, off, len, p) != 0) {
                 fclose(rl);
                 goto out;
             }
@@ -696,3 +709,234 @@ out:
     fclose(src);
     return ino;
 }
+
+/* ---- in-place commit (absorb_commit) ------------------------------------- */
+
+/* Copy `len` bytes at `off` from `in` to `out` (both positioned by this call). */
+static int copy_one_extent(FILE *in, FILE *out, uint64_t off, uint64_t len,
+                           absorb_plan_t *p)
+{
+    unsigned char buf[1 << 20];
+
+    if (fseeko(in, (off_t)off, SEEK_SET) != 0 ||
+        fseeko(out, (off_t)off, SEEK_SET) != 0) {
+        snprintf(p->why, sizeof p->why, "seek failed at offset %llu",
+                 (unsigned long long)off);
+        return -1;
+    }
+    while (len) {
+        size_t want = len > sizeof buf ? sizeof buf : (size_t)len;
+        size_t got = fread(buf, 1, want, in);
+        if (got == 0) {
+            snprintf(p->why, sizeof p->why, "short read at offset %llu",
+                     (unsigned long long)off);
+            return -1;
+        }
+        if (fwrite(buf, 1, got, out) != got) {
+            snprintf(p->why, sizeof p->why, "short write at offset %llu",
+                     (unsigned long long)off);
+            return -1;
+        }
+        off += got;
+        len -= got;
+    }
+    return 0;
+}
+
+/* Copy `nbytes` from `src` (opened here) to `dst`, fsync, close. Returns 0. */
+static int copy_file_range_to(const char *src, const char *dst, uint64_t nbytes)
+{
+    FILE *in, *out;
+    unsigned char buf[1 << 20];
+    uint64_t left = nbytes;
+    int rc = 0;
+
+    in = fopen(src, "rb");
+    if (!in)
+        return -1;
+    out = fopen(dst, "wb");
+    if (!out) {
+        fclose(in);
+        return -1;
+    }
+    while (left && rc == 0) {
+        size_t want = left > sizeof buf ? sizeof buf : (size_t)left;
+        size_t got = fread(buf, 1, want, in);
+        if (got == 0) {
+            rc = -1;
+            break;
+        }
+        if (fwrite(buf, 1, got, out) != got) {
+            rc = -1;
+            break;
+        }
+        left -= got;
+    }
+    /* The prefix is the only copy of those bytes once mkfs runs, so it has to be
+     * on the device before mkfs is started, not in the page cache. */
+    if (rc == 0 && fflush(out) != 0)
+        rc = -1;
+    if (rc == 0 && fsync(fileno(out)) != 0)
+        rc = -1;
+    if (fclose(out) != 0 && rc == 0)
+        rc = -1;
+    fclose(in);
+    return rc;
+}
+
+/* Copy the prefix and every reserved range of `target` into a sparse `stage` file,
+ * at their own offsets. This is the step that makes the whole operation safe: after
+ * it, nothing that mkfs or the publish writes can destroy a source byte.
+ *
+ * The alternative -- reading each range from the target as the publish needs it --
+ * was measured and is WRONG for a filesystem that fills the device: the volume's
+ * free space is interleaved with the ranges, so a framed copy lands on source bytes
+ * that have not been read yet. e2fsck refused the result. */
+static int absorb_stage(const char *target, const char *reserve_list,
+                        uint64_t prefix_blocks, uint64_t bytes,
+                        const char *stage, absorb_plan_t *p)
+{
+    FILE *in, *out;
+    char line[256];
+    unsigned char buf[1 << 20];
+    int rc = 0;
+
+    in = fopen(target, "rb");
+    if (!in) {
+        snprintf(p->why, sizeof p->why, "cannot read %s", target);
+        return -1;
+    }
+    out = fopen(stage, "wb");
+    if (!out) {
+        fclose(in);
+        snprintf(p->why, sizeof p->why, "cannot create %s", stage);
+        return -1;
+    }
+    if (fseeko(out, (off_t)(bytes ? bytes : 1) - 1, SEEK_SET) != 0 ||
+        fputc(0, out) == EOF) {
+        fclose(in);
+        fclose(out);
+        snprintf(p->why, sizeof p->why, "cannot size %s to %llu bytes", stage,
+                 (unsigned long long)bytes);
+        return -1;
+    }
+    /* everything that falls inside the prefix AND inside the reserved ranges: the
+     * prefix is copied first because it can overlap a leading range */
+    if (copy_one_extent(in, out, 0, prefix_blocks * 4096u, p) != 0)
+        rc = -1;
+    if (rc == 0) {
+        FILE *rl = fopen(reserve_list, "r");
+        if (!rl) {
+            snprintf(p->why, sizeof p->why, "cannot read %s", reserve_list);
+            rc = -1;
+        } else {
+            while (rc == 0 && fgets(line, sizeof line, rl)) {
+                unsigned long long start = 0, cnt = 0, off, len;
+                if (sscanf(line, "%llu %llu", &start, &cnt) != 2)
+                    continue;
+                off = start * 4096ull;
+                len = cnt * 4096ull;
+                if (len == 0 || off + len > bytes)
+                    continue;
+                rc = copy_one_extent(in, out, off, len, p);
+            }
+            fclose(rl);
+        }
+    }
+    if (rc == 0 && fflush(out) != 0)
+        rc = -1;
+    if (rc == 0 && fsync(fileno(out)) != 0)
+        rc = -1;
+    if (fclose(out) != 0 && rc == 0)
+        rc = -1;
+    fclose(in);
+    return rc;
+}
+
+int absorb_commit(const char *target, const char *out_name,
+                  const char *reserve_list, const char *mkfs_bin,
+                  const char *packs_dir, absorb_plan_t *p)
+{
+    char prefix[512], cmd[2048];
+    uint64_t ino;
+    int rc;
+
+    if (!target || !mkfs_bin || !p)
+        return -1;
+    memset(p, 0, sizeof *p);
+
+    /* 1. probe: what the target's own filesystem says it uses */
+    rc = absorb_probe(target, packs_dir, p);
+    if (rc != 1) {
+        if (rc == 0 && !p->why[0])
+            snprintf(p->why, sizeof p->why,
+                     "%s: nothing claims this image, so there is nothing to "
+                     "absorb", target);
+        return -1;
+    }
+    if (!p->prefix_blocks) {
+        snprintf(p->why, sizeof p->why,
+                 "%s: the plan reports no prefix to save, which cannot be right "
+                 "for an in-place adoption -- refusing rather than overwriting "
+                 "block 0 without a copy of it", target);
+        return -1;
+    }
+    if (p->free_blocks < p->used_blocks) {
+        snprintf(p->why, sizeof p->why,
+                 "%s: %llu block(s) are used and only %llu are free -- the "
+                 "absorbed copy has nowhere to live", target,
+                 (unsigned long long)p->used_blocks,
+                 (unsigned long long)p->free_blocks);
+        return -1;
+    }
+
+    /* 2. the reserve list is written first: mkfs needs it, and it must exist on
+     *    disk before anything is destroyed. */
+    if (absorb_write_reserve_list(target, p, reserve_list) <= 0) {
+        if (!p->why[0])
+            snprintf(p->why, sizeof p->why,
+                     "%s: the reserve list could not be written", target);
+        return -1;
+    }
+
+    /* 3. stage the source bytes OUTSIDE the device, before mkfs touches it. This
+     *    is the step that makes the operation safe; see absorb_stage's note for the
+     *    measured failure of the alternative. */
+    snprintf(prefix, sizeof prefix, "%s.absorb-stage", target);
+    if (absorb_stage(target, reserve_list, p->prefix_blocks, p->bytes, prefix,
+                     p) != 0) {
+        if (!p->why[0])
+            snprintf(p->why, sizeof p->why,
+                     "could not stage the source bytes to %s -- nothing was "
+                     "written to %s", prefix, target);
+        return -1;
+    }
+
+    /* 4. build the volume over the old filesystem, with its used ranges reserved */
+    snprintf(cmd, sizeof cmd, "%s \"%s\" --reserve \"%s\" --size-bytes %llu",
+             mkfs_bin, target, reserve_list, (unsigned long long)p->bytes);
+    rc = system(cmd);
+    if (rc != 0) {
+        snprintf(p->why, sizeof p->why,
+                 "mkfs failed (rc=%d): %s. The target still holds the old "
+                 "filesystem in its reserved ranges, and the prefix copy is at "
+                 "%s", rc, cmd, prefix);
+        return -1;
+    }
+
+    /* 5. publish from the STAGE: a stable reference, independent of whatever the
+     *    allocator did to the device in step 4 */
+    ino = absorb_publish(target, out_name ? out_name : p->out_name, prefix, prefix,
+                         reserve_list, p->prefix_blocks, p->bytes, p);
+    if (!ino) {
+        if (!p->why[0])
+            snprintf(p->why, sizeof p->why, "publish failed");
+        return -1;
+    }
+
+    /* 6. the prefix copy is no longer needed: the bytes it held are inside
+     *    old.<fs> now, and the volume says so only after a flush. */
+    (void)unlink(prefix);
+    return 0;
+}
+

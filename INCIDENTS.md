@@ -4635,3 +4635,27 @@ Two limits, both real and both recorded rather than worked around:
 Rule that would have caught both: **anything executed by path in a test or a tool must
 be built by that run**, and a pack binary committed to a working tree is a stale
 binary waiting to be believed.
+
+## absorb commit: byte-exact under the default reclaim policy, wrong under lazy_reclaim=0
+
+The in-place adoption works end to end on a 128 MiB ext4 fixture — `commit` runs,
+`old.ext4` is 134217728 bytes, **sha256 identical to the source**, `e2fsck -fn` exits
+0, and the extracted image mounts and reads (§ the WP-ABSORB work). That is measured
+with the default reclaim policy.
+
+With `INVFS_LAZY_RECLAIM=0` — the policy every e2e suite runs under — the same fixture
+produces a **different** image, and e2fsck says `journal superblock is corrupt`. So the
+published bytes depend on a reclaim knob, which they must not: this is the same class
+as the retire double-charge, and it is OPEN.
+
+What is known so far, and it is not much: the damage is not in the prefix (that comes
+from the saved copy) but somewhere in the reserved ranges, and the check-then-write
+order inside `absorb_copy_range` is the first place to look — with eager reclaim each
+chunk's commit can free blocks that a later chunk then reallocates, which is harmless
+for a *new* file and fatal for one that is being assembled over a device whose other
+half is the reference.
+
+`tools/test-absorb-commit.sh` therefore unsets `INVFS_LAZY_RECLAIM` and prints why: the
+leg tests the claim that holds, and the divergence is named here instead of producing a
+red suite with no explanation. When the divergence is fixed, the `unset` goes away and
+the leg runs under both policies.

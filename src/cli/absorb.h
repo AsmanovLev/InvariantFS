@@ -113,8 +113,20 @@ int absorb_write_reserve_list(const char *path, absorb_plan_t *p,
  * Returns the inode id, or 0 with `why` filled. The caller verifies by reading
  * the file back; this function does not claim success on its own. */
 uint64_t absorb_publish(const char *volume, const char *out_name,
-                        const char *prefix_src, const char *reserve_list,
-                        uint64_t prefix_blocks, uint64_t file_size,
-                        absorb_plan_t *p);
+                        const char *prefix_src, const char *range_src,
+                        const char *reserve_list, uint64_t prefix_blocks,
+                        uint64_t file_size, absorb_plan_t *p);
+
+/* Adopt `target` IN PLACE: probe, save the prefix, mkfs the volume over it with the
+ * used ranges reserved, publish `out_name`, verify the read-back, drop the saved
+ * prefix. `mkfs_bin` is the invf-mkfs to run (the caller resolves its sibling, so
+ * this module never guesses a path). Returns 0 on success, -1 with `why` filled.
+ *
+ * A crash before the publish leaves the source recoverable: the reserved blocks were
+ * never handed out, and the saved prefix is still on disk beside the target. There is
+ * no window in which both copies are gone. */
+int absorb_commit(const char *target, const char *out_name,
+                  const char *reserve_list, const char *mkfs_bin,
+                  const char *packs_dir, absorb_plan_t *p);
 
 #endif /* INVFS_ABSORB_H */

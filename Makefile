@@ -1799,6 +1799,11 @@ e2e: all $(OUT)/meta_probe
 # no FUSE, no root, no loop device; its red legs prove both the map assertion
 # and the e2fsck acceptance can fail.
 	$(TESTENV) bash tools/run-e2e.sh tools/test-absorb-ext4.sh
+# WP-ABSORB commit stage: the in-place adoption, end to end. 128 MiB ext4 becomes an
+# InvFS volume holding it as old.ext4, which must be BYTE-IDENTICAL and open under
+# e2fsck -fn; a source with no free space must be refused by name. Needs root (loop)
+# and skips LOUDLY without it, so the suite names its own absence instead of passing.
+	$(TESTENV) $(TESTISO) bash tools/test-absorb-commit.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
 # WP-XFS-CLASSIFY: the xfs pack's CLI-only `classify` command (GCFG table).

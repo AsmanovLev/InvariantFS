@@ -318,8 +318,13 @@ int main(int argc, char **argv)
                "         implemented yet, so NOTHING was written.%s\n",
                ap.out_name, absorb_commit ? "" : "");
         if (absorb_commit)
-            fprintf(stderr, "invf-mkfs --absorb: --absorb-commit is not "
-                            "implemented; refusing to destroy a filesystem\n");
+            fprintf(stderr,
+                    "invf-mkfs --absorb: the COMMIT stage lives in the tool, not "
+                    "here: run `invf-absorb commit %s <reserve.list>`. It stages "
+                    "the source outside the device, saves the prefix, runs this "
+                    "mkfs with --reserve, publishes the old filesystem and "
+                    "verifies the read-back. Refusing here because this path "
+                    "would destroy a filesystem with nothing staged.\n", path);
         (void)absorb_yes;
         return absorb_commit ? 1 : 0;
     }

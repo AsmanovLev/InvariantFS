@@ -19,6 +19,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>   /* readlink: resolving a sibling tool by /proc/self/exe */
+#include <string.h>
 
 #include "absorb.h"
 #include "volume.h"
@@ -75,7 +77,7 @@ static int cmd_publish(const char *volume, const char *name, const char *ref,
     absorb_plan_t p;
     uint64_t ino;
     memset(&p, 0, sizeof p);
-    ino = absorb_publish(volume, name, ref, list, prefix_blocks,
+    ino = absorb_publish(volume, name, ref, NULL, list, prefix_blocks,
                          file_size_of(ref), &p);
     if (!ino) {
         fprintf(stderr, "invf-absorb publish: %s\n",
@@ -84,6 +86,67 @@ static int cmd_publish(const char *volume, const char *name, const char *ref,
     }
     printf("[absorb] published %s as inode %llu inside %s\n", name,
            (unsigned long long)ino, volume);
+    return 0;
+}
+
+/* Where our sibling tools live: bin/ next to this binary. Resolving it here keeps
+ * absorb.c free of any knowledge about installation layout. */
+static int sibling(const char *name, char *out, size_t cap)
+{
+    char exe[512];
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    char *slash;
+    if (n <= 0)
+        return -1;
+    exe[n] = 0;
+    slash = strrchr(exe, '/');
+    if (!slash)
+        return -1;
+    *slash = 0;
+    return snprintf(out, cap, "%s/%s", exe, name) < (int)cap ? 0 : -1;
+}
+
+/* invf-absorb commit <image|device> <reserve.list> [--out-name N] [--packs DIR]
+ *
+ * The whole in-place adoption. It refuses unless every step it needs has a
+ * precondition it can check first: a pack that claims the image, a prefix to save,
+ * enough free space for the copy, and a durable prefix copy before mkfs touches
+ * block 0. */
+static int cmd_commit(int argc, char **argv)
+{
+    const char *target = argv[2], *list = argv[3];
+    const char *out_name = NULL, *packs = NULL, *mkfs = NULL;
+    char mkfsbuf[512];
+    absorb_plan_t p;
+    int i, rc;
+
+    for (i = 4; i < argc; i++) {
+        if (strncmp(argv[i], "--out-name=", 11) == 0) out_name = argv[i] + 11;
+        else if (strncmp(argv[i], "--packs=", 8) == 0) packs = argv[i] + 8;
+        else if (strncmp(argv[i], "--mkfs=", 7) == 0) mkfs = argv[i] + 7;
+        else { fprintf(stderr, "invf-absorb commit: unknown option %s\n", argv[i]); return 2; }
+    }
+    if (!mkfs) {
+        if (sibling("invf-mkfs", mkfsbuf, sizeof mkfsbuf) != 0) {
+            fprintf(stderr, "invf-absorb commit: cannot find invf-mkfs beside this "
+                            "binary; pass --mkfs=<path>\n");
+            return 2;
+        }
+        mkfs = mkfsbuf;
+    }
+    memset(&p, 0, sizeof p);
+    printf("[absorb] adopting %s in place\n", target);
+    rc = absorb_commit(target, out_name, list, mkfs, packs, &p);
+    if (rc != 0) {
+        fprintf(stderr, "[absorb] REFUSED/FAILED: %s\n",
+                p.why[0] ? p.why : "commit failed");
+        return 1;
+    }
+    printf("[absorb] %s now holds %s; the source is still complete inside it\n",
+           target, out_name ? out_name : (p.out_name[0] ? p.out_name : "old.img"));
+    printf("[absorb] next: read it back and let the filesystem's own checker "
+           "confirm, e.g.\n  invf-cat %s %s > old.img && e2fsck -fn old.img\n",
+           target, out_name ? out_name : (p.out_name[0] ? p.out_name : "old.img"));
     return 0;
 }
 
@@ -177,7 +240,13 @@ int main(int argc, char **argv)
                 "usage: invf-absorb plan    <image> <reserve.list>\n"
                 "       invf-absorb publish <volume> <name> <reference> "
                 "<reserve.list> <prefix_blocks>\n"
-                "       invf-absorb verify  <volume> <name> <reference>\n");
+                "       invf-absorb verify  <volume> <name> <reference>\n"
+                "       invf-absorb commit  <image|device> <reserve.list> "
+                "[--out-name=N] [--packs=DIR] [--mkfs=PATH]\n"
+                "\ncommit is the in-place adoption: it saves the prefix mkfs will\n"
+                "overwrite, builds the volume with the used ranges RESERVED, and\n"
+                "publishes the old filesystem inside it. It refuses before writing\n"
+                "anything when a precondition does not hold.\n");
         return 2;
     }
     if (strcmp(argv[1], "plan") == 0 && argc == 4)
@@ -187,6 +256,8 @@ int main(int argc, char **argv)
                            strtoull(argv[6], NULL, 0));
     if (strcmp(argv[1], "verify") == 0 && argc == 5)
         return cmd_verify(argv[2], argv[3], argv[4]);
+    if (strcmp(argv[1], "commit") == 0 && argc >= 4)
+        return cmd_commit(argc, argv);
     fprintf(stderr, "invf-absorb: bad arguments\n");
     return 2;
 }
