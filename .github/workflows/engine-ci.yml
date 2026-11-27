@@ -106,6 +106,11 @@ jobs:
           FULL=0; ENGINE=0; DEB=0; RPM=0; ARCH=0; GEN=0; VOID=0; ALP=0; NIX=0
           BA=0; BV=0; BD=0; BF=0; IA=0; IV=0; IG=0
           BALP=0; IALP=0; INIX=0
+          # WHY the flags are what they are. Recorded, not deduced: the summary
+          # below has to name a cause for every job that stays off, and "look at
+          # the diff and the branching" is not a cause a reader can trust.
+          REASON="unspecified"
+          CHANGED="(none)"
           force_full() { FULL=1; ENGINE=1; DEB=1; RPM=1; ARCH=1; GEN=1; VOID=1; ALP=1; NIX=1; BA=1; BV=1; BD=1; BF=1; IA=1; IV=1; IG=1; BALP=1; IALP=1; INIX=1; }
           # A PR event has no head_commit, so the [ci full] / [skip ci] tags
           # would silently stop working on those runs. Fall back to the commit
@@ -113,18 +118,23 @@ jobs:
           if [ -z "$COMMIT_MSG" ]; then
             COMMIT_MSG=$(git log -1 --format=%B 2>/dev/null || true)
           fi
-          if [ "$EVENT_NAME" = schedule ]; then force_full
+          if [ "$EVENT_NAME" = schedule ]; then
+            REASON="scheduled run: every job is forced on"; force_full
           elif [ "$EVENT_NAME" = workflow_dispatch ] && \
-               [ "$INPUT_FULL" = "true" ]; then force_full
-          elif echo "$COMMIT_MSG" | grep -qiE '\[(ci full|full ci|release)\]'; then force_full
+               [ "$INPUT_FULL" = "true" ]; then
+            REASON="workflow_dispatch with full=true"; force_full
+          elif echo "$COMMIT_MSG" | grep -qiE '\[(ci full|full ci|release)\]'; then
+            REASON="commit message carries a full-run tag"; force_full
           elif echo "$COMMIT_MSG" | grep -qiE '\[(skip ci|ci skip|no ci|skip actions|actions skip)\]'; then
-            # explicit skip of heavy jobs
-            :
+            REASON="commit message carries an explicit skip-ci directive"
           else
             BASE="$BASE_SHA"
             case "$BASE" in ""|0000000000000000000000000000000000000000) force_full;; *)
             FILES=$(git diff --name-only "$BASE"...HEAD 2>/dev/null || echo FORCE_FULL)
-            [ "$FILES" = FORCE_FULL ] && force_full
+            [ "$FILES" = FORCE_FULL ] && { \
+              REASON="cannot diff against the base commit, so every job is forced on"; \
+              force_full; }
+            CHANGED=$(echo "$FILES" | tr '\n' ' ')
             for f in $FILES; do
               case "$f" in
                 docs/*|*.md|packaging/man/*) ;;
@@ -169,6 +179,31 @@ jobs:
             echo "boot_alpine=$(t "$BALP")"; echo "iso_alpine=$(t "$IALP")"
             echo "iso_nixos=$(t "$INIX")"
           } >> "$GITHUB_OUTPUT"
+          # WHY. Every job that stays off names its cause here, and the run
+          # summary carries the changed-file list, so 'engine skipped' can never
+          # again be an unexplained outcome. The set is derived from the outputs
+          # above rather than from a second copy of the names.
+          {
+            echo "## scope"
+            echo ""
+            echo "- reason: \`$REASON\`"
+            echo "- changed files: \`$CHANGED\`"
+            echo ""
+            echo "| job | on |"
+            echo "|---|---|"
+            for pair in engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN \
+                        void=$VOID alpine_pkg=$ALP nix_pkg=$NIX boot_arch=$BA \
+                        boot_void=$BV boot_debian=$BD boot_fedora=$BF iso_arch=$IA \
+                        iso_void=$IV iso_gentoo=$IG boot_alpine=$BALP \
+                        iso_alpine=$IALP iso_nixos=$INIX; do
+              name=${pair%%=*}; on=${pair##*=}
+              if [ "$on" = "1" ]; then
+                echo "| $name | yes |"
+              else
+                echo "| $name | no — $REASON |"
+              fi
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
           echo "scope: full=$FULL engine=$ENGINE deb=$DEB rpm=$RPM arch=$ARCH gentoo=$GEN void=$VOID alpine_pkg=$ALP nix_pkg=$NIX"
 
   # Load-bearing docs gate (AGENTS.md §1.8): broken doc links or man-page

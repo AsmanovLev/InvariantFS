@@ -269,6 +269,18 @@ preserve() {   # copy the ground truth + every log for replay
       echo "dm-flakey: $(sudo -n dmsetup targets 2>/dev/null | grep flakey)";
     } > "$dst/replay.env"
     echo "FAILURE ARTIFACTS: $dst" >&2
+    # WP-ARTIFACT-OWNERSHIP: this suite runs under sudo, so every file it leaves
+    # behind is root-owned -- and on a shared checkout that is a trap for the
+    # next build: a plain `rsync -a --delete` from a worktree into a build tree
+    # stops with 'unlink(...): Permission denied' on artifacts/ and, because the
+    # failure happens in the copy step, the build never even starts. It cost a
+    # run of this very suite twice in one session.
+    #
+    # A reader only needs two things from these files: to read them, and to
+    # delete them when done. World-writable directories plus readable files give
+    # both without leaking write access to the images' contents.
+    chmod -R a+rX "$dst" 2>/dev/null || true
+    find "$dst" -type d -exec chmod a+rwx {} + 2>/dev/null || true
 }
 
 fail() { echo; echo "FAIL[$LEG]: $*" >&2; FAILED=1; preserve; exit 1; }
