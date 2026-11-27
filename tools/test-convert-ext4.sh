@@ -299,7 +299,7 @@ pass "verify: IDENTICAL, 0 differences, hardlink partition + per-file timing rep
 
 # the counts on both sides must be the SAME numbers, not just present
 for c in directories "regular files" symlinks specials; do
-    line=$(grep -F "$c" "$VERLOG" | head -1)
+    line=$(grep -F "$c" "$VERLOG" | head -1 || true)
     s=$(echo "$line" | sed 's/.*src \([0-9]*\).*/\1/')
     d=$(echo "$line" | sed 's/.*dst \([0-9]*\).*/\1/')
     [ "$s" = "$d" ] || fail "$c: src $s != dst $d"
@@ -369,7 +369,7 @@ set +e
 sudo -n "$CONVERT" verify src.ext4 dst-mut.img >"$MUTLOG" 2>&1
 mut_rc=$?
 set -e
-grep "^DIFF" "$MUTLOG" | sed 's/^/    /'
+grep "^DIFF" "$MUTLOG" | sed 's/^/    /' || true
 [ "$mut_rc" = 1 ] || fail "verify of the mutated volume exited $mut_rc, want 1"
 grep -q "^RESULT: DIFFERENT" "$MUTLOG" || fail "verify did not report DIFFERENT"
 for kind in content mode mtime missing extra xattr nlink; do
@@ -476,18 +476,28 @@ fi
 # "nothing was available".
 if [ "${INVFS_CONVERT_REAL:-0}" = "1" ] && [ -n "$REAL_IMG" ] && [ -f "$REAL_IMG" ] && ext4_magic "$REAL_IMG"; then
     note "real-world leg on $REAL_IMG"
+    # Timing with date(), not /usr/bin/time: that binary is ABSENT on this box
+    # (void), and the first version of this leg died silently on it -- a
+    # command-not-found leaves an empty log, the reporting grep then matches
+    # nothing, and `set -e` + pipefail turn "no matches" into a silent exit 1
+    # that reads as a suite result. Reporting greps are now `|| true` and the
+    # timing is portable.
+    t0=$(date +%s)
     set +e
-    /usr/bin/time -f "  wall %e s" sudo -n "$CONVERT" convert "$REAL_IMG" real-dst.img >"$W/real.log" 2>&1
+    sudo -n "$CONVERT" convert "$REAL_IMG" real-dst.img >"$W/real.log" 2>&1
     r_rc=$?
     set -e
-    grep -E "^(byte map|  (meta_structure|garbage|member|carry)|tree import|pack oracle|nk match|unmatched|gate|timing)|wall " "$W/real.log" | sed 's/^/    /'
+    note "real-world convert wall time: $(( $(date +%s) - t0 )) s (rc=$r_rc)"
+    grep -E "^(byte map|  (meta_structure|garbage|member|carry)|tree import|pack oracle|nk match|volume|unmatched|gate|timing)" "$W/real.log" | sed 's/^/    /' || true
     [ "$r_rc" = 0 ] || { cat "$W/real.log"; fail "real-world convert exited $r_rc"; }
     grep -q "RESULT: converted" "$W/real.log" || fail "real-world convert did not claim a conversion"
+    t0=$(date +%s)
     set +e
     sudo -n "$CONVERT" verify "$REAL_IMG" real-dst.img >"$W/realverify.log" 2>&1
     rv_rc=$?
     set -e
-    grep -E "^(entries|  |content|xattrs|timing|per-file|hardlinks|DIFFS|RESULT)" "$W/realverify.log" | sed 's/^/    /'
+    note "real-world verify wall time: $(( $(date +%s) - t0 )) s (rc=$rv_rc)"
+    grep -E "^(entries|  |content|xattrs|timing|per-file|hardlinks|DIFFS|RESULT)" "$W/realverify.log" | sed 's/^/    /' || true
     [ "$rv_rc" = 0 ] || { cat "$W/realverify.log"; fail "real-world verify exited $rv_rc"; }
     grep -q "RESULT: IDENTICAL" "$W/realverify.log" || fail "real-world verify reported differences"
     pass "real-world rootfs: converted and verified IDENTICAL"
