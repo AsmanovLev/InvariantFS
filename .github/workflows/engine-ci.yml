@@ -646,7 +646,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/soak-artifacts"
           cp -r tools/flakey/artifacts "$RUNNER_TEMP/soak-artifacts/" 2>/dev/null || true
           du -sh "$RUNNER_TEMP/soak-artifacts" || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: env.SOAK_RC != '0'
         with:
           name: soak-flakey-artifacts
@@ -666,7 +666,7 @@ jobs:
           fetch-depth: 0
 
       - name: ccache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.ccache
           key: ccache-v1-fedora-${{ hashFiles('Makefile', 'src/**/*.c', 'src/**/*.h', 'tools/codecpacks/**/*.c') }}
@@ -853,7 +853,7 @@ jobs:
       # Boot-phase consoles ride along too (see the boot step above).
       - name: upload install evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iso-install-logs
           path: |
@@ -917,7 +917,7 @@ jobs:
       # Same evidence rationale as the Arch ISO job above.
       - name: upload install evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iso-void-install-logs
           path: |
@@ -968,7 +968,7 @@ jobs:
       # Same evidence rationale as the Arch ISO job above.
       - name: upload install evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iso-gentoo-install-logs
           path: |
@@ -1027,7 +1027,7 @@ jobs:
 
       - name: upload install evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iso-alpine-install-logs
           path: |
@@ -1072,7 +1072,7 @@ jobs:
 
       - name: upload install evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: iso-nixos-install-logs
           path: |
@@ -1114,7 +1114,7 @@ jobs:
 
       - name: upload debian packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-deb
           path: |
@@ -1171,7 +1171,7 @@ jobs:
 
       - name: upload arch packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-arch
           path: |
@@ -1278,7 +1278,7 @@ jobs:
 
       - name: upload void packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-void
           path: |
@@ -1333,7 +1333,7 @@ jobs:
 
       - name: upload alpine packages
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: dist-apk
           path: |
@@ -1351,7 +1351,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - uses: cachix/install-nix-action@v27
+      - uses: cachix/install-nix-action@v32
         with:
           nix_path: nixpkgs=channel:nixos-unstable
 

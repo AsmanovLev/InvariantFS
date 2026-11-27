@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           fetch-depth: 0
@@ -41,7 +41,7 @@ jobs:
     needs: [test-gate]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: stamp version from tag
@@ -55,7 +55,7 @@ jobs:
         run: make release RELEASE_VERSION="$TAG"
       - name: verify checksums
         run: cd dist && sha256sum -c SHA256SUMS
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-tarball
           path: |
@@ -66,7 +66,7 @@ jobs:
     needs: [test-gate]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: stamp version from tag
@@ -81,7 +81,7 @@ jobs:
           ln -s packaging/debian debian
           DEB_BUILD_OPTIONS=nocheck dpkg-buildpackage -us -uc -b --no-sign
           mkdir -p debs && mv ../*.deb ../*.buildinfo ../*.changes debs/
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-deb
           path: debs/
@@ -91,11 +91,11 @@ jobs:
     runs-on: ubuntu-24.04
     container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
           path: tree
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-tarball
           path: pkg
@@ -113,7 +113,7 @@ jobs:
           chown -R builder:builder .
           runuser -u builder -- makepkg --noconfirm
           cp PKGBUILD "$GITHUB_WORKSPACE/PKGBUILD-$TAG" 2>/dev/null || cp PKGBUILD /github/workspace/PKGBUILD 2>/dev/null || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-arch
           path: |
@@ -125,7 +125,7 @@ jobs:
     runs-on: ubuntu-24.04
     container: fedora:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: build RPM
@@ -140,7 +140,7 @@ jobs:
             --transform "s,^\./,invfs-$VER/," .
           rpmbuild -bb packaging/invfs.spec \
             --define "_topdir $GITHUB_WORKSPACE/rpmbuild"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: dist-rpm
           path: rpmbuild/RPMS/
@@ -154,24 +154,24 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: stamp version from tag
         run: sh packaging/stamp-version.sh "$TAG"
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-tarball
           path: assets
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-deb
           path: assets
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-arch
           path: assets
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-rpm
           path: assets
@@ -206,7 +206,7 @@ jobs:
             gh release create "$TAG" assets/* --title "$TAG" --notes-file assets/RELEASE-NOTES.txt --latest
           fi
       - name: attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: assets/*.tar.zst
 
@@ -214,7 +214,7 @@ jobs:
     needs: tarball
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ env.TAG }}
       - name: stamp version from tag
@@ -232,11 +232,11 @@ jobs:
     if: always() && !cancelled() && needs.publish.result == 'success'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: main
           fetch-depth: 0
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: dist-tarball
           path: repin-dl
