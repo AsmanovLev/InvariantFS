@@ -1,0 +1,109 @@
+.TH INVF-CONVERT 8 "2026-11" "InvariantFS" "System Administration"
+.SH NAME
+invf\-convert \- convert an ext4 image into an InvariantFS volume, and verify
+the result path by path
+.SH SYNOPSIS
+.B invf\-convert convert
+.I src\-image
+.I dst\-image
+.RI [ options ]
+.br
+.B invf\-convert verify
+.I src
+.I dst
+.RI [ options ]
+.br
+.B invf\-convert source\-map
+.I src\-image
+.SH DESCRIPTION
+.B convert
+asks the ext4fs codecpack what the source\(aqs bytes are (its
+.B classify
+table: meta_structure, garbage, member), reads the source through a
+read\-only loop mount, and imports the whole tree into a fresh volume:
+regular files, directories, symlinks, special nodes and hardlinks (one
+inode with nlink > 1), with mode, uid, gid, mtime at nanosecond precision
+and every extended attribute the source carries. It then runs the engine\(aqs
+own gates on the result
+.RB ( invf\-fsck " and " invf\-verify\ \-\-deep )
+and cross\-checks the import against the pack\(aqs member enumeration, inode by
+inode.
+.PP
+Anything the volume cannot represent aborts the run by name (exit 3) and
+removes the destination: a silent skip is data loss that no checker can
+find.
+.B verify
+mounts both ends (loop, read\-only, and the FUSE daemon) and compares every
+path: presence, type, size, mode, uid, gid, mtime (seconds and
+nanoseconds), BLAKE3 of the logical content, symlink targets, nlink, device
+numbers, the hardlink partition and every extended attribute.
+.SH OPTIONS
+.TP
+.B \-\-pack\-dir=\fIDIR\fR
+The ext4fs codecpack directory whose
+.I bin/ext4fs
+is executed. Default
+.RB $ \fIINVFS_CONVERT_PACK\fR ,
+else
+.IR <repo>/tools/codecpacks/ext4fs.codecpack .
+.TP
+.B \-\-size=\fIGB\fR
+Destination size. The default is
+.IR content " + " 20\ KiB\ per\ inode " + " max(128\ MiB,\ 5%)\ ,
+floored at the source image\(aqs own size.
+.TP
+.B \-\-meta\-frac=\fIN\fR
+Sets
+.B INVFS_META_FRAC
+for
+.BR invf\-mkfs .
+Root filesystems want 16.
+.TP
+.B \-\-fold\-every=\fIN\fR
+Fold the metadata delta every N created files (default 8192; 0 never
+folds). A conversion that leaves the whole import in the delta log cannot
+be compacted later on a tight volume.
+.TP
+.B \-\-keep\-partial
+Keep the destination image when the run fails.
+.TP
+.B \-\-no\-gates
+Skip
+.B invf\-fsck
+and
+.B invf\-verify \-\-deep.
+.TP
+.B \-\-mount\-root=\fIDIR\fR
+Where the loop and FUSE mounts are created.
+.TP
+.B \-\-max\-diffs=\fIN\fR
+.B verify
+only: print at most N differences (default 200; the count is always exact).
+.SH ENVIRONMENT
+.TP
+.B INVFS_CONVERT_PACK
+Default codecpack directory.
+.TP
+.B INVFS_CONVERT_REAL_IMG
+.BR tools/test\-convert\-ext4.sh
+only: a real ext4 rootfs image for the real\-world leg
+.IR ( INVFS_CONVERT_REAL=1 ).
+.SH EXIT STATUS
+.B convert:
+0 converted and gated; 3 refused (an unsupported source, or a path the
+volume cannot represent — nothing is left behind); 2 the run itself failed.
+.B verify:
+0 identical; 1 differences were found; 2 the comparison could not run.
+.SH NOTES
+Requires root: the source is loop\-mounted read\-only, and a root filesystem
+contains files an ordinary user cannot read. Phase 0 only — the destination
+is an ordinary new image; converting in place on the device that holds the
+source is not implemented. See
+.I impl_docs/CONVERT\-DESIGN.md
+in the source tree for the phase\-1 design, its commit set and its crash
+matrix.
+.SH SEE ALSO
+.BR invf\-import (8),
+.BR invf\-mkfs (8),
+.BR invf\-fsck (8),
+.BR invf\-verify (8)
