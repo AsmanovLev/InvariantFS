@@ -2,6 +2,98 @@
 
 All notable changes to InvariantFS will be documented in this file.
 
+## [v0.7.0] - 2026-11-27
+
+The release where the checkers stopped being able to lie, and the last silent
+data-loss class in the reclaim path was found and fixed.
+
+### Fixed
+- **`vol_spt0.c`: the save point's protected-block set was computed from a
+  layout-dependent comparison.** `memcmp()` compared a 32-byte recipe address
+  against an 8-character literal (nine bytes with the terminator), so 23 bytes of
+  whatever `.rodata` followed took part in the answer: "does this inode have a
+  recipe" came down to the link layout. A wrong answer there lets a block a live
+  row still needs be reclaimed, and the directory that lived in it stops being
+  readable — `invf-ls` returns EIO, the nlink audit fails, `invf-fsck` says
+  DAMAGED and `invf-sweep` refuses to run, on a volume whose data is intact.
+  Found by AddressSanitizer in one run of the walker path.
+- **`WP630-OWN-REFS`: the retire drain charged a survivor's reference.** The
+  drain rebuilds the reference map from the live rows, and a retire entry's row
+  is already gone by then (staging that retire is what the unlink did), so the
+  entry's `-1` discharged somebody else's reference and freed a block under a
+  live file. Measured on a deterministic, rootless repro: one release, refcount
+  2 → 0 while the sharer was live. The drain now charges what the collected
+  entries still own before their `-1`s, mirroring `free_recipe_level`'s filters
+  exactly, and drops the whole batch if a recipe will not resolve.
+- **`ext4fs classify` called the journal GARBAGE**, so an absorbed image came out
+  with a zeroed journal and would not open (`e2fsck: Superblock has an invalid
+  journal (inode 8)`). The reserved inodes' extents (journal, resize) are now
+  `meta_structure`, and the walk stops at inode 11 whatever `s_first_ino` claims.
+- **`absorb.c` under-reserved the tail of every non-4096-aligned range** — i.e.
+  every range of a `mkfs.ext4` default (1 KiB) image — so the published
+  `old.ext4` read zeros where the source had data.
+- **`invf-verify` printed the same "OK … valid volume" after reading every file
+  and after reading none.** The shallow verdict now names its scope
+  (`STRUCTURE ONLY: no file content was read`), and `--deep` exits 2 on content
+  damage instead of sharing code 1 with "could not run".
+
+### Added
+- **`invf-absorb`** — adopt an existing ext4/XFS filesystem in place. The core
+  knows nothing about the filesystem: the containerpack declares
+  `absorb = 1`/`absorb_name`/`classify` in its manifest, `mkfs --reserve` marks
+  the used bytes, and `invf-absorb plan|publish|verify` writes and checks the
+  result. `--absorb-commit` refuses while the commit stage does not exist.
+  `mkfs --size-bytes` sizes the volume 1:1, which in-place adoption requires.
+- **`invf-convert`** — import an ext4 tree: modes, owners, nanosecond mtimes,
+  symlinks, hardlinks, xattrs, sparse files preserved as holes. Verified on a
+  real Ubuntu 24.04 rootfs: 343 files, 23.4 MiB, `DIFFS 0`.
+- **`invf-verify --list-damaged`** — the same per-file damage ledger
+  `invf-fsck --list-damaged` prints, from the same core function
+  (`vol_damaged_ledger`), byte-identical for the same image.
+- **XFS containerpack `classify`** — GCFG v1 table verified against `xfs_db`
+  (per-AG free space, member/free disjointness, `zero_verified` measured), with
+  reflink/rmapbt/external-log refused by name.
+- **`make SAN=address,undefined`** — a sanitizer build that appends to CFLAGS
+  instead of replacing it (a command-line override loses every `-I` and dies in
+  `zconf.h`). This is the instrument that found the `vol_spt0` bug in one run.
+- `mkfs --absorb`, `mkfs --reserve`, and an `absorb prefix:` line in the summary.
+
+### Changed
+- **One exit-code vocabulary** (`docs/EXIT-CODES.md`): 0 clean at the level
+  performed, 1 the check could not run, 2 content damage, 3 structure damage.
+  `invf-fsck` keeps its own axis (3 = damage remains) and the document says why.
+- **`invf-verify --deep` reports its denominator**: `deep: 29 of 34 live
+  inode(s)`, and names the inodes it never attempted instead of printing a
+  perfect score over a partial walk.
+- **`scope` names every skip** in the run summary, with the changed-file list:
+  a docs-only push or an explicit `[skip ci]` can no longer look like "the tests
+  passed".
+- Test drivers are rebuilt on every run (`make` unconditionally): a five-day-old
+  driver paired with fresh tools reported a failure on a healthy volume, and the
+  same pairing can print a convincing PASS.
+- Failed soak artifacts are left world-readable and deletable, so a shared
+  checkout's next `rsync --delete` does not stop on them.
+- The optimisation level is a variable (`make OPT=-O3 OUT=bin-o3
+  OBJ=build/obj-o3`), defaulting to `-O2`, so the two can be built side by side.
+  Measured on a 348-file / 11 MiB tree, medians of 5 runs: import 70 ms (-O2) vs
+  71 ms (-O3); deep verify 15 ms vs 14 ms. No win at this size, so the default
+  stays what every package builds.
+
+### Tests
+- `tools/test-absorb-ext4.sh`: two fixtures (1 KiB and 4 KiB blocks), `e2fsck
+  -fn` on the absorbed image, a red leg that zeroes the journal and demands
+  e2fsck refuse it, and the invariant that no block called garbage holds
+  non-zero bytes in the source.
+- `tools/test-fence-doom-doubleretire.sh`: in `e2e`. It ran under a
+  self-destructing `WP630_EXPECT_RED` while the defect was open; the flag is
+  gone and both legs are hard gates.
+- `tools/test-contentcut.sh` legs B1/B2: the shallow verdict's scope sentence,
+  and verify's damage ledger being byte-identical to fsck's.
+- `tools/test-convert-ext4.sh`, `tools/test-xfs-classify.sh`,
+  `tools/test-rename-siblings.sh` (container members follow their container on
+  rename, and truncate no longer leaks them).
+
+
 ## [v0.6.7] - 2026-11-01
 
 ### Added

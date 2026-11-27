@@ -38,7 +38,14 @@ LICENSE := GPL-2.0-only
 SRCDIRS := $(SRC)/core $(SRC)/codecs $(SRC)/recipes $(SRC)/cli $(SRC)/vendor7z $(SRC)/legacy
 vpath %.c $(SRCDIRS)
 
-CFLAGS  := -std=gnu11 -O2 -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
+# Optimisation level is a variable, so -O2 and -O3 can be built side by side and
+# measured instead of argued about: `make OPT=-O3 OUT=bin-o3 OBJ=build/obj-o3`.
+# It stays -O2 by default because that is what every package builds (the RPM spec
+# says so in a comment) and because a flag change is a change to the generated code
+# in a filesystem -- the last layout-dependent defect in this tree cost a day of
+# chasing EIO that only appeared under one flag set.
+OPT     ?= -O2
+CFLAGS  := -std=gnu11 $(OPT) -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -include $(SRC)/core/glibc_compat.h \
            -DINVFS_EMBED_FLACX -DMINIZ_NO_ZLIB_APIS \
            -DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 \
@@ -453,7 +460,7 @@ $(OBJ)/invf-plugin-host.o: tools/invf-plugin-host.c | $(OBJ)
 # build too (unused there), so the two can never drift apart.
 CPACKS      := qcow2 ext4fs fatfs ntfs rawdisk vdi xfs p7z iso9660 wim
 PACKDIR      = tools/codecpacks/$(1).codecpack
-PLUGIN_CFLAGS := -std=gnu11 -O2 -fPIC -shared -Wall -Wextra -Werror \
+PLUGIN_CFLAGS := -std=gnu11 $(OPT) -fPIC -shared -Wall -Wextra -Werror \
                  -I$(SRC)/include -I$(SRC)/codecs -DIVPACK_SHARED_LIB
 # qcow2 links both repro backends; its own zlib calls use the bundled stock copy.
 PLUGIN_CFLAGS += $(TSAN_FLAGS)
