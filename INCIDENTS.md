@@ -4422,3 +4422,45 @@ both give `absent`, CI's green is the anomaly and the CI log has to explain it. 
 not "fix" the driver before that runs: a fixture that writes a parentless namespace
 is a fixture bug, but a root row that vanishes by compiler is an engine bug, and
 the two have different owners.
+
+### The dirent case: what the matrix says, and what it refuses to say
+
+Trying to pin the root-directory EIO turned up a matrix that **rules out the two
+easy explanations** (a compiler difference, a stale tree) and does not yet yield a
+cause. Recorded as measured, no hypothesis attached to the mechanism.
+
+`invf-ls` on a volume built by `bin/invf-orphan_test build <img> <files> <gens>`,
+and `invf-fsck`'s verdict, per configuration:
+
+| build | files/gens | `invf-ls` | `invf-fsck` |
+|---|---|---|---|
+| normal (gcc 14.2.1, `-O2`) | 40 / 60 | `cannot list /: Input/output error` | DAMAGED |
+| normal, 5 fresh volumes | 40 / 60 | same, 5 of 5 (deterministic) | DAMAGED |
+| `make -B` (72 units rebuilt) | 40 / 60 | same | DAMAGED |
+| `make CORRUPT_DEBUG=1` | 40 / 60 | **lists 40 files** | — |
+| `make CORRUPT_DEBUG=1` | 4 / 8 | `0 file(s)` | — |
+| healthy control (`mkfs` + `invf-cp`) | — | lists the file | OK |
+
+So it is not "gcc 14 vs 13" alone (the same box flips with a build flag), not a
+stale object tree (`make -B`), and not size-independent. What stays constant in
+every failing row: **the name resolves** (`invf-cat` serves the bytes) while the
+*directory* cannot be listed, and `invf-fsck` reports `pages walked: 8, bad pages:
+0, torn slots: 0` yet DAMAGED because `vol_nlink_audit` needs that directory.
+
+Two instruments are missing before a cause can be named, and both are cheap:
+
+1. **A sanitizer build path the Makefile does not have.** `make TSAN=1` exists;
+   `CFLAGS=... -fsanitize=address,undefined` on the command line *replaces* the
+   include flags and the build dies in `zconf.h`. A `SAN=address,undefined` knob
+   that APPENDS is the missing piece — with a flag-sensitive defect, "works when I
+   build it differently" is the signature of an uninitialised or out-of-bounds read,
+   and ASan/UBSan names it in one run.
+2. **A statement of what `invf-ls` is supposed to read.** If the CLI lists the base
+   tree only while `vol_read_named` consults the delta overlay, then a volume whose
+   dirents are still in the delta lists as empty/`EIO` **by design**, and the suite's
+   expectation (and `fsck`'s nlink audit) are what should change. That is a
+   five-minute answer from whoever owns `vol_dirs.c` and it decides whether the
+   remaining work is an engine fix or a tool fix.
+
+Until one of those runs, this stays open and is NOT to be "fixed" by weakening the
+suite: its leg 2 exists to catch exactly a namespace that stops being walkable.
