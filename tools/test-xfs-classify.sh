@@ -822,6 +822,21 @@ refuse "$WORK/img/refuse-extlog.img" refuse-extlog 'external log|logstart'
 mkimg refuse-bsize2048 320M -b size=2048 -m reflink=0,rmapbt=0 \
     -i nrext64=0,exchange=0 -n parent=0 >/dev/null
 refuse "$IMG" refuse-bsize2048 'blocksize 2048|not supported'
+# a realtime section: sb_rblocks != 0, which every tool in this pack refuses
+# because neither the walk nor the classifier looks at the realtime device.
+truncate -s 64M "$WORK/img/rtdev.img"
+RTIMG=$WORK/img/refuse-realtime.img
+IMGS+=("$RTIMG")
+truncate -s 320M "$RTIMG"
+if mkfs.xfs -f -d file,name="$RTIMG",size=320m \
+        -r rtdev="$WORK/img/rtdev.img",size=64m \
+        > "$WORK/out/refuse-realtime.mkfs" 2>&1; then
+    note "realtime: $(xfs_db -r -c 'sb 0' -c 'p rblocks rextents' "$RTIMG" | tr '\n' ' ')"
+    refuse "$RTIMG" refuse-realtime 'realtime'
+else
+    note "realtime: SKIPPED, mkfs.xfs refused to build the fixture: " \
+         "$(tr '\n' ' ' < "$WORK/out/refuse-realtime.mkfs" | tail -c 200)"
+fi
 # not an XFS image at all
 head -c 1M /dev/urandom > "$WORK/img/notxfs.img"
 IMGS+=("$WORK/img/notxfs.img")
