@@ -164,6 +164,14 @@ jobs:
               esac
             done;; esac
           fi
+          # The docs-only case, which is the one that actually skips 16 jobs on a
+          # normal day: every changed file matched the documentation patterns, so
+          # no flag was set and the loop above said nothing. Reconstruct the
+          # reason here rather than leave "unspecified" for the commonest skip.
+          if [ "$FULL" = 0 ] && \
+             [ "$ENGINE$DEB$RPM$ARCH$GEN$VOID$ALP$NIX$BA$BV$BD$BF$IA$IV$IG$BALP$IALP$INIX" = "000000000000000000" ]; then
+            REASON="documentation only: every changed file is docs/**, *.md or packaging/man/** (policy: those do not trigger heavy jobs)"
+          fi
           # Outputs are the literal strings true/false: the job ifs
           # compare against 'true', and 0/1 never equals it (shipped once:
           # every scoped job silently skipped and the run went "green").
