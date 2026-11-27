@@ -3802,6 +3802,59 @@ segment's frame no longer decodes under a sound recipe and the whole file serves
   a leak. That is the shape to write, and it is small; it is not a one-line
   gate. `_leg5-fenced-seq.patch` is regenerated clean (573 lines, LF, compiles)
   and still parked -- it is the first half, not the fix.
+* **What is now DISPROVED, each by a measurement (2026-11-27).** Six
+  explanations died in one session; they are listed so nobody re-runs them:
+
+  | hypothesis | what killed it |
+  |---|---|
+  | a failed rewrite damages the previous version | clean-room dm-flakey: old bytes intact, fsck CLEAN |
+  | the allocator hands out a bitmap-free block | every shared extent is `bitmap=allocated` |
+  | a free sees a live reference | 0 of 12 450 frees had `owners > 0` |
+  | a dying daemon loses bitmap bits | 33 mounts: "bitmap and live rows agree", 0 repairs |
+  | a failed `pba_ref` rebuild frees on an empty map | the new guard never fired |
+  | this is a `lazy_reclaim` class | fails identically with `INVFS_LAZY_RECLAIM=0` |
+
+  And the measurement that reframed everything: **with the device held UP the
+  same seeded op sequence passes** —
+
+  ```
+  seed 3663444781  NO CHAOS: SOAK: PASS rounds=373 ops=1185 gates=94
+  seed 3621091749  NO CHAOS: SOAK: PASS rounds=72  ops=217  gates=19
+  ```
+
+  (`INVFS_SOAK_NOCHAOS=1`, added to `tools/flakey/soak.py`). The engine's own
+  ordering holds under concurrent operations; the failure REQUIRES a lying
+  device. That is what turned a search for "who frees a live block" into the
+  shape below.
+
+* **THE FORM (2026-11-27, from the captured oplogs).** For every recent failing
+  artifact the file named by the gate had, as its LAST operation, one that
+  failed loudly -- and no successful write afterwards:
+
+  ```
+  s12.bin  t=+51.4  op write  s12.bin -> ERR Input/output error (mode=error)   (mode switch 0.0 s earlier)
+  s07.bin  t=+85.8  op delete s07.bin -> ERR No such file or directory (mode=drop) (switches 0.0 / 0.1 s away)
+  ```
+
+  So the question is not "who freed a live block" but **"a mutation that
+  reported failure damaged the pre-call state"** -- the one thing ADR-009
+  promises it cannot do. The clean-room test that disproved the first hypothesis
+  failed the write on its FIRST segment (all-or-nothing); here the error window
+  falls in the MIDDLE of a file, so some segments landed and some did not.
+
+  Next test, and it is deterministic: inject the failure at segment N through
+  the existing `vol_fault`/`INVFS_FAULT` seam, rewrite, and require the PREVIOUS
+  version to read back byte-identical with fsck clean. No dm chaos, no seeds.
+
+* **Instruments landed with this entry** (all safe by construction):
+  `vol_bitmap_reconcile` (opt-in via `INVFS_BITMAP_RECONCILE=1`, reports the
+  count it repairs), `ALLOC-OVER-LIVE` + PID in the CORRUPT_DEBUG trace,
+  `NAMED-BUT-FREE` in `invf-dedupe_sim`, `INVFS_SOAK_NOCHAOS`, and two
+  "never free on doubt" guards (a doom invalidates the reference map; a retire
+  batch is dropped, not freed, when the map could not be rebuilt). Gating
+  suites after them: `test-dedupe` PASS, `test-delta-groupcommit-crash` PASS,
+  `test-flushfail` PASS; `test-fence-doom-doubleretire` leg 2 still red on main.
+
 * **Next instrument, not next guess:** gate `vol_free_blocks` behind an opt-in
   check that the pba it frees is not named by any live recipe (a `pba_ref` lookup,
   already exact), and run the soak with it armed. The first offender names itself,

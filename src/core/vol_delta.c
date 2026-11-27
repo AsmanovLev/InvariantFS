@@ -26,10 +26,8 @@
 /* WP-M20: delta append lock — guards the only writer critical section.
  *
  * IT ALSO GUARDS THE READ OF A RECORD'S BYTES, which the comment above used
- * to deny. "Delta reads are lock-free (index published atomically after record
- * bytes written)" describes the APPEND's ordering; it says nothing about how
- * long the bytes a resolved ref names stay allocated, and the answer was "one
- * fold". A reader resolved a ref under this lock and then re-read the record
+ * to deny. "Delta reads are lock-free (index published atomically after record\n * bytes written)" describes the APPEND's ordering; it says nothing about how
+ * long the bytes a resolved ref names stay allocated, and the answer was "one\n * fold". A reader resolved a ref under this lock and then re-read the record
  * with two bare preads AFTER releasing it, while the fold's tail frees the
  * whole retired chain the moment the index is dropped (vol_fold ->
  * vol_reclaim_delta_segments). The reader then decoded the recycled block --
@@ -373,8 +371,7 @@ typedef struct {
     uint64_t seq;
     uint64_t ins_gen;   /* di->epoch at the moment this KEY was inserted.
                          * The key set only grows by whole keys, and epoch
-                         * moves exactly then, so this names "which keys are
-                         * newer than a given sorted view" without any
+                         * moves exactly then, so this names "which keys are\n                         * newer than a given sorted view" without any
                          * second bookkeeping. Coalesced updates (same key)
                          * keep the original value: the key set did not
                          * change. */
@@ -721,6 +718,19 @@ void vol_delta_doom(invfs_volume *v)
     pthread_mutex_unlock(&g_delta_lock);
     CD("DELTA doom end (staged=%zu doomed=%zu pending=%d)",
        v->delta_nstaged, v->delta_doomed, v->delta_pending);
+    /* WP-LEG5-STALE-MAP: the doom restored rows in the overlay, so the live
+     * set is no longer the one any built reference map describes. The retire
+     * drain's share-aware gate is `pba_ref_count(pba) == 0`, read off that
+     * map -- so a block the RESTORED row names reads as unreferenced and is
+     * freed. That is leg5's shape exactly: rows staged under a refused fence,
+     * the later commit retires the previous version's blocks, the doom brings
+     * the previous version back, the drain frees its segments, the seal
+     * re-uses them, and the file ends up EIO.
+     *
+     * Outside the delta lock on purpose: this takes g_pba_ref_mu, and the
+     * map's own rebuild holds that lock while it walks rows (delta locks) --
+     * the reverse order here would deadlock. */
+    pba_ref_invalidate(v);
 }
 
 /* WP607 retire list bodies. Span capture + liveness match run under
@@ -1064,7 +1074,27 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
          * walk is off the write hot path; lazy_reclaim keeps the MOUNT instant,
          * which is what it is for. */
         pba_ref_reset(v);
-        pba_ref_ensure(v);
+        /* WP-LEG5-REBUILD-FAILED: the return value matters. A rebuild that
+         * could not complete leaves an EMPTY (or partial) map, and the free
+         * loop below then reads pba_ref_count() == 0 for every block -- which
+         * is the wrong-free direction this map exists to prevent. "Never free\n         * on doubt" has to be enforced here, at the only place where the doubt
+         * is created: drop the batch (the blocks leak to the orphan collector,
+         * which is the safe direction) and say so once. */
+        if (pba_ref_ensure(v) != 0) {
+            static int warned;
+            if (DBG_RETIRE() || !warned) {
+                fprintf(stderr, "invfs: retire: the reference map could not be "
+                        "rebuilt (a live row would not read), so %zu stale "
+                        "retire entr%s stay allocated rather than risk freeing "
+                        "blocks a live recipe names\n", n,
+                        n == 1 ? "y" : "ies");
+                warned = 1;
+            }
+            for (i = 0; i < n; i++)
+                dl_retire_free_ent(&list[i]);
+            free(list);
+            return;
+        }
     } else if (need_map) {
         /* WP-IO-LOCK: replay the retire instead of rebuilding. Every entry
          * here is PBA-FORM (the commit/remap/dedupe/migrate shape: the exact
@@ -1601,6 +1631,12 @@ int vol_delta_drain(invfs_volume *v)
      * blkio watermark (groupcommit_test T4): no caller is told staged
      * records are durable, and the next drain retries the flush. */
     pthread_mutex_unlock(&g_delta_lock);
+    /* WP-LEG5-STALE-MAP: a doom above restored rows in the overlay, so the
+     * reference map no longer describes the live set and its share-aware gate
+     * would free blocks the restored row names. Outside the delta lock for
+     * the same ordering reason as vol_delta_doom. */
+    if (rc != 0)
+        pba_ref_invalidate(v);
     if (rdrain)
         dl_retire_free_list(v, rdrain, nrdrain);
     return rc;

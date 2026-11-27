@@ -502,6 +502,15 @@ int vol_ensure_path(invfs_volume *v, const char *name);
 typedef int (*vol_walk_cb)(void *ctx, const char *path, uint64_t ino,
                               uint32_t type, uint64_t size, int64_t mtime);
 int vol_walk(invfs_volume *v, vol_walk_cb cb, void *ctx);
+
+/* WP-LEG5-RECONCILE: every block a LIVE row names must be marked
+ * allocated. A daemon that dies with its allocation bits still in RAM
+ * leaves rows naming blocks the bitmap calls free, and the next writer
+ * is handed one and overwrites a live segment. Re-marks what it finds
+ * and RETURNS THE COUNT (0 = bitmap and rows agree, -1 = the walk did
+ * not complete and nothing was changed); the caller reports it, because
+ * a silent repair of a lying bitmap is how the next one goes unnoticed. */
+int vol_bitmap_reconcile(invfs_volume *v);
 /* vol_walk, but a name or a row it cannot read ABORTS the walk with -1
  * instead of being stepped over. For the one caller whose answer must not be
  * a partial view of the namespace: pba_ref_ensure, whose map is the sole

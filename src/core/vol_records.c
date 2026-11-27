@@ -381,6 +381,81 @@ static int sib_segment_is_internal_shape(const char *suf, size_t n)
  * which describes a single suffix. `a!b!c` splits as prefix `a`, suffix
  * `b!c` -- and `b!c` is not a shape, so it is a user's name. Good.
  */
+static uint64_t g_reconciled;
+
+/* WP-LEG5-RECONCILE: every block a LIVE row names must be marked allocated.
+ *
+ * The invariant is not decorative. A daemon can die with its allocation bits
+ * still in RAM: the rows that name those blocks are in the delta log and
+ * survive, the bits do not, and the next mount reads a bitmap that says FREE for
+ * blocks a live recipe names. The first writer after that mount is handed one of
+ * them and overwrites a live segment -- measured on leg5 as two DIFFERENT
+ * fuse-write processes allocating the same pbas with no free in between, which
+ * is exactly this shape.
+ *
+ * Counting is the point as much as repairing: a non-zero number at mount is a
+ * bitmap that lied, and it is reported rather than silently patched. Repair is
+ * the safe direction (the block stays owned by the row that names it, i.e. a
+ * leak at worst, never a wrong free).
+ *
+ * Returns the number of blocks re-marked, or -1 when the walk could not be
+ * completed (then nothing was changed).
+ */
+static int reconcile_cb(void *ctx_, const char *path, uint64_t ino,
+                        uint32_t type, uint64_t size, int64_t mtime)
+{
+    invfs_volume *v = (invfs_volume *)ctx_;
+    invfs_inode in;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    invfs_ast_hdr ah;
+    const invfs_ast_block_entry *ents = NULL;
+    size_t nents = 0, i;
+    (void)path; (void)mtime;
+
+    if (type == INVFS_ITYP_DIR || !ino || size == 0) return 0;
+    if (invfs_inode_content_is_raw_blob(type)) return 0;
+    if (vol_inode_get(v, ino, &in) != 1) return 0;
+    if (in.size == 0) return 0;
+    if (vol_recipe_load(v, in.recipe_addr, &blob, &blen) != 0 || !blob) return 0;
+    if (vol_ast_recipe_parse(blob, blen, &ah, &ents, &nents) != 0 || !ents) {
+        free(blob);
+        return 0;
+    }
+    for (i = 0; i < nents; i++) {
+        uint64_t pba = ents[i].pba, plen = 0;
+        if (!pba || ents[i].zone == INVFS_ZONE_TEXT) continue;
+        if (pba >= v->sb.total_blocks) continue;
+        if (seg_extent_checked(v, pba, &plen) != 0 || plen == 0) continue;
+        {
+            uint64_t k, marked = 0;
+            for (k = 0; k < plen && pba + k < v->sb.total_blocks; k++)
+                if (!bit_get(v->bitmap, pba + k)) { marked++; bit_set(v->bitmap, pba + k); }
+            if (marked) {
+                vol_bm_dirty(v, pba);
+                vol_bm_dirty(v, pba + plen - 1);
+                v->free_blocks = v->free_blocks > marked ?
+                                 v->free_blocks - marked : 0;
+                *(int *)ctx_ += 0;      /* keep the signature honest */
+                g_reconciled += marked;
+            }
+        }
+    }
+    vol_ast_recipe_parsed_free(&ah, ents);
+    free(blob);
+    return 0;
+}
+
+int vol_bitmap_reconcile(invfs_volume *v)
+{
+    int rc;
+    if (!v || !v->bitmap) return -1;
+    g_reconciled = 0;
+    rc = vol_walk_strict(v, reconcile_cb, v);
+    if (rc != 0) return -1;
+    return (int)g_reconciled;
+}
+
 int vol_name_is_container_sibling(invfs_volume *v, const char *name)
 {
     const char *bang;

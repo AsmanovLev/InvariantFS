@@ -112,6 +112,15 @@ class Soak:
             return 124, "TIMEOUT after %ds" % timeout
 
     def dm_set(self, mode):
+        # WP-LEG5-NOCHAOS: run the same seeded op sequence with the device held
+        # UP the whole time. That separates the two questions this soak has been
+        # answering at once: "does the engine hold up under concurrent file
+        # operations" and "does it hold up when the device lies". A failure with
+        # INVFS_SOAK_NOCHAOS=1 is the engine's own ordering, with no device
+        # fault to blame; a clean run points the finger at the chaos model.
+        if os.environ.get("INVFS_SOAK_NOCHAOS"):
+            self.mode = "up"
+            return
         sec, loop, name = self.a.sectors, self.a.loop, self.a.dmname
         if mode == "up":
             spec = "0 %d flakey %s 0 3600 0" % (sec, loop)

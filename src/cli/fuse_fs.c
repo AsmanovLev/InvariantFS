@@ -4687,6 +4687,23 @@ int main(int argc, char *argv[])
     if (perf_trace_enabled())
         fprintf(stderr, "[perf-trace %.3fs] volume open complete\n", fuse_now_sec() - t_main_start);
 
+    /* WP-LEG5-RECONCILE (opt-in): every block a live row names must be marked
+     * allocated. A daemon that dies with allocation bits still in RAM leaves
+     * rows naming blocks the bitmap calls FREE, and the next writer is handed
+     * one and overwrites a live segment (measured: two fuse-write processes
+     * allocating the same pbas, no free in between). Reported, never silent. */
+    if (getenv("INVFS_BITMAP_RECONCILE")) {
+        int fixed = vol_bitmap_reconcile(g_vol);
+        if (fixed < 0)
+            fprintf(stderr, "invf: bitmap reconcile: the row walk did not "
+                    "complete; the bitmap is unchanged\n");
+        else if (fixed > 0)
+            fprintf(stderr, "invf: bitmap reconcile: %d block(s) were named by a "
+                    "live row and marked FREE; re-marked allocated\n", fixed);
+        else
+            fprintf(stderr, "invf: bitmap reconcile: bitmap and live rows agree\n");
+    }
+
     /* WP59: codec-policy mount gate.
      * - No PCK0 (legacy volume): refuse unless -o ignore-missing-codecs.
      * - BASIC_ONLY: pass (builtin codecs only, no packs required).

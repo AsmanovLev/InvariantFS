@@ -427,6 +427,29 @@ int main(int argc, char **argv)
         if (!shown) printf("    none\n");
     }
 
+    /* The one question a bitmap/row disagreement shows up in: a pba a LIVE row
+     * names but whose bitmap bit says FREE. The next allocation then hands it
+     * out and overwrites a live segment -- leg5's whole class. */
+    if (c.v->bitmap) {
+        uint64_t named_free = 0, shown = 0;
+        size_t e;
+        for (e = 0; e < c.own.cap; e++) {
+            if (!c.own.v[e].pba || c.own.v[e].owners == 0) continue;
+            if (bit_get(c.v->bitmap, c.own.v[e].pba)) continue;
+            named_free++;
+            if (shown < 6) {
+                printf("    NAMED-BUT-FREE pba=%llu blocks=%llu owners=%u\n",
+                       (unsigned long long)c.own.v[e].pba,
+                       (unsigned long long)c.own.v[e].blocks,
+                       c.own.v[e].owners);
+                shown++;
+            }
+        }
+        printf("  named by a live row but marked FREE: %llu extent(s)%s\n",
+               (unsigned long long)named_free,
+               named_free ? "  <-- THIS is the double-allocation source" : "");
+    }
+
     {
         uint64_t hist[5] = {0, 0, 0, 0, 0};
         for (k = 0; k < c.own.cap; k++) {

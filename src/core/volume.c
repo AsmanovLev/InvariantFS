@@ -101,8 +101,8 @@ void invfs_cd_log(const char *fmt, ...)
     }
     clock_gettime(CLOCK_MONOTONIC, &ts);
     ms = (long)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
-    fprintf(cd_sink, "[CD t=%ld.%03ld %s tid=%d] ", ms / 1000, ms % 1000,
-            cd_tag_tls ? cd_tag_tls : "?", (int)CD_TID());
+    fprintf(cd_sink, "[CD t=%ld.%03ld %s pid=%d tid=%d] ", ms / 1000, ms % 1000,
+            cd_tag_tls ? cd_tag_tls : "?", (int)getpid(), (int)CD_TID());
     va_start(ap, fmt);
     vfprintf(cd_sink, fmt, ap);
     va_end(ap);
@@ -2456,6 +2456,12 @@ int vol_sync(invfs_volume *v)
 /* allocate n consecutive free blocks in a zone; returns start block or 0.
  * type: INVFS_ALLOC_DATA (0) = data blocks, INVFS_ALLOC_META (1) = metadata blocks.
  * WP30: metadata allocations are tracked separately in meta_type_bitmap. */
+#ifdef INVFS_CORRUPT_DEBUG
+/* Defined next to vol_free_run, used by alloc_raw_or_shadow below: how many
+ * live recipes name this pba right now (-1 = the map cannot answer). */
+static int pba_ref_owners_dbg(invfs_volume *v, uint64_t pba);
+#endif
+
 uint64_t alloc_blocks(invfs_volume *v, uint64_t zone_start, uint64_t zone_len,
                              uint64_t n, int use_reserve, int type)
 {
@@ -2599,6 +2605,27 @@ uint64_t alloc_raw_or_shadow(invfs_volume *v, uint64_t nblocks, int *zone_out)
         pba = alloc_blocks(v, v->sb.shadow_zone_start, v->sb.shadow_zone_blocks,
                            nblocks, 0, INVFS_ALLOC_DATA);
     if (zone_out) *zone_out = INVFS_ZONE_RAW;
+#ifdef INVFS_CORRUPT_DEBUG
+    /* WP-LEG5-ALLOC-OVER-LIVE: the invariant every corruption in this
+     * class ends up violating is simply 'never hand out a block a live row
+     * names'. Asking HERE, at the allocation, names the stage and the pba
+     * instead of leaving a corpse for later forensics.
+     *
+     * A map that cannot answer is built first: this is a debug build, and
+     * 'the map was not built' is the answer that made the retire gate free
+     * live blocks in the first place.
+     */
+    if (pba) {
+        int own = pba_ref_owners_dbg(v, pba);
+        if (own < 0) {
+            pba_ref_ensure(v);
+            own = pba_ref_owners_dbg(v, pba);
+        }
+        if (own > 0)
+            CD("ALLOC-OVER-LIVE pba=%llu n=%llu owners=%d\n",
+               (unsigned long long)pba, (unsigned long long)nblocks, own);
+    }
+#endif
     return pba;
 }
 
@@ -3042,8 +3069,19 @@ void pba_ref_invalidate(invfs_volume *v)
 void pba_ref_validate(invfs_volume *v)
 {
     pba_ref_lock();
-    if (v) v->pba_ref_stale = 0;
-    CD("PBAREF validate (map claimed exact by the publisher)");
+    /* WP-LEG5-STALE-MAP: this used to clear the stale mark unconditionally,
+     * so a publisher that applied its own deltas to an ALREADY stale map
+     * could make vol_pba_is_ready() answer true over a half-applied array.
+     * The retire drain reads that answer to choose between replaying -1s
+     * and rebuilding, and the wrong choice frees a block the live row
+     * names (leg5). Exactness comes from a BUILD, never from a claim: if
+     * the mark is set, leave it set and let pba_ref_ensure rebuild.
+     *
+     * The legitimate callers (the sweep's segment remap, dedupe's remap)
+     * run on a map they rebuilt in the same section, where the flag is
+     * already clear -- for them this is the same no-op it always was. */
+    if (v && !v->pba_ref_stale)
+        CD("PBAREF validate (map still exact)");
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
@@ -3087,6 +3125,13 @@ static void pba_ref_modify_locked(invfs_volume *v, uint64_t pba, int delta)
 {
     size_t k;
     if (!v->pba_ref_on || !v->pba_ref || !pba || pba >= v->sb.total_blocks)
+        return;
+    /* WP-LEG5-STALE-MAP: a stale map is one a rebuild is owed. Applying a
+     * delta to it would leave a HALF-updated array that a later validate
+     * could pronounce exact -- the counts then read 0 for a pba a live
+     * recipe names, which is the wrong-free direction this map exists to
+     * prevent. Leave it stale; the next gate rebuilds from the live set. */
+    if (v->pba_ref_stale)
         return;
     if (delta > 0 && v->pba_ref_n * 10 >= (v->pba_ref_mask + 1) * 7 &&
         pba_ref_grow(v) != 0)
