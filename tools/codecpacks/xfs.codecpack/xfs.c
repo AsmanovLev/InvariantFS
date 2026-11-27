@@ -17,8 +17,11 @@
  *   estimate  <in>                  decode working set: sum(usize) + 64 MiB
  *
  * Members are the REGULAR FILES reachable from the root directory; idx is
- * the inode number (the FS caps idx at 65535, so an image holding a member
- * with a larger inode number is declined). Directories, symlinks, device
+ * the inode number (the FS caps idx at MAX_IDX, 1048575 -- this comment said
+ * 65535, the cap the pack shipped with before MAX_MEMBERS/MAX_IDX were raised,
+ * and the code has been the authority since: measured, a member with ino
+ * 262273 in AG1 enumerates fine. An image holding a member with a larger inode
+ * number is declined). Directories, symlinks, device
  * nodes and unlinked inodes stay in the recipe. The recipe carries every
  * non-member-content byte verbatim -- superblocks, AG headers, B+trees,
  * whole inode chunks (inode bytes are NOT member content), directory
@@ -47,7 +50,8 @@
  *     in any v5 feature word, v5 log-incompat features
  *   - any regular file whose data fork is a B+tree deeper than one level
  *     (bb_level > 1), any directory in node (BTREE) format
- *   - any member inode number > 65535 (the FS idx cap) or > 65536 members
+ *   - any member inode number > 1048575 (MAX_IDX, the FS idx cap) or more
+ *     than 1048576 members (MAX_MEMBERS)
  *   - structural garbage anywhere on the walk
  * CRCs are not verified anywhere (read-only parse; the map guard at sweep
  * time proves every emitted byte range against the original anyway).
