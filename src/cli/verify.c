@@ -503,6 +503,7 @@ int main(int argc, char **argv)
         invfs_volume *vol;
         uint64_t live = 0, bad = 0;
         uint64_t audit_live = 0;   /* na.inodes: the volume's live-inode count */
+        uint64_t deep_attempted = 0;  /* inodes the read loop actually visited */
         uint64_t total_bytes = 0;
         int parity_bad = 0;
         deep_ent *ents = NULL;
@@ -564,6 +565,13 @@ int main(int argc, char **argv)
         for (size_t k = 0; k < nents; k++) {
             uint64_t ino = ents[k].id, fsz = ents[k].fsz;
             const char *nm = ents[k].nm;
+            /* Counted here, not inferred from `live + bad`: `bad` also takes
+             * the nlink audit's faults and the walk-status refusals, so
+             * deriving the attempt count from it made a volume with an
+             * unbalanced hardlink look like a walk that had lost inodes --
+             * measured as 'verify --deep not clean' in test-writepath.sh on a
+             * CI run where nothing was wrong with the content. */
+            deep_attempted++;
             if (fsz > MAX_FILE_SIZE) { printf("  BAD size %s: %llu\n", nm, (unsigned long long)fsz); bad++; continue; }
             {
                 uint8_t *buf = NULL;
@@ -707,25 +715,30 @@ int main(int argc, char **argv)
          * fault of its own, counted into `bad`. */
         {
             uint64_t claimed = audit_live ? audit_live : (uint64_t)nents;
-            uint64_t attempted = live + bad;
-            if (attempted != (uint64_t)nents) {
+            if (deep_attempted != (uint64_t)nents) {
                 printf("  CORRUPT: the deep walk collected %llu inode(s) but "
-                       "accounted for %llu -- %llu unaccounted\n",
+                       "visited %llu -- %llu unaccounted\n",
                        (unsigned long long)nents,
-                       (unsigned long long)attempted,
-                       (unsigned long long)((uint64_t)nents - attempted));
+                       (unsigned long long)deep_attempted,
+                       (unsigned long long)((uint64_t)nents - deep_attempted));
                 bad++;
             }
-            printf("deep: %llu of %llu live inode(s): %llu ok, %llu corrupt, "
-                   "%llu bytes verified\n",
-                   (unsigned long long)live, (unsigned long long)claimed,
-                   (unsigned long long)live, (unsigned long long)bad,
-                   (unsigned long long)total_bytes);
+            /* The note goes BEFORE the summary on purpose: every suite in this
+             * tree reads the summary as `tail -1` (' 0 corrupt,') and a trailing
+             * note made `deep_ok()` in tools/test-writepath.sh fail on a volume
+             * where nothing was wrong -- measured in CI run 46025377714 as
+             * 'FAIL: verify --deep not clean: wp4wp-a.img'. Details first,
+             * total last; that ordering is the contract now. */
             if (claimed > (uint64_t)nents)
                 printf("deep: %llu live inode(s) were never attempted by the "
                        "read walk; the causes are named above (an orphan row "
                        "has no name to be read by)\n",
                        (unsigned long long)(claimed - (uint64_t)nents));
+            printf("deep: %llu of %llu live inode(s): %llu ok, %llu corrupt, "
+                   "%llu bytes verified\n",
+                   (unsigned long long)live, (unsigned long long)claimed,
+                   (unsigned long long)live, (unsigned long long)bad,
+                   (unsigned long long)total_bytes);
         }
         vol_close(vol);
         /* Exit vocabulary, one meaning per code (docs/EXIT-CODES.md):
