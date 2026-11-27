@@ -75,9 +75,11 @@ data-loss class in the reclaim path was found and fixed.
   checkout's next `rsync --delete` does not stop on them.
 - The optimisation level is a variable (`make OPT=-O3 OUT=bin-o3
   OBJ=build/obj-o3`), defaulting to `-O2`, so the two can be built side by side.
-  Measured on a 348-file / 11 MiB tree, medians of 5 runs: import 70 ms (-O2) vs
-  71 ms (-O3); deep verify 15 ms vs 14 ms. No win at this size, so the default
-  stays what every package builds.
+  Measured on 79 MiB / 356 files (sources + shared libraries + binaries +
+  urandom), medians of 3 runs: import 257 ms vs 296 ms, **sweep 26.1 s vs
+  33.4 s** (the codec/batch/dedupe path, where -O3 is 28% slower), decode 1481 ms
+  vs 1745 ms, with `.text` 27% larger. So the default stays -O2, which is also
+  what every package builds.
 
 ### Tests
 - `tools/test-absorb-ext4.sh`: two fixtures (1 KiB and 4 KiB blocks), `e2fsck

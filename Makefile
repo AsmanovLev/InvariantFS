@@ -40,10 +40,23 @@ vpath %.c $(SRCDIRS)
 
 # Optimisation level is a variable, so -O2 and -O3 can be built side by side and
 # measured instead of argued about: `make OPT=-O3 OUT=bin-o3 OBJ=build/obj-o3`.
-# It stays -O2 by default because that is what every package builds (the RPM spec
-# says so in a comment) and because a flag change is a change to the generated code
-# in a filesystem -- the last layout-dependent defect in this tree cost a day of
-# chasing EIO that only appeared under one flag set.
+# It stays -O2 by default, and that is now a MEASURED choice rather than inertia.
+# 79 MiB / 356 files (sources + shared libraries + binaries + 4 MiB urandom),
+# medians of 3 runs, both builds producing the same result (359 of 360 inodes ok,
+# 0 corrupt):
+#
+#                        -O2        -O3
+#   import               257 ms     296 ms
+#   sweep (codecs)     26.1 s      33.4 s     <-- -O3 is 28% SLOWER
+#   --deep (decode)      1481 ms    1745 ms
+#   .text, 6 tools       5.89 MB    7.48 MB   (+27%)
+#
+# -O3 inlines and vectorises the codec loops until the code stops fitting the
+# i-cache, and the work being optimised is not arithmetic. On an 11 MiB tree the
+# two are identical, which is what made the naive benchmark look like a tie.
+# Also: a flag change is a change to generated code in a filesystem, and the last
+# layout-dependent defect in this tree (vol_spt0) produced EIO under one flag set
+# and a healthy volume under another.
 OPT     ?= -O2
 CFLAGS  := -std=gnu11 $(OPT) -Wall -MMD -MP -I$(SRC) $(addprefix -I,$(SRCDIRS)) -pthread \
            -include $(SRC)/core/glibc_compat.h \
