@@ -4537,7 +4537,9 @@ loses every `-I`, which dies in `/usr/include/zconf.h`; two runs were spent on t
 before the knob existed. The codecpack rules take `SAN_FLAGS` as well, for the same
 reason the TSAN note gives.
 
-Left over, and NOT the same defect: `invf-vnode <img> nlink audit` now prints one
-fault with an absurd inode id (`8070450532247928847`) while `fsck` says OK — a row
-whose id looks uninitialised. Worth one ASan run of the audit path; recorded here so
-it is not lost.
+**Resolved, and it was not a defect.** The audit's "absurd" ids
+(`8070450532247928832` upward, 60 of them) are the fixture's own forced-generation
+rows: the driver creates 60 generation inodes in a synthetic high id range, they are
+unreachable by name by construction, and the audit reports them as `orphan-row`
+while its verdict stays OK. ASan and UBSan on the audit path report nothing. So the
+only thing wrong there was my reading of the number.
