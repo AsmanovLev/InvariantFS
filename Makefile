@@ -447,8 +447,12 @@ $(OBJ)/invf-import.o: tools/invf-import.c | $(OBJ)
 # verification harness. One binary for both halves because the comparison is
 # the deliverable, not an afterthought: `convert` cannot claim a result the
 # same tool will not check.
-$(OUT)/invf-convert: $(OBJ)/invf-convert.o $(CORE_O)
-	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
+# Links absorb.o for ONE reason: the pack resolver (sniff -> manifest -> command
+# line) lives there and is shared with invf-absorb. convert used to spell out
+# tools/codecpacks/ext4fs.codecpack and bin/ext4fs, which is why XFS could not be
+# converted at all; two resolvers would drift the same way the retire map did.
+$(OUT)/invf-convert: $(OBJ)/invf-convert.o $(OBJ)/absorb.o $(CORE_O)
+	$(CC) $(CFLAGS) -Itools -o $@ $(OBJ)/invf-convert.o $(OBJ)/absorb.o $(CORE_O) $(LDLIBS)
 $(OBJ)/invf-convert.o: tools/invf-convert.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
 

@@ -28,6 +28,8 @@ typedef struct {
     char dir[256];
     char name[64];
     char classify[512];
+    char enumerate[512];
+    char extract[512];
     char absorb_name[ABSORB_NAME_MAX];
     char check[512];
     char magic[64];
@@ -84,6 +86,10 @@ static int read_manifest(const char *dir, pack_t *pk)
             copy_val(pk->name, sizeof pk->name, v);
         } else if (strcmp(k, "classify") == 0) {
             copy_val(pk->classify, sizeof pk->classify, v);
+        } else if (strcmp(k, "enumerate") == 0) {
+            copy_val(pk->enumerate, sizeof pk->enumerate, v);
+        } else if (strcmp(k, "extract") == 0) {
+            copy_val(pk->extract, sizeof pk->extract, v);
         } else if (strcmp(k, "absorb_name") == 0) {
             copy_val(pk->absorb_name, sizeof pk->absorb_name, v);
         } else if (strcmp(k, "absorb_check") == 0) {
@@ -284,6 +290,106 @@ static int write_reserve(const char *gcfg, const char *out_path,
     p->used_extents = ranges;
     p->free_blocks = p->bytes / 4096u > used ? p->bytes / 4096u - used : 0;
     return 1;
+}
+
+int absorb_pack_load(const char *packdir, absorb_pack_desc_t *out)
+{
+    pack_t pk;
+
+    if (!packdir || !out)
+        return 0;
+    memset(out, 0, sizeof *out);
+    (void)read_manifest(packdir, &pk);      /* fills pk even when absorb = 0 */
+    if (!pk.magic[0] || !pk.name[0])
+        return 0;                            /* not something we can recognise */
+    copy_val(out->dir, sizeof out->dir, pk.dir);
+    copy_val(out->name, sizeof out->name, pk.name);
+    copy_val(out->magic, sizeof out->magic, pk.magic);
+    out->sniff_off = pk.sniff_off;
+    copy_val(out->classify, sizeof out->classify, pk.classify);
+    copy_val(out->enumerate, sizeof out->enumerate, pk.enumerate);
+    copy_val(out->extract, sizeof out->extract, pk.extract);
+    return 1;
+}
+
+int absorb_pack_matches(const absorb_pack_desc_t *pk, const char *image)
+{
+    pack_t tmp;
+    absorb_plan_t scratch;
+
+    if (!pk || !image || !pk->magic[0])
+        return 0;
+    memset(&tmp, 0, sizeof tmp);
+    memset(&scratch, 0, sizeof scratch);
+    copy_val(tmp.magic, sizeof tmp.magic, pk->magic);
+    tmp.sniff_off = pk->sniff_off;
+    return pack_claims(&tmp, image, &scratch);
+}
+
+int absorb_pack_pick(const char *packs_dir, const char *image,
+                     absorb_pack_desc_t *out, char *why, size_t whycap)
+{
+    char dir[256];
+    absorb_plan_t plan;
+    DIR *d;
+    struct dirent *de;
+    int sniffable = 0;
+
+    if (!image || !out)
+        return -1;
+    memset(out, 0, sizeof *out);
+    memset(&plan, 0, sizeof plan);
+    if (!absorb_find_packs(packs_dir, dir, sizeof dir, &plan)) {
+        if (why && whycap)
+            snprintf(why, whycap, "%s", plan.why);
+        return -1;
+    }
+    d = opendir(dir);
+    if (!d) {
+        if (why && whycap)
+            snprintf(why, whycap, "cannot list %s", dir);
+        return -1;
+    }
+    while ((de = readdir(d)) != NULL) {
+        char sub[512];
+        pack_t pk;
+        absorb_pack_desc_t cand;
+        int m;
+
+        if (de->d_name[0] == '.')
+            continue;
+        snprintf(sub, sizeof sub, "%s/%s", dir, de->d_name);
+        (void)read_manifest(sub, &pk);      /* fills pk even when absorb = 0 */
+        if (!pk.magic[0])
+            continue;                       /* nothing to recognise it by */
+        sniffable++;
+        memset(&cand, 0, sizeof cand);
+        copy_val(cand.dir, sizeof cand.dir, pk.dir);
+        copy_val(cand.name, sizeof cand.name, pk.name);
+        copy_val(cand.magic, sizeof cand.magic, pk.magic);
+        cand.sniff_off = pk.sniff_off;
+        copy_val(cand.classify, sizeof cand.classify, pk.classify);
+        copy_val(cand.enumerate, sizeof cand.enumerate, pk.enumerate);
+        copy_val(cand.extract, sizeof cand.extract, pk.extract);
+        m = absorb_pack_matches(&cand, image);
+        if (m < 0) {
+            closedir(d);
+            if (why && whycap)
+                snprintf(why, whycap, "cannot read %s", image);
+            return -1;
+        }
+        if (m) {
+            *out = cand;
+            closedir(d);
+            return 1;
+        }
+    }
+    closedir(d);
+    if (why && whycap)
+        snprintf(why, whycap,
+                 "%s: no installed containerpack claims this image "
+                 "(%d pack(s) with a sniff magic in %s)", image, sniffable, dir);
+    return 0;
 }
 
 int absorb_probe(const char *path, const char *packs_dir, absorb_plan_t *p)

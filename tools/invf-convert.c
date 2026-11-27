@@ -68,6 +68,7 @@
 #include <linux/loop.h>
 
 #include "volume.h"
+#include "absorb.h"
 #include "invarifs.h"
 #include "vol_delta.h"
 #include "blake3.h"
@@ -429,58 +430,106 @@ static int enumerate_load(const char *path, packinfo *pi, strvec *fail)
     return 0;
 }
 
-/* The pack dir. Precedence: --pack-dir, $INVFS_CONVERT_PACK, <repo>/
- * tools/codecpacks/ext4fs.codecpack. The binary is required to EXIST: building
- * it silently would be the tool deciding which pack code is under test. */
-static int resolve_pack(const char *opt, char *dir, size_t cap, strvec *fail)
-{
-    const char *cand[3];
-    int i;
-    char bin[P_CAP];
+/* The pack, chosen the way absorb chooses one: by the image's own bytes, not by
+ * a name in this file. Precedence: --pack-dir / $INVFS_CONVERT_PACK pin a pack
+ * (and then that pack MUST claim the image -- otherwise the answer is "you asked
+ * for this pack and it does not recognise this image", not a silent fallback),
+ * else every installed pack is asked in turn.
+ *
+ * This used to be `<repo>/tools/codecpacks/ext4fs.codecpack` with `bin/ext4fs`
+ * spelled out, which is why XFS could never be converted even though its manifest
+ * declares evaluate/classify. */
+static absorb_pack_desc_t g_pack;
 
-    cand[0] = opt;
-    cand[1] = getenv("INVFS_CONVERT_PACK");
+static int resolve_pack(const char *opt, const char *image, strvec *fail)
+{
+    const char *pin = NULL;
+    char why[512];
+
+    memset(&g_pack, 0, sizeof g_pack);
+    if (opt && opt[0])
+        pin = opt;
+    else if (getenv("INVFS_CONVERT_PACK") && getenv("INVFS_CONVERT_PACK")[0])
+        pin = getenv("INVFS_CONVERT_PACK");
+    if (pin) {
+        if (absorb_pack_load(pin, &g_pack) != 1) {
+            sv_push(fail, "%s has no readable manifest; a pinned pack is a pack "
+                          "the caller chose, so a missing one is refused rather "
+                          "than replaced by the default", pin);
+            return -1;
+        }
+        if (absorb_pack_matches(&g_pack, image) != 1) {
+            sv_push(fail, "the pack at %s (%s) does not claim %s: its sniff "
+                          "magic is not where its manifest says it is. Pin a pack "
+                          "for this image, or drop --pack-dir and let the sniff "
+                          "choose", pin, g_pack.name, image);
+            return -1;
+        }
+        return 0;
+    }
     {
-        static char repocand[P_CAP];
-        jcat(repocand, sizeof repocand, g_repo, "/tools/codecpacks/ext4fs.codecpack", "");
-        cand[2] = repocand;
+        int rc = absorb_pack_pick(NULL, image, &g_pack, why, sizeof why);
+        if (rc == 1)
+            return 0;
+        if (rc < 0)
+            sv_push(fail, "%s", why);
+        else
+            sv_push(fail, "%s. install (or build) the pack whose format this "
+                          "image is, and it will be found by its sniff magic",
+                    why);
+        return -1;
     }
-    for (i = 0; i < 3; i++) {
-        if (!cand[i] || !cand[i][0]) continue;
-        jcat(bin, sizeof bin, cand[i], "/bin/ext4fs", "");
-        if (access(bin, X_OK) == 0) { snprintf(dir, cap, "%s", cand[i]); return 0; }
-    }
-    sv_push(fail, "the ext4fs pack helper is not built: expected "
-                  "<packdir>/bin/ext4fs (tried %s%s%s%s). Build it with:\n"
-                  "  cc -std=c11 -O2 -Wall -Wextra -Werror -o %s/bin/ext4fs %s/ext4fs.c",
-            cand[0] && cand[0][0] ? cand[0] : "-", cand[1] ? ", $" : "",
-            cand[1] && cand[1][0] ? "INVFS_CONVERT_PACK" : (cand[0] && cand[0][0] ? "" : ""),
-            cand[1] && cand[1][0] ? "" : (cand[0] && cand[0][0] ? "" : ", $INVFS_CONVERT_PACK or <repo>/tools/..."),
-            cand[2], cand[2]);
-    return -1;
 }
 
-/* Run one pack verb. `out` is the file the verb writes (classify/enumerate). */
-static int pack_verb(const char *packdir, const char *verb,
-                     const char *img, const char *outfile, char *log, size_t logcap)
+/* Run one pack verb. `out` is the file the verb writes (classify/enumerate).
+ *
+ * The program is the FIRST WORD of the manifest's own template for this verb, so
+ * a pack that renames its binary keeps working and this file never names one. The
+ * debug variable is derived from the pack's name (ext4fs -> EXT4FS_DEBUG,
+ * xfs -> XFS_DEBUG): a converter whose refusal says only "exit 3" has not failed
+ * loudly, it has failed quietly with a number. */
+static int pack_verb(const char *verb, const char *img, const char *outfile,
+                     char *log, size_t logcap)
 {
-    char bin[P_CAP];
+    const char *tmpl = NULL;
+    char bin[P_CAP], rel[P_CAP], dbgenv[64];
     char *argv[5];
-    int status = -1;
+    int status = -1, i;
 
-    jcat(bin, sizeof bin, packdir, "/bin/ext4fs", "");
-    /* the manifest names argv[0] as "bin/ext4fs" (a pack-relative path). The
-     * engine resolves it inside the staged pack dir; we exec the absolute
-     * path, which is the same binary the manifest points at. */
+    if (strcmp(verb, "classify") == 0)
+        tmpl = g_pack.classify;
+    else if (strcmp(verb, "enumerate") == 0)
+        tmpl = g_pack.enumerate;
+    if (!tmpl || !tmpl[0]) {
+        snprintf(log, logcap, "the pack %s declares no `%s` command in its "
+                              "manifest", g_pack.name, verb);
+        return -1;
+    }
+    for (i = 0; tmpl[i] && tmpl[i] != ' ' && tmpl[i] != '\t' && i < (int)sizeof rel - 1; i++)
+        rel[i] = tmpl[i];
+    rel[i] = 0;
+    if (!rel[0]) {
+        snprintf(log, logcap, "the pack %s has an empty `%s` command",
+                 g_pack.name, verb);
+        return -1;
+    }
+    jcat(bin, sizeof bin, g_pack.dir, "/", rel);
+    if (access(bin, X_OK) != 0) {
+        snprintf(log, logcap, "the pack %s names `%s` as its %s program and that "
+                              "file is not executable", g_pack.name, rel, verb);
+        return -1;
+    }
     argv[0] = bin;
     argv[1] = (char *)verb;
     argv[2] = (char *)img;
     argv[3] = (char *)outfile;
     argv[4] = NULL;
-    /* The pack's decline reasons are DEBUG-gated (EXT4FS_DEBUG=1, see its
-     * note()); a converter whose refusal says only "exit 3" has not failed
-     * loudly, it has failed quietly with a number. */
-    setenv("EXT4FS_DEBUG", "1", 1);
+    for (i = 0; g_pack.name[i] && i < (int)sizeof dbgenv - 8; i++)
+        dbgenv[i] = (g_pack.name[i] >= 'a' && g_pack.name[i] <= 'z')
+                    ? (char)(g_pack.name[i] - 'a' + 'A') : g_pack.name[i];
+    dbgenv[i] = 0;
+    jcat(dbgenv, sizeof dbgenv, dbgenv, "_DEBUG", "");
+    setenv(dbgenv, "1", 1);
     log[0] = 0;
     if (exec_capture(argv, log, logcap, &status) != 0) {
         snprintf(log, logcap, "cannot exec %s: %s", bin, strerror(errno));
@@ -1793,7 +1842,7 @@ int main(int argc, char **argv)
             const char *pd = NULL;
             for (i = 2; i < argc; i++)
                 if (strncmp(argv[i], "--pack-dir=", 11) == 0) pd = argv[i] + 11;
-            if (resolve_pack(pd, packdir, sizeof packdir, &fail) != 0) {
+            if (resolve_pack(pd, img, &fail) != 0) {
                 print_fails("source-map", &fail);
                 sv_free(&fail);
                 return XV_REFUSED;
@@ -1802,9 +1851,10 @@ int main(int argc, char **argv)
         snprintf(tmpl, sizeof tmpl, "/tmp/invf-convert-map.XXXXXX");
         if (!mkdtemp(tmpl)) { die("mkdtemp: %s", strerror(errno)); return XV_ERR; }
         jcat(cls, sizeof cls, tmpl, "/classify", "");
-        status = pack_verb(packdir, "classify", img, cls, log, sizeof log);
+        status = pack_verb("classify", img, cls, log, sizeof log);
         if (status != 0) {
-            sv_push(&fail, "the ext4fs pack REFUSED %s (exit %d): %s", img, status,
+            sv_push(&fail, "the %s pack REFUSED %s (exit %d): %s",
+                    g_pack.name, img, status,
                     log[0] ? log : "no reason given");
             print_fails("source-map", &fail);
             rm_rf(tmpl);
@@ -1883,7 +1933,7 @@ static int cmd_convert(int argc, char **argv)
     /* 1. the pack, and the source's byte map, BEFORE the volume exists: an
      * unsupported source must not leave a destination behind. */
     t_classify = now_s();
-    if (resolve_pack(packdir_opt, packdir, sizeof packdir, &fail) != 0) { rc = XV_REFUSED; goto out_fail; }
+    if (resolve_pack(packdir_opt, src, &fail) != 0) { rc = XV_REFUSED; goto out_fail; }
     {
         struct stat sst;
         if (stat(src, &sst) != 0) {
@@ -1917,7 +1967,7 @@ static int cmd_convert(int argc, char **argv)
     }
     jcat(clsfile, sizeof clsfile, tmpl, "/classify.gcfg", "");
     jcat(enumfile, sizeof enumfile, tmpl, "/enumerate.txt", "");
-    status = pack_verb(packdir, "classify", src, clsfile, log, sizeof log);
+    status = pack_verb("classify", src, clsfile, log, sizeof log);
     if (status != 0) {
         sv_push(&fail, "the ext4fs pack REFUSED this source (classify exit %d)%s%s",
                 status, log[0] ? ": " : "", log);
@@ -1925,7 +1975,7 @@ static int cmd_convert(int argc, char **argv)
         goto out_fail;
     }
     if (gcfg_load(clsfile, &pi, &fail) != 0) { rc = XV_REFUSED; goto out_fail; }
-    status = pack_verb(packdir, "enumerate", src, enumfile, log, sizeof log);
+    status = pack_verb("enumerate", src, enumfile, log, sizeof log);
     if (status != 0) {
         sv_push(&fail, "the ext4fs pack REFUSED this source (enumerate exit %d)%s%s",
                 status, log[0] ? ": " : "", log);

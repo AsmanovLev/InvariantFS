@@ -4591,3 +4591,47 @@ measurement of `st_ino`/`nlink`/content must be marked as a kernel-cache observa
 The three retractions share one remedy, and it is why `tools/check-literal-lengths.py`
 carries a red control and `tools/bench-opt.sh` refuses to compare variants that produce
 different results: a check has to be able to come back the other way.
+
+## invf-convert stops being an ext4-only tool (and two stale-binary traps on the way)
+
+`invf-convert` hardcoded `tools/codecpacks/ext4fs.codecpack` and `bin/ext4fs`: XFS
+could not be converted even though the xfs pack declares `sniff.magic`,
+`classify`, `enumerate` and `extract`. The resolver now lives where absorb's already
+was (`absorb.c`: `absorb_pack_load`, `absorb_pack_matches`, `absorb_pack_pick`), and
+`invf-convert` links `absorb.o` for it. Two verifiers of "which pack claims this
+image" would have drifted the way every other duplicate in this tree has.
+
+What the tool does now, measured:
+
+| image | what happens |
+|---|---|
+| ext4 (the regression case) | the ext4fs pack is found by its sniff magic, as before |
+| stock `mkfs.xfs` 512 MiB | `xfs: decline: rmapbt/reflink filesystems are not supported` — the PACK's own refusal, passed through |
+| `mkfs.xfs -m reflink=0,rmapbt=0 -i nrext64=0` | `cls: meta 67223552 garbage 469647360 (zero 469647360) member 0 entries 26` — classified |
+| a pinned pack that does not claim the image | refused by name, not silently replaced by the default |
+
+Two limits, both real and both recorded rather than worked around:
+
+1. **Modern default `mkfs.xfs` images are declined** (reflink and rmapbt are on by
+   default since xfsprogs 5.x, and `nrext64` on newer ones). That is a pack feature
+   gap, named in its refusal, not a converter bug.
+2. **An end-to-end XFS conversion cannot be tested here**: this WSL kernel has no XFS
+   driver, so the source cannot be populated and the tool cannot read members back
+   through a mount. The CI runner reports the same (`xfs classify: SKIPPED (this
+   kernel has no xfs filesystem support)`). What IS testable without a driver — pack
+   selection, sniff, classify — is what changed, and it was measured.
+
+### Two stale-binary traps, and they cost more than the feature
+
+- `tools/codecpacks/xfs.codecpack/bin/xfs` on this box was from **11-19** and contains
+  the string `classify` zero times: it predates the classify command. Two rounds of
+  "the xfs pack refuses with no reason" were measured against it. It is not tracked by
+  git, so nothing rebuilt it — the suites that need it build it themselves, and
+  anything that runs it by path gets whatever was left behind.
+- The first half of the same session was `bin/invf-orphan_test` from 11-22 against
+  today's tools, reported as a defect on a healthy volume (now fixed by rebuilding the
+  driver on every run instead of only when absent).
+
+Rule that would have caught both: **anything executed by path in a test or a tool must
+be built by that run**, and a pack binary committed to a working tree is a stale
+binary waiting to be believed.

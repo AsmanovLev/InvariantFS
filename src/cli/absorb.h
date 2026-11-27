@@ -55,6 +55,35 @@ typedef struct {
     char     why[256];                         /* refusal reason, "" when fine */
 } absorb_plan_t;
 
+/* One containerpack that declares itself a filesystem, as the converter needs
+ * it: the sniff magic to recognise an image by, and the manifest's own command
+ * lines to ask for the map and the members. NOTHING here names ext4 or xfs --
+ * that was the whole point of moving it out of invf-convert. */
+typedef struct {
+    char     dir[256];                 /* the pack directory */
+    char     name[64];                 /* manifest `name` */
+    char     magic[64];                /* `sniff.magic`, hex, no 0x */
+    unsigned long long sniff_off;      /* `sniff.offset`, default 0 */
+    char     classify[512];            /* `classify`  template */
+    char     enumerate[512];           /* `enumerate` template */
+    char     extract[512];             /* `extract`   template */
+} absorb_pack_desc_t;
+
+/* 1 = this pack's sniff magic is where the manifest says it is, 0 = not,
+ * -1 = the image could not be read. */
+int absorb_pack_matches(const absorb_pack_desc_t *pk, const char *image);
+
+/* Read ONE pack directory's manifest into *out. Returns 1 when it parsed, 0 when
+ * the directory has no readable manifest. Used when the caller pinned a pack and
+ * therefore must be told about THAT pack, not about whichever one would be picked. */
+int absorb_pack_load(const char *packdir, absorb_pack_desc_t *out);
+
+/* Pick the installed pack that claims `image`. `packs_dir` may be NULL for the
+ * repository default. Returns 1 with *out filled, 0 when nothing claims the
+ * image (why filled by name), -1 on error. */
+int absorb_pack_pick(const char *packs_dir, const char *image,
+                     absorb_pack_desc_t *out, char *why, size_t whycap);
+
 /* Fill `pack_dir` from an explicit path, $INVFS_PACKS, or the repo's
  * tools/codecpacks. Returns 1 = found, 0 = not (why filled). */
 int absorb_find_packs(const char *explicit_dir, char *out, size_t cap,
