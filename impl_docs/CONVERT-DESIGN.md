@@ -257,8 +257,24 @@ Proved by `tools/test-convert-ext4.sh` today (all legs green, 7 s wall):
   exit 1;
 * refusals are loud and leave nothing behind: ext2, an unknown RO_COMPAT
   feature, and a `!` name each exit 3 with the reason and no destination file;
-* a real 2.5 GiB rootfs converts and verifies IDENTICAL (702 s / 176 s,
-  p50 0.86 ms, p95 1.42 ms per file).
+* a real 2.5 GiB rootfs converts and verifies IDENTICAL. Measured twice, which
+  is also the fold A/B (§9 question 4):
+
+  | | no folding (`--fold-every=0`) | folding every 8192 files (default) |
+  |---|---|---|
+  | convert, total | 702 s | **845 s** |
+  | — of which import | 691 s | 826 s (includes 8 folds) |
+  | delta left on the volume | 179 299 records / 32 MiB | **0 records** |
+  | `invf-fsck` on the result | `fold: FAILED … at #72794 of 179299` | OK |
+  | volume free after | 5 882 of 660 193 blocks (23 MiB) | 497 905 of 746 048 blocks (1.90 GiB) |
+  | verify, total | 176 s | 275 s |
+  | verify per file | p50 0.86 ms, p95 1.42 ms | p50 1.28 ms, p95 2.17 ms |
+  | DIFFS | 0 (IDENTICAL) | **0 (IDENTICAL)** |
+
+  So folding costs ~20 % of the import and is the difference between a volume
+  that can be compacted and one that cannot; the per-file verification cost is
+  dominated by reading 1.40 GiB twice through a loop mount and a FUSE mount
+  (p99 4.84 ms, max 1 051 ms — the 117 MiB kernel image).
 
 Not proved, and out of phase 0's reach: nothing above touches the source's own
 blocks, so **no crash-matrix row has been tested yet** — the fault-injection knob
