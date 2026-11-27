@@ -14,7 +14,13 @@
 #include <string.h>
 
 #ifndef INVFS_VERSION_STRING
-#define INVFS_VERSION_STRING "v0.7.0"
+/* Bumped AFTER the tag, never before it: packaging derives the version from
+ * `git describe` and from this fallback, and the two disagreeing breaks the
+ * package build in a way that reads like a missing directory
+ * (measured: PKGBUILD looked for invfs-v0.6.12-x86_64 while the tree was
+ * already v0.7.0). A tagged tree reports the tag through git describe; this
+ * fallback only matters for a tarball built without .git. */
+#define INVFS_VERSION_STRING "v0.6.12"
 #endif
 #ifndef INVFS_BUILD_DATE
 #define INVFS_BUILD_DATE "2026-11-02"
