@@ -4381,10 +4381,22 @@ stale binaries: five fresh volumes, five times, deterministic —
     $ invf-orphan_test verify r.img 40       # VERIFY OK files=40 byte-identical
     $ invf-fsck r.img                        # DAMAGED (namespace walk failed)
 
-So the name→inode rows are there and the real read path serves them, while the
-root inode row and the dirents are absent: the namespace walk has nothing to walk
-from, `vol_nlink_audit` returns -1, and `fsck` says DAMAGED — correctly, given an
-unreachable namespace.
+**Correction, measured before acting on it: `absent id=1` is NORMAL here.** A
+healthy volume built by `invf-mkfs` + `invf-cp` also answers `absent id=1` -- the
+root is not stored as a row in this format -- while its `invf-ls` lists the file,
+its fsck says OK and its nlink audit says OK. So the root row's absence is not the
+defect and must not be "fixed".
+
+The defect is narrower and sharper: on the driver's volume the **root DIRECTORY
+block does not read back** --
+
+    invf-ls r.img    ->  cannot list /: Input/output error
+
+while the name index still resolves names (`invf-cat f0` serves 199 bytes) and fsck
+reports `pages walked: 8, bad pages: 0, torn slots: 0` yet DAMAGED, because
+`vol_nlink_audit` needs a directory it cannot read. So a *dirent* page is torn or
+freed while every inode row it points at is intact -- and the name index, which is
+a different key space, keeps working, which is exactly why this is silent.
 
 **The CI job on the same commit passes that leg** (`fsck OK after collect`, run
 772). The difference between the two environments that matters here:
