@@ -224,6 +224,8 @@ jobs:
       - uses: actions/checkout@v7
       - name: repo hygiene
         run: bash tools/check-repo-hygiene.sh
+      - name: literal-length audit (its own red control must fire)
+        run: python3 tools/check-literal-lengths.py src
       - name: man page syntax (EN+RU)
         run: |
           command -v groff >/dev/null || sudo apt-get install -y -qq groff
@@ -279,6 +281,8 @@ jobs:
 
       - name: repo hygiene
         run: bash tools/check-repo-hygiene.sh
+      - name: literal-length audit (its own red control must fire)
+        run: python3 tools/check-literal-lengths.py src
 
       # Unit tests: the four make-test shards in parallel on the one
       # machine (`make -j4 test` fans the shard targets out; each command
@@ -410,6 +414,8 @@ jobs:
 
       - name: repo hygiene
         run: bash tools/check-repo-hygiene.sh
+      - name: literal-length audit (its own red control must fire)
+        run: python3 tools/check-literal-lengths.py src
 
       - name: build with ThreadSanitizer
         run: |

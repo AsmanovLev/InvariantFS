@@ -4543,3 +4543,20 @@ rows: the driver creates 60 generation inodes in a synthetic high id range, they
 unreachable by name by construction, and the audit reports them as `orphan-row`
 while its verdict stays OK. ASan and UBSan on the audit path report nothing. So the
 only thing wrong there was my reading of the number.
+
+### Sibling sweep for the vol_spt0 shape: one site, zero left, and a checker that can fail
+
+Before moving on from the `vol_spt0` defect, the obvious question is whether the same
+shape exists elsewhere: a `memcmp`/`strncmp` against a string literal that is
+SHORTER than the length being compared. Two independent answers, both mechanical:
+
+- a one-off scan of `src/` found **no** other site (the fixed one was the only one);
+- `tools/check-literal-lengths.py` now does that scan on every hygiene run, and it
+  carries a **red control**: each run first feeds itself the known-bad snippet and
+  requires a hit, exiting 3 if the control ever stops firing. An audit that reports
+  zero without proving it can report one is the same defect one level up — the
+  reason the recipe-blob claim had to be retracted today is that nobody had made it
+  able to come back negative.
+
+Wired into `make check-hygiene` and into the three CI hygiene steps, so the shape
+cannot come back quietly.

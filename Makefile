@@ -1691,7 +1691,15 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check plugin-so
 
 
 # repo hygiene is also a standalone gate, for when you do not want a rebuild
-check-hygiene:
+# The vol_spt0 defect class (2026-11-27): a comparison against a string literal
+# that is SHORTER than the length compared, so the answer comes from whatever
+# .rodata follows and depends on the link layout. It was invisible in review and
+# flipped between builds; the checker carries its own red control and exits 3 if
+# that control ever stops firing.
+check-literals:
+	python3 tools/check-literal-lengths.py $(SRC)
+
+check-hygiene: check-literals
 	$(TESTENV) bash tools/check-repo-hygiene.sh
 
 # WP112: vendored-codecpack / registry drift, strict (no registry = fail).
