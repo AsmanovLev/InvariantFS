@@ -144,7 +144,9 @@ PY
     head -c 3145728 /dev/urandom > "$T/tree/mega.bin"
     # empty file
     : > "$T/tree/empty.bin"
-    # sparse: 8 MiB logical, 3 bytes written in the middle
+    # sparse: 8 MiB logical, 3 bytes written in the middle, plus a file that is
+    # ALL hole (st_blocks == 0) -- the case where the recipe names no segment at
+    # all and the read path has to answer zeros from the logical size alone
     python3 - "$T" <<'PY'
 import sys
 p = sys.argv[1] + "/tree/sparse.bin"
@@ -152,6 +154,8 @@ with open(p, "wb") as f:
     f.truncate(8 * 1024 * 1024)
     f.seek(4 * 1024 * 1024)
     f.write(b"mid")
+with open(sys.argv[1] + "/tree/allhole.bin", "wb") as f:
+    f.truncate(4 * 1024 * 1024)
 PY
     # non-ASCII name (UTF-8 bytes the volume must carry verbatim)
     printf 'non-ascii\n' > "$T/tree/файл-ü-ß.txt"
@@ -306,6 +310,45 @@ for c in directories "regular files" symlinks specials; do
     [ "$s" -gt 0 ] || fail "$c: nothing of that type in the corpus"
 done
 pass "every class has the same count on both sides"
+
+# SPARSENESS is preserved, and it is measured rather than assumed: the engine's
+# write session allocates only the segments it touches and vol_write_truncate()
+# sets the logical size, so a hole reads back as zeros (build/sparse_probe.c).
+# The report separates logical from written bytes, and the dense control leg
+# below has to write the whole thing.
+sparse_line=$(grep -E "^              [0-9]+ B logical, [0-9]+ B written" "$CONVLOG")
+[ -n "$sparse_line" ] || fail "the report has no logical/written/holes line"
+# the line is "<n> B logical, <n> B written, <n> B in holes (<n> sparse
+# file(s)), ..." -- no colon, so strip the leading indent rather than anchoring
+# on punctuation.
+logical=$(echo "$sparse_line" | sed 's/^[^0-9]*\([0-9]*\) B logical.*/\1/')
+written=$(echo "$sparse_line" | sed 's/.*logical, \([0-9]*\) B written.*/\1/')
+holes=$(echo "$sparse_line" | sed 's/.*written, \([0-9]*\) B in holes.*/\1/')
+sparse_n=$(echo "$sparse_line" | sed 's/.*(\([0-9]*\) sparse file(s)).*/\1/')
+[ "$sparse_n" -ge 2 ] || fail "expected at least 2 sparse files, got $sparse_n"
+# 8 MiB sparse (one data block) + 4 MiB all-hole = 12 MiB logical, of which one
+# 1024-byte run is data, so the holes are ~8 MiB; allow a block of slack.
+[ "$holes" -ge $((8 * 1024 * 1024 - 65536)) ] || fail "holes ($holes B) do not cover the sparse files"
+[ $((written + holes)) -le "$logical" ] || fail "written+holes ($((written+holes))) > logical ($logical)"
+pass "sparse: $sparse_n file(s), $holes B of $logical B left as holes ($written B written)"
+
+DENSELOG=$W/convert-dense.log
+set +e
+sudo -n "$CONVERT" convert --dense src.ext4 dst-dense.img >"$DENSELOG" 2>&1
+dense_rc=$?
+set -e
+[ "$dense_rc" = 0 ] || { cat "$DENSELOG"; fail "--dense convert exited $dense_rc"; }
+dense_line=$(grep -E "^              [0-9]+ B logical, [0-9]+ B written" "$DENSELOG")
+d_written=$(echo "$dense_line" | sed 's/.*logical, \([0-9]*\) B written.*/\1/')
+d_holes=$(echo "$dense_line" | sed 's/.*written, \([0-9]*\) B in holes.*/\1/')
+[ "$d_holes" = 0 ] || fail "--dense reported $d_holes B in holes"
+[ "$d_written" -gt "$written" ] || fail "--dense wrote $d_written B, sparse wrote $written B: no difference"
+set +e
+sudo -n "$CONVERT" verify src.ext4 dst-dense.img >"$W/verify-dense.log" 2>&1
+dense_v_rc=$?
+set -e
+[ "$dense_v_rc" = 0 ] || { cat "$W/verify-dense.log"; fail "--dense volume did not verify"; }
+pass "--dense control: $d_written B written vs $written B (sparse), both verify IDENTICAL"
 
 # nanosecond mtimes must survive the round trip: `stat` through the mount is
 # the only place a user can see them, and it is what the engine promises. The

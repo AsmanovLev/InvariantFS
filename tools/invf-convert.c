@@ -984,6 +984,26 @@ static void imp_xattrs(const char *sp, const char *vn)
  * ordering: the commit carries the created row, set_meta decides mode/owner/
  * times). Whole-file buffering is what invf-import does; a rootfs has 100 MiB
  * files, and the session path costs O(segments) metadata, no file data. */
+/* Does this source honour SEEK_DATA/SEEK_HOLE? Decided ONCE, before the first
+ * file, because the answer must not change halfway through a session: a
+ * fallback after some ranges were written would rewrite them (harmless but
+ * confusing) and the counters would stop meaning anything. ext4 does support
+ * it; a fuse or network source may not. */
+static int g_seek_data = -1;
+static int g_dense = 0;              /* --dense: never skip holes */
+static unsigned long long g_written_bytes, g_hole_bytes, g_sparse_files;
+
+static int seek_data_supported(const char *sp)
+{
+    int fd = open(sp, O_RDONLY);
+    off_t r;
+    if (fd < 0) return 0;
+    r = lseek(fd, 0, SEEK_DATA);
+    close(fd);
+    if (r >= 0) return 1;
+    return !(errno == EINVAL || errno == ENOTSUP || errno == EOPNOTSUPP);
+}
+
 static void imp_file(const char *sp, const char *vn, const struct stat *st)
 {
     invfs_meta_pub m;
@@ -991,6 +1011,7 @@ static void imp_file(const char *sp, const char *vn, const struct stat *st)
     invfs_wsession *ws = NULL;
     int fd = -1;
     uint64_t off = 0;
+    int sparse = 0;
 
     meta_of(&m, st);
     if ((uint64_t)st->st_size > MAX_FILE_SIZE) {
@@ -1016,29 +1037,87 @@ static void imp_file(const char *sp, const char *vn, const struct stat *st)
         }
         buf = (uint8_t *)malloc(CHUNK);
         if (!buf) { vol_write_abort(ws); close(fd); sv_push(g_fail, "%s: out of memory", sp); return; }
+        /* A source file whose allocated blocks are smaller than its logical
+         * size has HOLES, and the engine models them: a write session only
+         * allocates the segments it touches, and vol_write_truncate() sets the
+         * logical size, so the untouched remainder reads back as zeros
+         * (measured with build/sparse_probe.c: 8 MiB logical with 3 bytes at
+         * 4 MiB, and a 4 MiB file that is nothing but hole). Writing the holes
+         * out instead is not a space problem -- LZ4 turns a MiB of zeros into
+         * a rounding error -- it is a READ problem: every read of such a file
+         * then decodes megabytes that were never there. So: walk the data
+         * extents and write only those. */
+        if (g_seek_data < 0)
+            g_seek_data = seek_data_supported(sp);
+        sparse = (!g_dense && g_seek_data &&
+                  (uint64_t)st->st_blocks * 512ull < (uint64_t)st->st_size);
         for (;;) {
-            size_t want = (uint64_t)(st->st_size - (off_t)off) < CHUNK
-                        ? (size_t)(st->st_size - (off_t)off) : CHUNK;
-            size_t got = 0;
-            while (got < want) {
-                ssize_t r = read(fd, buf + got, want - got);
-                if (r < 0) {
-                    if (errno == EINTR) continue;
-                    sv_push(g_fail, "%s: read at %llu: %s", sp,
-                            (unsigned long long)(off + got), strerror(errno));
+            off_t data = (off_t)off, hole;
+            size_t want;
+            if (sparse) {
+                data = lseek(fd, (off_t)off, SEEK_DATA);
+                if (data < 0) {
+                    if (errno == ENXIO) break;   /* the rest is hole */
+                    sv_push(g_fail, "%s: SEEK_DATA at %llu: %s", sp,
+                            (unsigned long long)off, strerror(errno));
                     goto abort;
                 }
-                if (r == 0) break;
-                got += (size_t)r;
+                hole = lseek(fd, data, SEEK_HOLE);
+                if (hole < 0) {
+                    sv_push(g_fail, "%s: SEEK_HOLE at %llu: %s", sp,
+                            (unsigned long long)data, strerror(errno));
+                    goto abort;
+                }
+                if (hole > (off_t)st->st_size) hole = (off_t)st->st_size;
+                off = (uint64_t)data;
+            } else {
+                hole = (off_t)st->st_size;
             }
-            if (got == 0) break;         /* the source shrank under us */
-            if (vol_write_range(ws, off, buf, got) != 0) {
-                sv_push(g_fail, "%s: the volume refused %zu bytes at offset %llu "
-                                "(ENOSPC?)", sp, got, (unsigned long long)off);
+            while ((off_t)off < hole) {
+                want = (uint64_t)(hole - (off_t)off) < CHUNK
+                     ? (size_t)(hole - (off_t)off) : CHUNK;
+                {
+                    size_t got = 0;
+                    while (got < want) {
+                        ssize_t r;
+                        if (lseek(fd, (off_t)(off + got), SEEK_SET) < 0) {
+                            sv_push(g_fail, "%s: lseek to %llu: %s", sp,
+                                    (unsigned long long)(off + got), strerror(errno));
+                            goto abort;
+                        }
+                        r = read(fd, buf + got, want - got);
+                        if (r < 0) {
+                            if (errno == EINTR) continue;
+                            sv_push(g_fail, "%s: read at %llu: %s", sp,
+                                    (unsigned long long)(off + got), strerror(errno));
+                            goto abort;
+                        }
+                        if (r == 0) break;
+                        got += (size_t)r;
+                    }
+                    if (got == 0) break;       /* the source shrank under us */
+                    if (vol_write_range(ws, off, buf, got) != 0) {
+                        sv_push(g_fail, "%s: the volume refused %zu bytes at offset "
+                                        "%llu (ENOSPC?)", sp, got,
+                                (unsigned long long)off);
+                        goto abort;
+                    }
+                    off += got;
+                    g_written_bytes += got;
+                    if (got < want) break;
+                }
+            }
+            if (!sparse) break;
+            if (off >= (uint64_t)st->st_size) break;
+        }
+        /* The logical size, which is what makes the skipped ranges readable:
+         * commit re-encodes the unaligned tail against it. */
+        if ((uint64_t)st->st_size != off || off == 0) {
+            if (vol_write_truncate(ws, (uint64_t)st->st_size) != 0) {
+                sv_push(g_fail, "%s: the volume refused to set the logical size "
+                                "(%llu bytes)", sp, (unsigned long long)st->st_size);
                 goto abort;
             }
-            off += got;
-            if (got < want) break;
         }
         if (vol_write_commit(ws) != 0) {
             /* commit failed: the session is dead (abort is still the owner) */
@@ -1046,10 +1125,10 @@ static void imp_file(const char *sp, const char *vn, const struct stat *st)
             vol_write_abort(ws);
             goto out;
         }
-        if (off != (uint64_t)st->st_size)
-            sv_push(g_fail, "%s: imported %llu of %llu bytes (the source changed "
-                            "during the copy)", sp, (unsigned long long)off,
-                    (unsigned long long)st->st_size);
+        if (sparse) {
+            g_sparse_files++;
+            g_hole_bytes += (unsigned long long)st->st_size - off;
+        }
         close(fd); fd = -1;
         free(buf); buf = NULL;
     }
@@ -1663,6 +1742,9 @@ static void usage(FILE *f, const char *me)
 "                     default; rootfs imports want 16 per AGENTS.md 2.7)\n"
 "  --fold-every=N     fold the delta every N created files (default 8192;\n"
 "                     0 = never, which leaves the whole import in the delta log\n"
+"  --dense            write holes out as zeros instead of leaving them holes\n"
+"                     (the control leg for the sparse path; costs read\n"
+"                     amplification, not space -- LZ4 makes zeros nearly free)\n"
 "  --keep-partial     keep the destination image when the run fails\n"
 "  --no-gates         skip invf-fsck / invf-verify --deep\n"
 "  --mount-root=DIR   where the loop / fuse mounts are created (default\n"
@@ -1784,6 +1866,7 @@ static int cmd_convert(int argc, char **argv)
         else if (strncmp(argv[i], "--meta-frac=", 12) == 0) meta_frac = atoi(argv[i] + 12);
         else if (strncmp(argv[i], "--mount-root=", 13) == 0) mount_root_opt = argv[i] + 13;
         else if (strncmp(argv[i], "--fold-every=", 13) == 0) g_fold_every = (unsigned)atoi(argv[i] + 13);
+        else if (strcmp(argv[i], "--dense") == 0) g_dense = 1;
         else if (strcmp(argv[i], "--keep-partial") == 0) keep_partial = 1;
         else if (strcmp(argv[i], "--no-gates") == 0) gates = 0;
         else if (argv[i][0] == '-') { die("unknown option %s", argv[i]); return XV_ERR; }
@@ -1999,8 +2082,10 @@ static int cmd_convert(int argc, char **argv)
                "%llu symlinks, %llu specials\n",
                g_st.dirs, g_st.files, g_st.hardlink_names, g_st.hardlink_inodes,
                g_st.links, g_st.specials);
-        printf("              %llu B of content, largest file %s\n",
-               g_st.content_bytes, human((double)g_st.max_file, b1, sizeof b1));
+        printf("              %llu B logical, %llu B written, %llu B in holes "
+               "(%llu sparse file(s)), largest file %s\n",
+               g_st.content_bytes, g_written_bytes, g_hole_bytes, g_sparse_files,
+               human((double)g_st.max_file, b1, sizeof b1));
         printf("              %llu xattr name(s) / %llu B\n", g_st.xattr_names, g_st.xattr_bytes);
         printf("pack oracle : %llu member inode(s) / %llu B enumerated; tree carried %llu "
                "unique inode(s) / %llu B",
