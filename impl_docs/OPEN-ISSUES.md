@@ -1654,37 +1654,37 @@ Until one of them lands, `invf-absorb publish` produces a file that is exact on
 what the map called allocated and does NOT mount: `mkfs --absorb` stays
 plan-only, which is why that refusal exists.
 
-### Where the journal fix goes, and the trap that stopped it here (2026-11-27)
+### FIXED: what the journal fix was, and the trap it had to go around (2026-11-27)
 
-The two ways out above are the decision; this is the map, because the attempt made
-in this session got one step from working and the step is not obvious.
+The map above is kept because the trap is general: the extent walk's depth-0 branch
+collects only extents lying BELOW `w->m->usize`, so handing it a zeroed `member_t`
+collects ZERO extents and still returns success. That is how the first attempt
+produced a byte-identical table with no warning.
 
-Reserved inodes are read by nobody: `scan_inodes` starts at `s_first_ino`, so the
-journal (inode 8) is correctly excluded from MEMBERS and, as a side effect, never
-enters the `fs->meta` interval proof. The fix is to walk them and add their
-extents, which needs three things in the pack:
+The fix in `ext4fs.codecpack` does not use `member_t` at all. It walks inodes 1..10
+with a `to_meta` flag: every block a reserved inode names is structure, written or
+not. Two things came out of doing it that way:
 
-1. `read_inode(fs, ino, ib)` for `ino < fs->first_ino` while the inode bitmap
-   says used (1..10 are mostly empty slots, so the mode check is the filter);
-2. `walk_inode_extents(fs, &w, ib)` with a `member_t` context;
-3. **`m.usize` must be set to something larger than the inode**, because the
-   depth-0 branch only collects extents whose logical range is BELOW
-   `w->m->usize`:
+- the walk stops at 11 regardless of what `s_first_ino` claims, because a
+  hand-edited superblock asserting a larger first inode would turn "reserved" into
+  one read per inode over millions of them, for no new structure;
+- inode 7 (resize) counts as well as inode 8 (journal): both were garbage before.
 
-   ```
-   if (lo < w->m->usize) { ... mext_push(w->m, lo, phys*bs, chi - lo) ... }
-   ```
+Acceptance, and it is now a suite (`tools/test-absorb-ext4.sh`, in `e2e`): two
+fixtures, 1 KiB and 4 KiB blocks, offline (no FUSE, no root, no loop). `e2fsck -fn`
+must open the absorbed image for both, a RED leg zeroes the journal and demands
+e2fsck refuse it, and every block the map calls garbage must read zero in the
+SOURCE -- if that last assertion ever fails, the map is dropping real bytes rather
+than optimizing.
 
-   With `memset(&m, 0, ...)` that is zero, so the walk collects ZERO extents and
-   returns success -- measured as `extents=0 rc=0` for inode 8, and the table
-   comes out byte-identical to before. Nothing declines, nothing warns: the
-   collection is silently empty, which is exactly the failure mode this pack's
-   own header is written to avoid.
+A second defect surfaced while writing it, in `absorb.c`, and it is the same class:
+`nblk = (len + 4095) / 4096` took the count from the range's own length after
+rounding the start block DOWN, so the tail of every non-4096-aligned range stayed
+unreserved -- that is every range of a `mkfs.ext4` default (1 KiB) image. The
+orphan file's last logical block sat in a 4096-block whose first 3 KiB were
+garbage, and the published `old.ext4` read zeros there.
 
-The attempt in this session wired 1 and 2 and died on 3, then was reverted rather
-than left half-applied: the pack is back to its committed state, so the next
-change starts from a clean `git diff`. Wiring it is ~40 lines, needs the
-`[dbg] extents=` print to confirm non-zero, and then the acceptance is a single
-command -- `e2fsck -fn` on the absorbed image must open it (today: "Superblock has
-an invalid journal (inode 8)"). `XFS_MAYBE_UNUSED`-style care applies: the pack
-also builds as `libext4fs.so` under `-Werror`.
+Measured on a 128 MiB / 1 KiB image: reserved bytes 10 782 600 -> 16 550 792
+(+4 MiB journal, + the resize inode's written extents), the journal's first block
+moves cls 1 -> cls 0, and the suite reports "0 garbage block(s) held non-zero bytes
+in the source, dropped".
