@@ -303,6 +303,7 @@ def main():
     # ---- 3. garbage ⊆ free, member ∩ free == 0, per-AG completeness -----
     garbage_blocks = [0] * agcount
     nbad = 0
+    notfree = []                    # garbage blocks the oracle does not call free
     for o, l, c, f, r in ents:
         b0 = o // bs
         b1 = (o + l - 1) // bs
@@ -312,12 +313,8 @@ def main():
                 if b < dblocks:
                     ag = min(b // agblocks, agcount - 1)
                     garbage_blocks[ag] += 1
-                if not free_b:
-                    nbad += 1
-                    if nbad <= 8:
-                        fail("garbage block %d (AG %d block %d) is NOT in any "
-                             "free extent the by-block btree reports"
-                             % (b, b // agblocks, b % agblocks))
+                if b < dblocks and not free_b:
+                    notfree.append(b)
             elif c == GCFG_CLS_MEMBER:
                 if free_b:
                     nbad += 1
@@ -325,20 +322,39 @@ def main():
                         fail("member block %d (AG %d block %d) is FREE"
                              % (b, b // agblocks, b % agblocks))
     if nbad > 8:
-        fail("... %d garbage/member blocks in total disagree with the oracle"
-             % nbad)
-    if garbage_blocks != per_ag_free:
+        fail("... %d member blocks in total are free space" % nbad)
+    # A garbage block the oracle does not call free is only legitimate as an
+    # unwritten extent (free by construction: unwritten, no logical content,
+    # kept out of the member partition), and the fixture declares how many
+    # blocks that is. Anything else is the failure this suite exists to catch.
+    if not extra and notfree:
+        for b in notfree[:8]:
+            fail("garbage block %d (AG %d block %d) is NOT in any free extent "
+                 "the by-block btree reports" % (b, b // agblocks, b % agblocks))
+        if len(notfree) > 8:
+            fail("... %d garbage blocks in total are not free space"
+                 % len(notfree))
+    if extra and len(notfree) != extra:
+        for b in notfree[:8]:
+            fail("garbage block %d (AG %d block %d) is neither free space nor "
+                 "part of the %d-block unwritten extent"
+                 % (b, b // agblocks, b % agblocks, extra))
+        fail("garbage blocks outside the free set: %d, expected exactly the "
+             "%d-block unwritten extent" % (len(notfree), extra))
+    # The per-AG completeness equality only holds when the garbage set IS the
+    # free set; with an unwritten extent in the fixture it is free + that run.
+    if not extra and garbage_blocks != per_ag_free:
         fail("garbage set is not complete: per-AG garbage blocks %s, the "
              "oracle's free space %s (difference %s)"
              % (garbage_blocks, per_ag_free,
                 [a - b for a, b in zip(garbage_blocks, per_ag_free)]))
     if extra:
         if sum(garbage_blocks) != sum(per_ag_free) + extra:
-            fail("garbage blocks %d != free %d + %d expected extra (unwritten "
-                 "extents/padding)" % (sum(garbage_blocks), sum(per_ag_free),
-                                       extra))
-        print("  garbage == free + %d unwritten-extent blocks: %d blocks"
-              % (extra, sum(garbage_blocks)))
+            fail("garbage blocks %d != free %d + %d unwritten"
+                 % (sum(garbage_blocks), sum(per_ag_free), extra))
+        print("  garbage == free (%d) + the %d-block unwritten extent, and the "
+              "%d blocks outside the free set are exactly that extent"
+              % (sum(per_ag_free), extra, len(notfree)))
     else:
         print("  garbage set: %d blocks, == the oracle's per-AG free space: %s"
               % (sum(garbage_blocks), garbage_blocks))
@@ -491,6 +507,10 @@ PY
 
 # ---- fixture plumbing ----------------------------------------------------
 IMGS=()
+# an unwritten extent that every populated fixture carries: 512 blocks, so the
+# garbage set must exceed the free space by exactly 512 blocks (checked below).
+UNWRITTEN_BYTES=$((512 * 4096))
+UNWRITTEN_BLOCKS=512
 
 # populate_img <mountpoint>: a varied tree, synced, part of it then deleted.
 populate_img() {
@@ -508,6 +528,12 @@ populate_img() {
     for i in $(seq 1 24); do
         head -c $((i * 4096)) /dev/urandom > "$m/tree/t$i.bin"
     done
+    # An UNWRITTEN extent (fallocate): the member reads zeros, the disk bytes are
+    # undefined, and the pack keeps them in the recipe -- so the classifier must
+    # call them garbage without calling them zero-verified unless they are. This
+    # is the one thing that makes the garbage set larger than the free space.
+    fallocate -l "$UNWRITTEN_BYTES" "$m/unwritten.bin" 2>/dev/null \
+        || dd if=/dev/zero of="$m/unwritten.bin" bs=4096 count=0 2>/dev/null
     sync
     # Sync BEFORE the deletes: measured here, a file created and removed inside
     # one dirty window never reaches the disk, so its blocks would read back as
@@ -609,7 +635,7 @@ MAIN=$IMG
 note "mkfs: $(tr '\n' ' ' < "$WORK/out/v5-crc1-bigtime1-sparse1.mkfs" | sed 's/  */ /g' | cut -c1-160)"
 note "geometry: $(geom "$IMG")"
 classify_ok "$IMG" v5-crc1-bigtime1-sparse1
-check "$IMG" v5-crc1-bigtime1-sparse1 --expect-nonzero
+check "$IMG" v5-crc1-bigtime1-sparse1 --expect-nonzero \n    --extra-garbage-blocks "$UNWRITTEN_BLOCKS"
 
 say "== the zero_verified flag tracks the BYTES, not the btree =="
 read -r PBLK POFF PLEN < <(python3 "$WORK/gcfg_poke.py" "$IMG" \
@@ -676,7 +702,7 @@ mkimg v5-sparse0 320M --populate \
     -m crc=1,bigtime=1,finobt=1,inobtcount=1,reflink=0,rmapbt=0 \
     -i sparse=0,size=512,nrext64=0,exchange=0 -n ftype=1,parent=0
 classify_ok "$IMG" v5-sparse0
-check "$IMG" v5-sparse0 --expect-nonzero
+check "$IMG" v5-sparse0 --expect-nonzero \n    --extra-garbage-blocks "$UNWRITTEN_BLOCKS"
 
 # ---- 3. agcount=2 -------------------------------------------------------
 say "== fixture 3: v5 -d agcount=2 =="
@@ -684,7 +710,7 @@ mkimg v5-agcount2 320M --populate \
     -d agcount=2 -m crc=1,bigtime=1,finobt=1,inobtcount=1,reflink=0,rmapbt=0 \
     -i sparse=1,size=512,nrext64=0,exchange=0 -n ftype=1,parent=0
 classify_ok "$IMG" v5-agcount2
-check "$IMG" v5-agcount2 --expect-nonzero
+check "$IMG" v5-agcount2 --expect-nonzero \n    --extra-garbage-blocks "$UNWRITTEN_BLOCKS"
 
 # ---- 4. v4 (crc=0, 256 B inodes) ---------------------------------------
 say "== fixture 4: v4 -m crc=0 -i size=256 (v4 btree magics) =="
@@ -738,7 +764,7 @@ if mkfs.xfs -q -f -s size=4096 \
         LODEV=""
         note "geometry: $(geom "$IMG5")"
         classify_ok "$IMG5" v5-sect4096
-        check "$IMG5" v5-sect4096 --expect-nonzero
+        check "$IMG5" v5-sect4096 --expect-nonzero \n            --extra-garbage-blocks "$UNWRITTEN_BLOCKS"
     else
         [ -n "$LODEV" ] && { sudo losetup -d "$LODEV"; LODEV=""; }
         say "  NOTE: skipping the 4096-byte-sector leg -- this kernel refused to"
@@ -760,6 +786,22 @@ mkimg v5-empty 320M \
     -i sparse=1,size=512,nrext64=0,exchange=0 -n ftype=1,parent=0
 classify_ok "$IMG" v5-empty
 check "$IMG" v5-empty
+
+# ---- 6b. padding past sb_dblocks, and an image SHORTER than the fs ------
+# An image file may be larger than the filesystem it holds; those bytes belong
+# to nobody, so they are garbage. And an image shorter than sb_dblocks is a
+# contradiction: the pack must refuse rather than classify the part it can see.
+say "== a truncated and a padded copy of the empty image =="
+cp --sparse=always "$IMG" "$WORK/img/padded.img"
+IMGS+=("$WORK/img/padded.img")
+truncate -s $((320 * 1024 * 1024 + 8192)) "$WORK/img/padded.img"
+classify_ok "$WORK/img/padded.img" v5-padded
+note "the 8192 bytes past sb_dblocks must be garbage, and they are:"
+check "$WORK/img/padded.img" v5-padded
+cp --sparse=always "$IMG" "$WORK/img/short.img"
+IMGS+=("$WORK/img/short.img")
+truncate -s $((320 * 1024 * 1024 - 1024 * 1024)) "$WORK/img/short.img"
+refuse "$WORK/img/short.img" short 'exceeds the image size|dblocks'
 
 # ---- 7. refusals -------------------------------------------------------
 say "== refusals: non-zero exit, no table =="
