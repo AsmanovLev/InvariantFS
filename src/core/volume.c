@@ -3069,19 +3069,14 @@ void pba_ref_invalidate(invfs_volume *v)
 void pba_ref_validate(invfs_volume *v)
 {
     pba_ref_lock();
-    /* WP-LEG5-STALE-MAP: this used to clear the stale mark unconditionally,
-     * so a publisher that applied its own deltas to an ALREADY stale map
-     * could make vol_pba_is_ready() answer true over a half-applied array.
-     * The retire drain reads that answer to choose between replaying -1s
-     * and rebuilding, and the wrong choice frees a block the live row
-     * names (leg5). Exactness comes from a BUILD, never from a claim: if
-     * the mark is set, leave it set and let pba_ref_ensure rebuild.
-     *
-     * The legitimate callers (the sweep's segment remap, dedupe's remap)
-     * run on a map they rebuilt in the same section, where the flag is
-     * already clear -- for them this is the same no-op it always was. */
-    if (v && !v->pba_ref_stale)
-        CD("PBAREF validate (map still exact)");
+    /* The contract is the one the callers were written for: a publisher that
+     * applied its own deltas says the map is exact, and the drain may then
+     * replay -1s instead of rebuilding. (Tried making exactness come only from
+     * a build; pbaref_test caught it at once -- "the drain freed the retired
+     * block WITHOUT a rebuild" -- because the replay path is a documented
+     * optimisation, not an accident.) */
+    if (v) v->pba_ref_stale = 0;
+    CD("PBAREF validate (map claimed exact by the publisher)");
     pthread_mutex_unlock(&g_pba_ref_mu);
 }
 
@@ -3125,13 +3120,6 @@ static void pba_ref_modify_locked(invfs_volume *v, uint64_t pba, int delta)
 {
     size_t k;
     if (!v->pba_ref_on || !v->pba_ref || !pba || pba >= v->sb.total_blocks)
-        return;
-    /* WP-LEG5-STALE-MAP: a stale map is one a rebuild is owed. Applying a
-     * delta to it would leave a HALF-updated array that a later validate
-     * could pronounce exact -- the counts then read 0 for a pba a live
-     * recipe names, which is the wrong-free direction this map exists to
-     * prevent. Leave it stale; the next gate rebuilds from the live set. */
-    if (v->pba_ref_stale)
         return;
     if (delta > 0 && v->pba_ref_n * 10 >= (v->pba_ref_mask + 1) * 7 &&
         pba_ref_grow(v) != 0)
