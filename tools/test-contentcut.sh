@@ -98,6 +98,25 @@ if $B/invf-verify "$IMG" --deep > verify-torn.log 2>&1; then
     fail "verify passed a torn volume (must report corrupt)"
 fi
 grep -q "CORRUPT" verify-torn.log || { cat verify-torn.log; fail "verify names no corrupt file"; }
+
+# [B1] the SHALLOW verdict must name its own scope. Without --deep this pass
+# reads the superblock, the zone table and the bitmap and not one byte of a
+# file: on this very image it exits 0. Measured before the fix: it printed
+# "OK: ... is a valid InvariantFS volume" and nothing else, which is a bare
+# green for a volume whose files are torn. The scope sentence is the fix, so
+# a suite that lets it disappear is the same bug coming back.
+if ! $B/invf-verify "$IMG" > verify-shallow.log 2>&1; then
+    cat verify-shallow.log
+    fail "shallow verify failed on a structurally valid torn volume (exit must be 0)"
+fi
+grep -q "is a valid InvariantFS volume" verify-shallow.log     || { cat verify-shallow.log; fail "shallow verdict lost the phrase the suites grep for"; }
+grep -q "STRUCTURE ONLY" verify-shallow.log     || { cat verify-shallow.log; fail "shallow verdict does not say it read no file content"; }
+grep -q -- "--deep" verify-shallow.log     || { cat verify-shallow.log; fail "shallow verdict does not point at --deep"; }
+echo "  shallow verify exits 0 and says STRUCTURE ONLY (scope named)"
+# and the deep pass must NOT carry the structure-only wording
+if grep -q "STRUCTURE ONLY" verify-torn.log; then
+    fail "--deep reported itself as structure-only"
+fi
 echo "  verify --deep names the torn files"
 if $B/invf-fsck "$IMG" >/dev/null 2>&1; then
     fail "fsck passed a torn volume (must exit 3)"

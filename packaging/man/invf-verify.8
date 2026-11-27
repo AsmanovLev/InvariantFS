@@ -37,8 +37,22 @@ Exits 0 clean, 3 on drift, 1 on tool failure. No sweep runs.
 Do not fail when a file's codec pack is absent; report those files as
 unverifiable instead.
 .SH EXIT STATUS
-0 when the volume is clean; 1 on any failure (the failures are enumerated
-on stderr); 2 on usage errors.
+0 when the volume is clean at the level that was performed; 1 on any failure
+(the failures are enumerated on stderr), and on content damage found by
+.BR \-\-deep ;
+2 on usage errors.
+.PP
+The distinction matters: without
+.B \-\-deep
+this tool validates the superblock, the zone table and the bitmap, and reads
+no file content at all, so it exits 0 on a volume that has an unreadable file.
+Its verdict line says so in words. Content has to be checked with
+.B \-\-deep
+(exits 1, names every corrupt file) or with
+.BR invf-fsck (8)
+(verdict DAMAGED, exit 3, and
+.B \-\-list\-damaged
+names each file and its reason).
 .SH SEE ALSO
 .BR invf-fsck (8),
 .BR invf-sweep (8),

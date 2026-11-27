@@ -397,7 +397,29 @@ int main(int argc, char **argv)
     free(bitmap);
 
     if (errors == 0) {
-        printf("OK: %s is a valid InvariantFS volume\n", argv[1]);
+        /* The verdict must say WHAT it checked. Without --deep this pass reads
+         * the superblock, the zone table and the bitmap: it does not read a
+         * byte of a single file -- and it printed the same bare sentence for a
+         * volume whose one unreadable file its own sibling names. Measured on
+         * the leg5 artifact (tools/flakey/artifacts/leg5-soak-*):
+         *
+         *   invf-verify            -> "OK: ... is a valid InvariantFS volume", exit 0
+         *   invf-verify --deep     -> "CORRUPT: s12.bin", exit 1
+         *   invf-fsck              -> "DAMAGED", exit 3
+         *   invf-fsck --list-damaged -> "damaged 123 s12.bin segment-torn", exit 3
+         *
+         * So the shallow pass was not lying about the structure -- it was
+         * lying by omission, with the word "OK" doing the work. Name the
+         * scope in the same sentence; a reader who wants content has to be
+         * told which tool reads it. The phrase "is a valid InvariantFS volume"
+         * stays in both forms, because the suites grep for it. */
+        if (deep)
+            printf("OK: %s is a valid InvariantFS volume "
+                   "(structure, and --deep read every live file)\n", argv[1]);
+        else
+            printf("OK: %s is a valid InvariantFS volume "
+                   "(STRUCTURE ONLY: no file content was read; "
+                   "use --deep to read every live file)\n", argv[1]);
         printf("  state: %s, uuid: ", sb.state == INVFS_STATE_CLEAN ? "CLEAN"
                 : sb.state == INVFS_STATE_DIRTY ? "DIRTY" : "RECOVERY");
         for (i = 0; i < 16; i++)
