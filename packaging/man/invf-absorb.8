@@ -1,0 +1,111 @@
+.TH INVF-ABSORB 8 "2026-11" "InvariantFS" "System Administration"
+.SH NAME
+invf-absorb \- adopt an existing filesystem inside a new InvariantFS volume
+.SH SYNOPSIS
+.B invf-absorb
+.B plan
+.I image reserve.list
+.br
+.B invf-absorb
+.B publish
+.I volume name reference reserve.list prefix_blocks
+.br
+.B invf-absorb
+.B verify
+.I volume name reference
+.br
+.B invf-absorb
+.B commit
+.I image|device reserve.list
+.RB [ \-\-out\-name=\fINAME\fR]
+.RB [ \-\-packs=\fIDIR\fR]
+.RB [ \-\-mkfs=\fIPATH\fR]
+.SH DESCRIPTION
+.B invf-absorb
+turns an existing filesystem into an InvariantFS volume that keeps it as a file
+at the root of the new volume, byte for byte. After
+.BR "invf-absorb commit" ,
+mounting the volume shows the old filesystem as
+.I old.ext4
+(or
+.I old.xfs
+for XFS, or whatever the containerpack's
+.B absorb_name
+says), extract it with
+.BR invf\-cat (1)
+and the original checker still opens it:
+.PP
+.RS
+.EX
+invf-absorb commit part.ext4 reserve.list
+invf-cat part.ext4 old.ext4 > old.img
+e2fsck \-fn old.img
+.EE
+.RE
+.PP
+Nothing here knows what ext4 or XFS is. A containerpack declares that its images
+are filesystems
+.RB ( "absorb = 1" ),
+gives the name to publish, and provides the
+.B classify
+command that says which bytes the filesystem uses; the tool asks, and refuses
+when no pack claims the image.
+.SH SUBCOMMANDS
+.TP
+.B plan
+Probe the image and write the reserve list: one
+.I "<start_block> <count>"
+line per range the filesystem uses. Writes nothing to the image.
+.TP
+.B commit
+The whole in\-place adoption. It stages the used bytes OUTSIDE the device, saves
+the prefix that
+.BR invf\-mkfs (8)
+will overwrite, builds the volume with those ranges RESERVED, publishes the old
+filesystem inside it, and verifies the read\-back. It refuses before writing
+anything when a precondition does not hold: no pack claims the image, the image
+has no prefix, or there is not enough free space for the staged copy.
+.PP
+Staging is not an optimisation. Reading the reserved ranges from the target while
+the framed copy lands in the target's own free space destroys source bytes that
+have not been read yet, because a filesystem that fills its device has its free
+space interleaved with its used ranges.
+.TP
+.B publish
+Publish a filesystem from an offline reference into a volume already built with
+.BR "mkfs \-\-reserve" .
+.TP
+.B verify
+Read the published file back and compare it against the reference, in chunks.
+.SH OPTIONS
+.TP
+.BI \-\-out\-name= NAME
+Name to publish under (default: the pack's
+.BR absorb_name ).
+.TP
+.BI \-\-packs= DIR
+Containerpack directory (default: the repository's
+.IR tools/codecpacks ,
+or next to the binary).
+.TP
+.BI \-\-mkfs= PATH
+The
+.B invf\-mkfs
+to run (default: the sibling binary).
+.SH EXIT STATUS
+0 on success; 1 when the operation refused or failed, with the reason on standard
+error; 2 on usage errors. A refusal never leaves a partly written volume: the
+tool checks every precondition before it writes.
+.SH FILES
+.TP
+.I <target>.absorb\-stage
+The staged copy of the used bytes, removed on success. KEPT when
+.BR invf\-mkfs (8)
+fails after it started, because at that point it is the only intact copy of the
+source.
+.SH SEE ALSO
+.BR invf\-mkfs (8),
+.BR invf\-convert (8),
+.BR invf\-cat (1),
+.BR invf\-fsck (8),
+.BR invarifs (7)
