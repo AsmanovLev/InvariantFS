@@ -216,6 +216,14 @@
 #define E4_S_IFREG       0x8000u
 #define E4_S_IFDIR       0x4000u
 
+/* Inodes 1..10 are the reserved set (bad-blocks, root, ACL index, ACL data,
+ * boot loader, undelete dir, resize, journal, exclude, replica) and
+ * s_first_ino is 11 on every real image, so that is where the reserved walk
+ * stops even when a hand-edited superblock claims a larger first inode: a
+ * 2-million-inode "reserved" range would be a read per inode for no new
+ * structure. */
+#define E4_RESERVED_INO_END 11u
+
 #define ABI_MAX_MEMBERS  1048576u
 #define ABI_MAX_IDX      1048575u
 #define ABI_MAP_MAX_ENTS (4u * ABI_MAX_MEMBERS + 4u)
@@ -472,6 +480,7 @@ typedef struct {
 typedef struct {
     fs_t     *fs;
     int       is_dir;
+    int       to_meta;               /* reserved inode: extents ARE structure */
     uint64_t  prev_lend;             /* previous logical end (blocks) */
     int       have_prev;
     member_t *m;                     /* REG: accumulate content runs */
@@ -775,7 +784,21 @@ static int walk_extents(fs_t *fs, walk_t *w, const uint8_t *node,
             }
             w->have_prev = 1;
             w->prev_lend = (uint64_t)lb + nblk;
-            if (w->is_dir) {
+            if (w->to_meta) {
+                /* A reserved inode (journal, resize) allocates structure, not
+                 * member content and not free space: every block it names is
+                 * parsed metadata, whether the extent is written or not.
+                 *
+                 * This is a FLAG and not `w->m` with a large usize on
+                 * purpose: the member sink below only collects extents lying
+                 * BELOW m->usize, so a zeroed member_t collects nothing and
+                 * still returns success -- the silent-empty failure mode that
+                 * made the first attempt at this fix produce a byte-identical
+                 * table. */
+                if (ivl_add(&fs->meta, phys * fs->block_size,
+                            (phys + nblk) * fs->block_size) != 0)
+                    return EX_IO;
+            } else if (w->is_dir) {
                 uint32_t k;
                 for (k = 0; k < nblk; k++)
                     if (dblk_push(w, phys + k) != 0)
@@ -843,6 +866,155 @@ static int walk_inode_extents(fs_t *fs, walk_t *w, const uint8_t *inode)
     w->have_prev = 0;
     w->prev_lend = 0;
     return walk_extents(fs, w, inode + 0x28, 1, le16(inode + 0x28 + 6));
+}
+
+/* ---- reserved inodes (1..10): structure nothing else walks ----
+ *
+ * scan_inodes starts at s_first_ino, so the reserved inodes are never read for
+ * content -- correct, they are not members -- but as a side effect their blocks
+ * never entered fs->meta either, and `classify` then calls them GARBAGE. The
+ * journal (inode 8) makes that fatal rather than merely wasteful: an absorbed
+ * image whose journal blocks were classified garbage gets a zeroed journal
+ * superblock and does not open at all. Measured on a 128 MiB / 1 KiB
+ * mkfs.ext4 default image, `e2fsck -fn` on the absorbed file:
+ *
+ *     Superblock has an invalid journal (inode 8).  Clear? no
+ *     Journal superblock is corrupt.                Fix? no
+ *     e2fsck: Cannot proceed with file system check
+ *
+ * MEASURED on that image: of inodes 1..10 only 2 (root, a directory), 7 and 8
+ * are in use; the rest are marked used in the inode bitmap with i_mode 0, so
+ * the MODE is the filter (as is the i_blocks check: a boot-loader or exclude
+ * inode keeps its bytes inside i_block itself and owns no blocks). And the two
+ * live ones do not share a storage shape:
+ *
+ *   inode 8  journal, EXTENTS: one contiguous run, 4 096 blocks;
+ *   inode 7  resize inode, NOT extent-mapped: a DIND block map whose
+ *            intermediate and data blocks are the reserved-GDT backups
+ *            (measured: 1 537 blocks, DIND 7984, IND blocks 258 and 3..257).
+ *
+ * Both shapes are read, because zeroing only the DIND block of inode 7 makes
+ * e2fsck report "Resize inode not valid" even after the journal is preserved.
+ * A reserved inode this parser cannot prove declines the whole classification
+ * -- with a block-mapped inode there is no safe partial answer, since a block
+ * named garbage may be overwritten by the volume that absorbs it. */
+static int reserved_block(fs_t *fs, uint64_t blk)
+{
+    if (blk >= fs->blocks_count) {
+        note("reserved inode block out of range", blk, 0);
+        return EX_DECLINE;
+    }
+    if (ivl_add(&fs->meta, blk * fs->block_size,
+                blk * fs->block_size + fs->block_size) != 0)
+        return EX_IO;
+    return 0;
+}
+
+/* One node of an ext2-style block map. level 0 is a data block, 1 an indirect
+ * node (1 KiB block: 256 pointers), 2 a double-indirect node, 3 a triple. The
+ * node itself is metadata too, so it is marked before its pointers are read.
+ * `budget` is the number of blocks the inode's own i_blocks claims (in fs
+ * blocks, rounded up; huge_file's different unit only makes it larger, which
+ * is the conservative direction) and it bounds a crafted tree that points at
+ * itself: a repeated pointer would otherwise be re-read exponentially. */
+static int blockmap_walk(fs_t *fs, uint64_t blk, unsigned level,
+                        uint64_t *budget)
+{
+    uint8_t *node;
+    uint32_t i, n = fs->block_size / 4;
+    int rc = 0;
+
+    if (!*budget) {
+        note("block map larger than i_blocks", blk, level);
+        return EX_DECLINE;
+    }
+    (*budget)--;
+    if (level == 0)
+        return reserved_block(fs, blk);
+    if ((rc = reserved_block(fs, blk)) != 0)
+        return rc;                     /* the node itself is metadata too */
+    node = (uint8_t *)malloc(fs->block_size);
+    if (!node) return EX_IO;
+    if (fs_read(fs, blk * fs->block_size, node, fs->block_size) != 0) {
+        free(node);
+        note("block map node read", blk, 0);
+        return EX_DECLINE;
+    }
+    for (i = 0; i < n && !rc; i++) {
+        uint32_t p = le32(node + (size_t)i * 4);
+        if (p)
+            rc = blockmap_walk(fs, p, level - 1, budget);
+    }
+    free(node);
+    return rc;
+}
+
+/* i_block[15]: 12 direct, then single/double/triple indirect. */
+static int walk_inode_blockmap(fs_t *fs, const uint8_t *inode)
+{
+    uint64_t ib = le32(inode + 0x1C);       /* i_blocks, 512-byte sectors */
+    uint64_t budget = ib * 512u / fs->block_size + 2u;
+    uint32_t i;
+    int rc;
+
+    if (budget > fs->blocks_count + 1u)
+        budget = fs->blocks_count + 1u;
+    for (i = 0; i < 12; i++) {
+        uint32_t p = le32(inode + 0x28 + (size_t)i * 4);
+        if (p && (rc = reserved_block(fs, p)) != 0)
+            return rc;
+    }
+    for (i = 12; i < 15; i++) {
+        uint32_t p = le32(inode + 0x28 + (size_t)i * 4);
+        if (p && (rc = blockmap_walk(fs, p, i - 11, &budget)) != 0)
+            return rc;
+    }
+    return 0;
+}
+
+/* Every reserved inode that holds blocks is structure. Skips the root (the
+ * directory walk already owns inode 2), the empty slots (mode 0) and inodes
+ * with i_blocks == 0 (the exclude/boot-loader shapes live inside i_block). */
+static int scan_reserved_inodes(fs_t *fs)
+{
+    uint8_t *ib;
+    uint32_t ino, end = fs->first_ino < E4_RESERVED_INO_END
+                            ? fs->first_ino : E4_RESERVED_INO_END;
+    int rc = 0;
+
+    ib = (uint8_t *)malloc(fs->inode_size);
+    if (!ib) return EX_IO;
+    for (ino = 1; ino < end && !rc; ino++) {
+        walk_t w;
+        uint16_t mode;
+        if (!inode_used(fs, ino))
+            continue;
+        if (read_inode(fs, ino, ib) != 0) {
+            note("reserved inode read", ino, 0);
+            rc = EX_DECLINE;
+            break;
+        }
+        mode = le16(ib + 0) & E4_S_IFMT;
+        if (mode == 0 || mode == E4_S_IFDIR)
+            continue;                    /* empty slot / the root */
+        if (le32(ib + 0x1C) == 0)
+            continue;                    /* no blocks of its own */
+        if (le32(ib + 0x20) & E4_FL_INLINE_DATA) {
+            note("inline-data reserved inode", ino, 0);
+            rc = EX_DECLINE;
+            break;
+        }
+        if (le32(ib + 0x20) & E4_FL_EXTENTS) {
+            memset(&w, 0, sizeof w);
+            w.fs = fs;
+            w.to_meta = 1;
+            rc = walk_inode_extents(fs, &w, ib);
+        } else {
+            rc = walk_inode_blockmap(fs, ib);
+        }
+    }
+    free(ib);
+    return rc;
 }
 
 /* ---- name table (sanitized basenames; first dirent wins) ---- */
@@ -1136,6 +1308,11 @@ static int scan_inodes(fs_t *fs)
     }
     fs->visited[2 / 8] |= (uint8_t)(1u << (2 % 8));
     rc = walk_dir(fs, 2, 0);
+    if (rc) { free(ib); return rc; }
+
+    /* reserved inodes are structure, and this is the only place they are read:
+     * the member scan starts at s_first_ino (see scan_reserved_inodes) */
+    rc = scan_reserved_inodes(fs);
     if (rc) { free(ib); return rc; }
 
     for (ino = fs->first_ino; ino <= fs->inodes_count; ino++) {

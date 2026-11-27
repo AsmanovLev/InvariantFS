@@ -1716,6 +1716,14 @@ e2e: all $(OUT)/meta_probe
 # what a release should be cut with.
 	$(TESTENV) INVFS_PKG_DEB=0 bash tools/run-e2e.sh tools/test-packaging.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-ext4fs.sh
+# WP-JOURNAL: the ext4fs pack's `classify` map has to call the JOURNAL (inode 8)
+# and the resize inode (7) meta_structure, or `invf-mkfs --absorb` publishes an
+# image whose journal was left zero and it does not open at all
+# (e2fsck: "Superblock has an invalid journal (inode 8)", "Cannot proceed").
+# Offline image suite (mkfs --reserve + absorb publish + invf-cat + e2fsck -n),
+# no FUSE, no root, no loop device; its red legs prove both the map assertion
+# and the e2fsck acceptance can fail.
+	$(TESTENV) bash tools/run-e2e.sh tools/test-absorb-ext4.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-fatfs.sh
 	$(TESTENV) bash tools/run-e2e.sh tools/test-xfs.sh
 # WP-XFS-CLASSIFY: the xfs pack's CLI-only `classify` command (GCFG table).

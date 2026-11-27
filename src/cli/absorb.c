@@ -190,6 +190,8 @@ static int write_reserve(const char *gcfg, const char *out_path,
     unsigned char hdr[16], ent[24];
     unsigned n, i;
     uint64_t used = 0, ranges = 0;
+    uint64_t cur_blk = 0, cur_nblk = 0;
+    int have_cur = 0;
 
     f = fopen(gcfg, "rb");
     if (!f) {
@@ -229,10 +231,45 @@ static int write_reserve(const char *gcfg, const char *out_path,
         if (cls == 1u)       /* garbage: the only class the source does not need */
             continue;
         start_blk = off / 4096u;
-        nblk = (len + 4095u) / 4096u;
-        fprintf(o, "%llu %llu\n", (unsigned long long)start_blk,
-                (unsigned long long)nblk);
-        used += nblk;
+        /* Cover EVERY 4096-byte block the range touches: the start rounds down
+         * (harmless over-reserve) and the count must then be measured from the
+         * start, not from the range's own length. Rounding those two halves
+         * independently under-reserves the TAIL of any range that is not
+         * 4096-aligned -- which is every range of a 1 KiB or 2 KiB ext4 image.
+         * Measured on a 128 MiB / 1 KiB image (mkfs.ext4 default): the orphan
+         * file's last logical block sat in a 4096-block whose first 3 KiB were
+         * garbage, stayed unreserved, and the published old.ext4 read zeros
+         * there -- `e2fsck -fn` on it: "Orphan file (inode 12) block 31 is not
+         * clean". The journal fix in the ext4fs pack gets the same file to
+         * "Cannot proceed" -> clean ONLY with this rounding. */
+        nblk = (off % 4096u + len + 4095u) / 4096u;
+        /* Merge with the run being accumulated. Ranges ascend, and the rounding
+         * above (start DOWN, count measured from the start) makes the tail block
+         * of one run the head block of the next. mkfs --reserve would tolerate
+         * that (it marks a bitmap) but absorb_publish walks the list and would
+         * copy the shared block twice -- measured: `invf-absorb publish`
+         * succeeded and `invf-cat` then refused the file with "inode 2 seg 9:
+         * overlapping entry". A merged list is also what the plan prints. */
+        if (have_cur && start_blk <= cur_blk + cur_nblk) {
+            uint64_t end = start_blk + nblk;
+            if (end > cur_blk + cur_nblk)
+                cur_nblk = end - cur_blk;
+            continue;
+        }
+        if (have_cur) {
+            fprintf(o, "%llu %llu\n", (unsigned long long)cur_blk,
+                    (unsigned long long)cur_nblk);
+            used += cur_nblk;
+            ranges++;
+        }
+        cur_blk = start_blk;
+        cur_nblk = nblk;
+        have_cur = 1;
+    }
+    if (have_cur) {
+        fprintf(o, "%llu %llu\n", (unsigned long long)cur_blk,
+                (unsigned long long)cur_nblk);
+        used += cur_nblk;
         ranges++;
     }
     fclose(f);
