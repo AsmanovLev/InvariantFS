@@ -72,6 +72,30 @@ static void die(const char *m) { fprintf(stderr, "HARNESS-FAIL: %s\n", m); exit(
 static void dump_recipe(invfs_volume *v, const char *name);   /* WP630 forensics */
 
 /* ---- --wrap ledgers ---- */
+static int record_on;   /* declared here: the REF wrapper below reads it */
+
+/* WP630-FORENSICS: every reference-map charge, with a backtrace of one frame so
+ * the caller is named by construction rather than by inference. The failure this
+ * exists for: one release fires, the pba's count reads 2 before the final sync
+ * and 0 after, while the recipe names that pba exactly once. Two charges, one
+ * release -- so something else charges the same block during the same sync, and
+ * this says what. */
+#include <execinfo.h>
+static void __real_pba_ref_modify(invfs_volume *v, uint64_t pba, int delta);
+void __wrap_pba_ref_modify(invfs_volume *v, uint64_t pba, int delta)
+{
+    if (record_on && delta < 0) {
+        void *bt[3];
+        int nbt = backtrace(bt, 3);
+        char **syms = backtrace_symbols(bt, nbt);
+        fprintf(stderr, "harness: REF -1 pba=%llu (from %s)\n",
+                (unsigned long long)pba,
+                (nbt > 1 && syms) ? syms[1] : "?");
+        free(syms);
+    }
+    __real_pba_ref_modify(v, pba, delta);
+}
+
 #define MAXFREES 4096
 static uint64_t freed_pba[MAXFREES];
 static uint64_t freed_len[MAXFREES];
@@ -373,7 +397,7 @@ int main(int argc, char **argv)
 EOF
 
 "${CC:-gcc}" ${INVFS_TEST_CFLAGS:-} -std=gnu11 -O2 -I$REPO/src -I$REPO/src/core -I$REPO/src/codecs -I$REPO/src/recipes -I$REPO/src/vendor7z -o "$WORK/dd_harness" \
-    "$WORK/dd_harness.c" $OBJS -Wl,--wrap=vol_free_blocks -Wl,--wrap=vol_free_recipe_blocks -Wl,-l:libzstd.so.1 -lz -lpthread \
+    "$WORK/dd_harness.c" $OBJS -Wl,--wrap=vol_free_blocks -Wl,--wrap=vol_free_recipe_blocks -Wl,--wrap=pba_ref_modify -Wl,-l:libzstd.so.1 -lz -lpthread \
     || fail "harness build"
 H=$WORK/dd_harness
 

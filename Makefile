@@ -1573,12 +1573,14 @@ test-shard-4: $(TEST_SHARD_DEPS) test-shard-check plugin-so
 # live sharer". It was registered in no tier at all, so the defect was neither
 # fixed nor seen.
 #
-# EXPECTED-RED, by name and on every run: the suite prints WP630 EXPECTED-RED
-# with the INCIDENTS.md reference and skips EXACTLY that leg-2 signature; any
-# other failure fails the build. The flag cannot outlive the bug -- if leg 2
-# passes, the suite exits non-zero and demands the flag be removed. Fix the
-# defect, delete WP630_EXPECT_RED here, and the same leg becomes a hard gate.
-	$(TESTENV) WP630_EXPECT_RED=1 bash tools/test-fence-doom-doubleretire.sh
+# FIXED (WP630-OWN-REFS): leg 2 used to fail with 'shared pba refcount 0 under
+# live sharer' -- the retire drain rebuilt the reference map from the LIVE rows,
+# and a retire entry's row is already gone by then, so the entry's own -1 landed
+# on a survivor's reference and freed blocks under a live file. The drain now
+# charges what the collected entries still own before their -1s (vol_delta.c,
+# charge_recipe_refs). The suite ran under WP630_EXPECT_RED=1 while the defect
+# was open; the flag is gone, so this leg is a hard gate again.
+	$(TESTENV) bash tools/test-fence-doom-doubleretire.sh
 # WP604: a vol_unlink that fails must not mutate (rc==0 iff the namespace
 # changed). Sealed volume, one post-seal write, then a fault-armed unlink:
 # pre-fix the recipe-free failure returned -1 with the dirent already gone.

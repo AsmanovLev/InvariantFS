@@ -1026,6 +1026,86 @@ static void dl_retire_collect(invfs_volume *v, delta_retire_ent **out,
 /* Free collected entries (OUTSIDE g_delta_lock). Recipe form reuses the
  * synchronous resolver; pba form replays the commit's share-aware loop
  * against the live map (shares that appeared since retire are spared). */
+/* WP630-OWN-REFS: charge the references a retire entry still holds, BEFORE its
+ * own -1s land.
+ *
+ * The REBUILD path rebuilds the reference map from the LIVE rows. A retire
+ * entry's row is already gone by then -- staging a retire is what an unlink
+ * does -- so the rebuild under-counts by exactly the occurrences the entry is
+ * about to decrement. The -1 then does not discharge the entry's own reference,
+ * it eats somebody else's. Measured on leg 2 of
+ * tools/test-fence-doom-doubleretire.sh: A and B share pba 8706, unlink A, the
+ * rebuild sees only B (n=1), A's release drives the count to 0 and B's segment
+ * is freed under a live B ("shared pba refcount 0 under live sharer").
+ *
+ * The filters mirror free_recipe_level exactly (skip zero, keep_pba, TEXT, and
+ * a pba repeated inside one recipe; recurse into child recipes) because the
+ * charge and the decrement must be the SAME set. A charge set that is merely
+ * close is how a count drifts one way and a free drifts the other.
+ *
+ * Returns 0 when everything was charged, -1 when a recipe could not be
+ * resolved -- the caller then drops the batch, so blocks stay allocated rather
+ * than being freed against a map that is still short.
+ */
+static int charge_recipe_refs(invfs_volume *v, const invfs_ast_block_entry *ents,
+                              size_t n, const uint8_t *chld, uint32_t n_chld,
+                              uint64_t keep_pba, unsigned depth)
+{
+    size_t i, k;
+    for (i = 0; i < n; i++) {
+        uint64_t pba = ents[i].pba;
+        int dup = 0;
+
+        if (ents[i].algo == INVFS_ALGO_CHILD) {
+            uint8_t *cblob = NULL;
+            size_t cblen = 0, cn = 0;
+            invfs_ast_hdr cah;
+            const invfs_ast_block_entry *cents = NULL;
+            const uint8_t *cchld = NULL;
+            uint32_t cnchld = 0;
+            int rc;
+
+            if (depth + 1 > INVFS_AST_CHILD_DEPTH_MAX || !chld ||
+                ents[i].block_id >= n_chld)
+                return -1;
+            if (vol_recipe_load(v, chld + (size_t)ents[i].block_id *
+                                       sizeof(invfs_ast_child_ref),
+                                &cblob, &cblen) != 0 || !cblob)
+                return -1;
+            if (vol_ast_recipe_parse(cblob, cblen, &cah, &cents, &cn) != 0 ||
+                !cents ||
+                vol_ast_recipe_children(cblob, cblen, &cah, &cchld,
+                                        &cnchld) != 0) {
+                vol_ast_recipe_parsed_free(&cah, cents);
+                free(cblob);
+                return -1;
+            }
+            rc = charge_recipe_refs(v, cents, cn, cchld, cnchld, keep_pba,
+                                    depth + 1);
+            vol_ast_recipe_parsed_free(&cah, cents);
+            free(cblob);
+            if (rc != 0)
+                return -1;
+            continue;
+        }
+        if (!pba || pba == keep_pba)
+            continue;
+        if (ents[i].zone == INVFS_ZONE_TEXT)
+            continue;
+        for (k = 0; k < i; k++) {
+            if (ents[k].pba == pba && ents[k].algo != INVFS_ALGO_CHILD &&
+                ents[k].zone != INVFS_ZONE_TEXT && ents[k].pba != keep_pba) {
+                dup = 1;   /* the decrement side skips the repeat too */
+                break;
+            }
+        }
+        if (dup)
+            continue;
+        pba_ref_modify(v, pba, +1);
+    }
+    return 0;
+}
+
 static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
                                 size_t n)
 {
@@ -1094,6 +1174,60 @@ static void dl_retire_free_list(invfs_volume *v, delta_retire_ent *list,
                 dl_retire_free_ent(&list[i]);
             free(list);
             return;
+        }
+        /* WP630-OWN-REFS: the rebuild counted the LIVE rows; the entries in
+         * `list` are the rows that no longer exist. Charge what they still
+         * own before the -1s land, or each -1 discharges a survivor's
+         * reference (measured: leg 2 of the fence-doom suite). */
+        {
+            int bad = 0;
+            for (i = 0; i < n && !bad; i++) {
+                delta_retire_ent *e = &list[i];
+                if (e->has_recipe) {
+                    uint8_t *blob = NULL;
+                    size_t blen = 0, ne = 0;
+                    invfs_ast_hdr ah;
+                    const invfs_ast_block_entry *ents = NULL;
+                    const uint8_t *chld = NULL;
+                    uint32_t nchld = 0;
+
+                    memset(&ah, 0, sizeof ah);
+                    if (vol_recipe_load(v, e->recipe, &blob, &blen) != 0 ||
+                        !blob ||
+                        vol_ast_recipe_parse(blob, blen, &ah, &ents, &ne) != 0 ||
+                        !ents ||
+                        vol_ast_recipe_children(blob, blen, &ah, &chld,
+                                                &nchld) != 0) {
+                        bad = 1;
+                    } else if (charge_recipe_refs(v, ents, ne, chld, nchld,
+                                                  0, 0) != 0) {
+                        bad = 1;
+                    }
+                    vol_ast_recipe_parsed_free(&ah, ents);
+                    free(blob);
+                }
+                /* PBA-FORM entries are NOT charged here: under this branch
+                 * their -1 never runs (only the REPLAY branch decrements, and
+                 * the free loop below only reads the count), so a charge would
+                 * have no partner and the blocks would never come back --
+                 * measured as 'dedupe did not merge' (free 7589 -> 7589) when
+                 * this branch charged both forms. */
+            }
+            if (bad) {
+                static int warned2;
+                if (DBG_RETIRE() || !warned2) {
+                    fprintf(stderr, "invfs: retire: a recipe in the batch "
+                            "would not resolve for the reference charge, so "
+                            "%zu entr%s stay allocated rather than risk "
+                            "freeing blocks a live recipe names\\n",
+                            n, n == 1 ? "y" : "ies");
+                    warned2 = 1;
+                }
+                for (i = 0; i < n; i++)
+                    dl_retire_free_ent(&list[i]);
+                free(list);
+                return;
+            }
         }
     } else if (need_map) {
         /* WP-IO-LOCK: replay the retire instead of rebuilding. Every entry

@@ -4305,3 +4305,45 @@ every step until the drain), doubled reference inside a recipe (refuted: the
 recipes are byte-identical and each names the pba once). What remains is the
 drain itself charging one block twice through two different code paths, and the
 wrapper will say which.
+
+### leg5 FIXED: the drain charged a survivor's reference (WP630-OWN-REFS)
+
+The four measurements above converged here. The retire drain's REBUILD path
+rebuilds the reference map **from the live rows** -- and a retire entry's row is
+already gone by then, because staging that retire is what the unlink did. So the
+map counted only the survivors, and the entry's `-1` did not discharge its own
+reference: it ate somebody else's.
+
+Measured, per step, on a 100 KiB pair sharing pba 8706 through dedupe:
+
+    refcount 2 (both rows) -> 2 (unlink A: retire deferred) -> 2 (doom) -> 2
+    final sync: ONE release, refcount 0, B still live
+
+Fix: after a successful `pba_ref_ensure`, charge the occurrences each collected
+entry is about to decrement (`charge_recipe_refs`, `src/core/vol_delta.c`). The
+charge set mirrors `free_recipe_level` exactly -- skip zero, `keep_pba`, TEXT, a
+pba repeated inside one recipe, recurse into child recipes -- because a charge
+set that is merely close is how a count drifts one way and a free drifts the
+other. Two things learned while writing it:
+
+- PBA-FORM entries must NOT be charged in this branch: their `-1` never runs here
+  (only the REPLAY branch decrements), so a charge has no partner. Charging both
+  forms showed up immediately as "dedupe did not merge" (free 7589 -> 7589);
+- any recipe that will not load or parse drops the whole batch, so blocks stay
+  allocated and leak to the orphan collector -- the safe direction, the same
+  discipline as the rebuild-failure guard above it.
+
+Verified: `test-fence-doom-doubleretire.sh` leg 1 (no pba freed twice) and leg 2
+(sharer survives, refcount 1) both green, `test-sweep-lane-retire.sh` and
+`test-dedupe.sh` green, and the `WP630_EXPECT_RED` allowlist is removed from the
+Makefile -- which is the whole point of building that flag with a self-destruct.
+
+Two suites stay red **on this box only**, and both do so with this fix stashed, so
+neither is ours: `test-sweep-window-reclaim` ("the base tree lost pages: walked
+102 -> 103") and `test-orphan-reclaim` ("fsck exited nonzero after collect").
+The second is registered in no tier at all, which is how it stayed invisible;
+noted here rather than silently fixed.
+
+Not yet claimed: the dm-flakey soak's own failure. The mechanism above explains
+the shape it produced (a live row losing a block), but the soak has not been
+re-run against this build. It stays the last gate before a release.
