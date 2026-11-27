@@ -1329,15 +1329,28 @@ static void cls_ino_rec(cls_ctx *c, uint64_t agno, const uint8_t *p)
     if ((startino >> ibits) != 0)
         decline("AG %" PRIu64 ": inode chunk agino %u does not fit the AG "
                 "(agino bits %d)", agno, startino, ibits);
-    if (startino % XFS_INODES_PER_CHUNK)
-        decline("AG %" PRIu64 ": inode chunk startino %u is not chunk "
-                "aligned", agno, startino);
     if (!count || count > XFS_INODES_PER_CHUNK)
         decline("AG %" PRIu64 ": inode chunk %u holds %u inodes",
                 agno, startino, count);
     agino = startino;
     agbno = agino >> im->inopblog;
     nblk = XFS_INODES_PER_CHUNK / im->inopblock;
+    /* The chunk does NOT have to start at a multiple of 64 aginos, and
+     * requiring it refuses every filesystem made with -i sparse=0: measured on
+     * this box, such an image's inobt record is startino=96 (block 12), which
+     * the kernel is free to allocate because xfs_ialloc_ag_alloc only asks for
+     * chunk alignment when sparse inodes are enabled. What must hold is that
+     * the chunk's nblk blocks are INSIDE the AG. */
+    {
+        uint64_t aglen = im->dblocks - agno * (uint64_t)im->agblocks;
+        if (aglen > im->agblocks)
+            aglen = im->agblocks;
+        if (agbno + nblk > aglen)
+            decline("AG %" PRIu64 ": inode chunk at agino %u (block %" PRIu64
+                    ", %" PRIu64 " blocks) runs past the end of the AG "
+                    "(%" PRIu64 " blocks)", agno, startino, agbno, nblk,
+                    aglen);
+    }
     for (j = 0; j < nblk; j++) {
         int hole = 0;
         if (im->spinodes) {
