@@ -4195,23 +4195,38 @@ corpse for forensics. Until that prints, the mechanism is: representational
 mismatch at a shared pba, reached within one second of an up-mode ack following a
 drop-mode lie.
 
-### Two checker facts found while reading that artifact (2026-11-27)
+### One checker fact, and the measurement that was wrong twice (2026-11-27)
 
-Both are about the TOOLS, not the engine, and both are false-green shapes:
+**Corrected.** An earlier version of this section claimed `invf-fsck` printed
+`DAMAGED` and exited 0, and that `--deep` exited 0 while naming a corrupt file.
+Both claims were wrong: they came from reading `$?` through
+`wsl -d void -- bash -c '...'`, where `$?` (and any `$VAR`) is expanded away
+before the command reaches the distro -- so every checker "returned 0", including
+one that was never run. Measured again from a script file, on the leg5 artifact:
 
-1. **Without `--deep`, `invf-verify` says the volume is fine.** On the artifact above:
-   `invf-verify <img>` → `OK: … is a valid InvariantFS volume`; the tear appears only
-   under `--deep` (`CORRUPT: s12.bin`) or in `invf-fsck`'s
-   `live recipes: 1 UNREADABLE of 34`. A shallow verify validating structure only is
-   defensible; printing `OK` without a word about "did not read the files" is not.
-2. **`invf-fsck` prints `DAMAGED` and exits 0.** Measured on that image, report mode,
-   no flags: verdict `DAMAGED`, `exit=0`. The comment in `src/cli/fsck.c` says the
-   opposite ("The exit code is 3 whenever damage was found, REPAIRED or not"), and
-   the code returns `crep.nuncut ? 3 : 0` on the content path — so `nuncut` did not
-   count the unreadable recipe the same run had just named. `invf-fsck img && echo
-   healthy` therefore prints "healthy" on a volume with an unreadable file, which is
-   the exact class of lie the WP503 gate exists to stop. It is also why the soak
-   parses text (`\nOK`) instead of trusting the status: a workaround, not a fix.
+    invf-verify                 -> "OK: ... is a valid InvariantFS volume",   exit 0
+    invf-verify --deep          -> "CORRUPT: s12.bin",                        exit 1
+    invf-fsck                   -> "DAMAGED",                                 exit 3
+    invf-fsck --list-damaged    -> "damaged 123 s12.bin segment-torn 784772", exit 3
 
-Neither is a leg5 cause; both are release-checklist items because a checker that
-cannot fail by exit code is a checker that will be scripted wrong.
+So the two checkers that read content are honest in both text and status, and
+`DAMAGED ⇒ 3` holds, as `src/cli/fsck.c` says it does.
+
+The one real defect is the shallow verdict, and it is a lie of omission rather
+than a wrong exit code: without `--deep`, `invf-verify` reads the superblock, the
+zone table and the bitmap and **not one byte of a file**, then printed the same
+bare "OK ... is a valid InvariantFS volume" it prints after reading everything.
+
+Fixed: the verdict line now names its scope in both forms
+("STRUCTURE ONLY: no file content was read; use --deep to read every live file"
+versus "structure, and --deep read every live file"), the phrase the suites grep
+for is kept in both, and `tools/test-contentcut.sh` leg B1 fails if the scope
+sentence ever disappears, if shallow stops exiting 0 on a structurally valid
+volume, or if `--deep` ever calls itself structure-only. The man page now states
+that exit 0 means "clean at the level that was performed" and points at
+`invf-fsck --list-damaged` for per-file reasons.
+
+Tooling gotcha, recorded because it cost two wrong conclusions in one session:
+on this box, `$?` and `$VAR` inside `wsl -d void -- bash -c '<string>'` do not
+survive -- put the commands in a script file and run
+`wsl -d void -- sudo bash /mnt/.../script.sh`.
