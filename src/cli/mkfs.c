@@ -184,6 +184,7 @@ int main(int argc, char **argv)
     const char *reserve_path = NULL;
     int defer_commit = 0;
     int absorb = 0, absorb_yes = 0, absorb_commit = 0;
+    unsigned long long size_override = 0;
     {
         char *posv[8];
         int npos = 0, i;
@@ -206,6 +207,10 @@ int main(int argc, char **argv)
             }
             if (strcmp(argv[i], "--absorb-commit") == 0) {
                 absorb_commit = 1;
+                continue;
+            }
+            if (strcmp(argv[i], "--size-bytes") == 0 && i + 1 < argc) {
+                size_override = strtoull(argv[++i], NULL, 0);
                 continue;
             }
             if (npos < 8)
@@ -344,7 +349,11 @@ int main(int argc, char **argv)
         }
     } else {
         double gb = (argc >= 3) ? strtod(argv[2], NULL) : 4.0;
-        size_bytes = (uint64_t)(gb * 1024.0 * 1024.0 * 1024.0);
+        /* --size-bytes wins: an in-place adoption must map the target 1:1, and a
+         * 4 GiB default over a 128 MiB source would put the metadata zone over
+         * the blocks the old filesystem still uses. */
+        size_bytes = size_override ? size_override
+                                   : (uint64_t)(gb * 1024.0 * 1024.0 * 1024.0);
     }
 
     if (twodev) {
@@ -1015,6 +1024,15 @@ int main(int argc, char **argv)
            (unsigned long long)(sb.metadata_zone_start + metadata_blocks - 1),
            (unsigned long long)metadata_blocks,
            (unsigned long long)(metadata_blocks * INVFS_BLOCK_SIZE / 1024 / 1024));
+    /* WP-ABSORB: the region this mkfs overwrites, in blocks -- the number an
+     * in-place adoption must save BEFORE it runs. Printed rather than implied:
+     * it is the difference between a recoverable conversion and a lost
+     * filesystem. */
+    printf("  absorb prefix:   blocks 0 .. %llu (%llu blocks, %llu MB) -- save "
+           "these before an --absorb run\n",
+           (unsigned long long)metadata_blocks,
+           (unsigned long long)(metadata_blocks + 1),
+           (unsigned long long)((metadata_blocks + 1) * INVFS_BLOCK_SIZE / 1024 / 1024));
     printf("  raw zone:        blocks %llu .. %llu (%llu blocks, %llu MB)\n",
            (unsigned long long)sb.raw_zone_start,
            (unsigned long long)(sb.raw_zone_start + raw_blocks - 1),

@@ -604,6 +604,23 @@ jobs:
           dnf install -y gcc make pkgconf-pkg-config fuse3-devel zlib-devel \
             libzstd-devel systemd-rpm-macros rpm-build ccache python3 git \
             tar gzip file awk findutils
+          # `make release` pipes the tarball through zstd(1). The rolling image
+          # has been caught mid-transition: its zstd refuses to start with
+          # "Error : incorrect library version (expecting : 1.5.7 ; actual :
+          # 1.6.0)", which is the IMAGE's toolchain disagreeing with itself and
+          # not our tree. Bring both packages to the same generation, then prove
+          # the binary actually runs and say so by name if it does not -- a
+          # packaging gate may fail, but it must not fail with a message about
+          # somebody else's library.
+          dnf -y upgrade zstd libzstd || true
+          if ! zstd --version >/dev/null 2>&1; then
+            echo "::error::this image's zstd(1) refuses to run:"
+            zstd --version 2>&1 | sed 's/^/    /'
+            echo "The packaging gate cannot run on a broken toolchain."
+            echo "Fix the image (or pin a tag whose zstd and libzstd agree)."
+            exit 1
+          fi
+          zstd --version
 
       - name: build
         run: |

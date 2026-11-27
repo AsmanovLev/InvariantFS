@@ -224,7 +224,7 @@ HD_T := $(CURDIR)/build/hdtest
 
 TOOLS   := invf-mkfs invf-verify invf-fsck invf-cp invf-cat invf-ls invf-stat \
            invf-zip invf-fuse invf-import invf-convert invf-sweep \
-           invf-stats invf-verbatim invf-reconsolidate invf-resize invf-rollback invf-pack \
+           invf-stats invf-verbatim invf-reconsolidate invf-resize invf-rollback invf-pack invf-absorb \
            invf-vnode invf-plugin-host
 
 # Declared FIRST so it stays the default goal: make uses the first target in
@@ -329,6 +329,12 @@ crc32c_test handler_doom_test
 # can see it as both a prerequisite and an input to the link.
 mkfs_EXTRA := $(OBJ)/absorb.o
 $(eval $(call TOOL_RULE,mkfs))
+
+# invf-absorb: the tool half. Same module, different main (src/cli/absorb_cli.c),
+# so it needs a rule of its own rather than a TOOL_RULE (which would look for
+# src/cli/absorb.c, and that file is the module).
+$(OUT)/invf-absorb: $(OBJ)/absorb_cli.o $(OBJ)/absorb.o $(CORE_O) | $(OUT)
+	$(CC) $(CFLAGS) -o $@ $(OBJ)/absorb_cli.o $(OBJ)/absorb.o $(CORE_O) $(LDLIBS)
 
 $(foreach t,$(CLI_MAINS),$(eval $(call TOOL_RULE,$(t),)))
 

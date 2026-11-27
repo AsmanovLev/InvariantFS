@@ -71,4 +71,21 @@ int absorb_probe(const char *path, const char *packs_dir, absorb_plan_t *p);
 int absorb_write_reserve_list(const char *path, absorb_plan_t *p,
                               const char *out_path);
 
+/* Publish the old filesystem inside an ALREADY BUILT volume as `out_name`.
+ *
+ * The volume must have been made with those ranges RESERVED (`mkfs --reserve`),
+ * so nothing it did could have touched them. The content is assembled from two
+ * places and nothing is copied twice:
+ *   - the PREFIX (`prefix_blocks`) mkfs overwrote: read from `prefix_src`,
+ *     stored once into freshly allocated blocks;
+ *   - every reserved range: named WHERE IT ALREADY IS (pba == device offset), so
+ *     this publishes a file over bytes that never moved.
+ *
+ * Returns the inode id, or 0 with `why` filled. The caller verifies by reading
+ * the file back; this function does not claim success on its own. */
+uint64_t absorb_publish(const char *volume, const char *out_name,
+                        const char *prefix_src, const char *reserve_list,
+                        uint64_t prefix_blocks, uint64_t file_size,
+                        absorb_plan_t *p);
+
 #endif /* INVFS_ABSORB_H */

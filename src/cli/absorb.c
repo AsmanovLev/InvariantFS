@@ -107,6 +107,9 @@ int absorb_find_packs(const char *explicit_dir, char *out, size_t cap,
     const char *cand[4];
     int i;
 
+    char selfdir[512];
+    memset(selfdir, 0, sizeof selfdir);
+    (void)!readlink("/proc/self/exe", selfdir, sizeof selfdir - 1);
     cand[0] = explicit_dir;
     cand[1] = getenv("INVFS_PACKS");
     cand[2] = "tools/codecpacks";
@@ -122,9 +125,27 @@ int absorb_find_packs(const char *explicit_dir, char *out, size_t cap,
         copy_val(out, cap, cand[i]);
         return 1;
     }
+    /* last resort, and the one that actually works for an installed tool: the
+     * packs sit next to the binary's parent (bin/../tools/codecpacks) */
+    if (selfdir[0]) {
+        char *slash = strrchr(selfdir, '/');
+        if (slash) {
+            char probe[768];
+            DIR *d2;
+            *slash = 0;
+            snprintf(probe, sizeof probe, "%s/../tools/codecpacks", selfdir);
+            d2 = opendir(probe);
+            if (d2) {
+                closedir(d2);
+                copy_val(out, cap, probe);
+                return 1;
+            }
+        }
+    }
     snprintf(p->why, sizeof p->why,
              "no containerpack directory found (an explicit path, $INVFS_PACKS, "
-             "or tools/codecpacks); absorb has no map without one");
+             "tools/codecpacks, or next to the binary); absorb has no map "
+             "without one");
     return 0;
 }
 
@@ -348,4 +369,187 @@ int absorb_write_reserve_list(const char *path, absorb_plan_t *p,
     }
     remove(gcfg);
     return (int)p->used_extents;
+}
+
+/* ---------------------------------------------------------------------------
+ * Publishing the old filesystem inside the new volume.
+ *
+ * Two kinds of entry, and the difference is the point:
+ *   - the PREFIX (what mkfs overwrote) is real data we must STORE: it goes into
+ *     freshly allocated blocks and the entry names them;
+ *   - every reserved range is named WHERE IT IS (pba == offset), so publishing it
+ *     copies nothing at all. That is what makes absorb cheap on a 4 GiB rootfs.
+ *
+ * Every entry carries its own file_offset, so the file's holes (the source's
+ * garbage ranges) need no entry and read as zeros -- which is exactly what an
+ * unallocated block of the source is.
+ * ------------------------------------------------------------------------- */
+
+#include "volume.h"
+#include "volume_internal.h"
+
+/* Copy [off, off+len) of the source into freshly allocated blocks, each chunk
+ * framed the way the write path frames a RAW segment ([csize LE][crc32c]), and
+ * append one recipe entry per chunk. Chunks are bounded so a single entry stays
+ * a sane size and a 34 MiB prefix does not need a 34 MiB malloc. */
+static int absorb_copy_range(invfs_volume *v, FILE *src,
+                             invfs_ast_block_entry **ents, uint32_t *nents,
+                             uint64_t off, uint64_t len, absorb_plan_t *p)
+{
+    const uint64_t chunk = 1u << 20;      /* 1 MiB per entry */
+    uint64_t done = 0;
+
+    while (done < len) {
+        uint64_t clen = len - done;
+        uint64_t pba, nblocks;
+        uint8_t *buf;
+        uint32_t crc;
+        int zone = 0;
+
+        if (clen > chunk)
+            clen = chunk;
+        buf = (uint8_t *)malloc((size_t)clen + 8);
+        if (!buf) {
+            snprintf(p->why, sizeof p->why, "out of memory for a %llu-byte chunk",
+                     (unsigned long long)clen);
+            return -1;
+        }
+        if (fseeko(src, (off_t)(off + done), SEEK_SET) != 0 ||
+            fread(buf + 8, 1, (size_t)clen, src) != (size_t)clen) {
+            free(buf);
+            snprintf(p->why, sizeof p->why,
+                     "the source is shorter than the map claims at offset %llu",
+                     (unsigned long long)(off + done));
+            return -1;
+        }
+        crc = invfs_crc32c(buf + 8, (size_t)clen);
+        buf[0] = (uint8_t)(clen & 0xFF);
+        buf[1] = (uint8_t)((clen >> 8) & 0xFF);
+        buf[2] = (uint8_t)((clen >> 16) & 0xFF);
+        buf[3] = (uint8_t)((clen >> 24) & 0xFF);
+        buf[4] = (uint8_t)(crc & 0xFF);
+        buf[5] = (uint8_t)((crc >> 8) & 0xFF);
+        buf[6] = (uint8_t)((crc >> 16) & 0xFF);
+        buf[7] = (uint8_t)((crc >> 24) & 0xFF);
+        nblocks = (clen + 8 + INVFS_BLOCK_SIZE - 1) / INVFS_BLOCK_SIZE;
+        pba = alloc_raw_or_shadow(v, nblocks, &zone);
+        if (!pba) {
+            free(buf);
+            snprintf(p->why, sizeof p->why,
+                     "no room for %llu more blocks", (unsigned long long)nblocks);
+            return -1;
+        }
+        if (io_pwrite(&v->io, pba * INVFS_BLOCK_SIZE, buf,
+                      (size_t)(clen + 8)) != 0) {
+            free(buf);
+            snprintf(p->why, sizeof p->why, "write failed at offset %llu",
+                     (unsigned long long)(off + done));
+            return -1;
+        }
+        free(buf);
+        {
+            invfs_ast_block_entry *ne = (invfs_ast_block_entry *)
+                realloc(*ents, (*nents + 1) * sizeof **ents);
+            if (!ne) {
+                snprintf(p->why, sizeof p->why, "out of memory");
+                return -1;
+            }
+            *ents = ne;
+            memset(&(*ents)[*nents], 0, sizeof (*ents)[*nents]);
+            (*ents)[*nents].file_offset = off + done;
+            (*ents)[*nents].length = clen;
+            (*ents)[*nents].zone = INVFS_ZONE_RAW;
+            (*ents)[*nents].algo = INVFS_ALGO_NONE;
+            (*ents)[*nents].block_id = *nents;
+            (*ents)[*nents].pba = pba;
+            (*nents)++;
+        }
+        done += clen;
+    }
+    return 0;
+}
+
+uint64_t absorb_publish(const char *volume, const char *out_name,
+                        const char *prefix_src, const char *reserve_list,
+                        uint64_t prefix_blocks, uint64_t file_size,
+                        absorb_plan_t *p)
+{
+    invfs_volume *v;
+    invfs_ast_block_entry *ents = NULL;
+    uint32_t nents = 0;
+    uint8_t *blob = NULL;
+    size_t blen = 0;
+    uint8_t addr[INVFS_RECIPE_ADDR_LEN];
+    uint64_t ino = 0;
+    FILE *rl, *src;
+    int err = 0;
+
+    if (!volume || !out_name || !prefix_src || !reserve_list || !p)
+        return 0;
+
+    src = fopen(prefix_src, "rb");
+    if (!src) {
+        snprintf(p->why, sizeof p->why, "cannot read the source %s", prefix_src);
+        return 0;
+    }
+    v = vol_open(volume, &err);
+    if (!v) {
+        fclose(src);
+        snprintf(p->why, sizeof p->why, "cannot open the volume %s", volume);
+        return 0;
+    }
+
+    /* 1. the prefix: the region mkfs overwrote, which MUST be copied */
+    if (prefix_blocks &&
+        absorb_copy_range(v, src, &ents, &nents, 0, prefix_blocks * 4096u, p) != 0)
+        goto out;
+
+    /* 2. everything else the source allocates, copied from where it lies */
+    rl = fopen(reserve_list, "r");
+    if (!rl) {
+        snprintf(p->why, sizeof p->why, "cannot read %s", reserve_list);
+        goto out;
+    }
+    {
+        unsigned long long rs, rc;
+        while (fscanf(rl, "%llu %llu", &rs, &rc) == 2) {
+            uint64_t off = (uint64_t)rs * 4096u, len = (uint64_t)rc * 4096u;
+            if (prefix_blocks && off < prefix_blocks * 4096u) {
+                uint64_t skip = prefix_blocks * 4096u - off;
+                if (skip >= len)
+                    continue;
+                off += skip;
+                len -= skip;
+            }
+            if (len && absorb_copy_range(v, src, &ents, &nents, off, len, p) != 0) {
+                fclose(rl);
+                goto out;
+            }
+        }
+    }
+    fclose(rl);
+
+    if (!ents) {
+        if (!p->why[0])
+            snprintf(p->why, sizeof p->why, "no entry to publish");
+        goto out;
+    }
+    if (vol_ast_recipe_serialize(file_size, ents, nents, &blob, &blen) != 0 ||
+        vol_recipe_store(v, blob, blen, addr) != 0) {
+        free(blob);
+        snprintf(p->why, sizeof p->why,
+                 "the recipe does not fit (%u entries, %zu B)", nents, blen);
+        goto out;
+    }
+    free(blob);
+    ino = vol_create_content_node(v, out_name, file_size, addr);
+    if (!ino)
+        snprintf(p->why, sizeof p->why, "cannot create %s", out_name);
+    else
+        vol_flush(v);
+out:
+    free(ents);
+    vol_close(v);
+    fclose(src);
+    return ino;
 }

@@ -1608,3 +1608,48 @@ already uses, and then walks only that directory. Measured on the install-shaped
 load (5000 files in one directory, FUSE mount): **300 renames in 2.1 s**, 300
 creates in 0.19 s. The lesson is the one the unlink cascade already encoded: a
 sibling purge is a PARENT-DIRECTORY question, never a namespace question.
+
+## ext4fs `classify` calls the JOURNAL garbage, so an absorbed image will not mount (2026-11-27)
+
+Found by building the absorb path end to end instead of trusting the map. A
+128 MiB ext4 image (mkfs.ext4 default, so 1024-byte blocks) classified as:
+
+```
+byte 0        .. 3072        cls 0 meta_structure
+byte 3072     .. 265216      cls 1 garbage          (free space at the head)
+byte 265216   .. 8175616     cls 0 meta_structure   (bitmaps + inode tables)
+byte 8175616  .. 8176640     cls 1 garbage
+byte 8176640  .. 8209408     cls 2 member          (the fixture's os-release)
+byte 41946112 .. 50332672    cls 1 garbage         <-- THIS IS THE JOURNAL
+```
+
+The journal (inode 8, 4096 ext4-blocks starting at byte 41 946 112) is the one
+thing an ext4 image needs in order to MOUNT by default, and `classify` reports it
+as garbage. Absorb therefore copies everything else and leaves the journal zero,
+and the result is:
+
+```
+$ e2fsck -fn got.ext4
+Superblock has an invalid journal (inode 8).
+Journal superblock is corrupt.
+e2fsck: Cannot proceed with file system check
+```
+
+Measured with `absorb_publish` as it stands: the copied prefix is BYTE-IDENTICAL
+to the source (sha256 `8590fdde…` for both over the first 8 706 blocks), and the
+first difference in the whole image is at byte 41 944 066 — the journal's first
+block. So the copy machinery is right and the map is what is wrong.
+
+Two ways out, and the choice is a promise, not an implementation detail:
+
+1. **Fix the pack**: `s_journal_inum`'s extent tree (or the journal's static
+   allocation) is `meta_structure`, like the pack's own header says it is
+   ("journal -- a rebuild needs them"). Then absorb's `old.ext4` mounts as-is.
+2. **Weaken the promise**: declare that an absorbed image needs one `e2fsck -fy`
+   (journal reset) before it mounts. That is defensible for a filesystem that
+   was cleanly unmounted — the journal holds nothing to replay — but it must be
+   stated in the tool's output, not discovered by the user.
+
+Until one of them lands, `invf-absorb publish` produces a file that is exact on
+what the map called allocated and does NOT mount: `mkfs --absorb` stays
+plan-only, which is why that refusal exists.
