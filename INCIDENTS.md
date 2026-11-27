@@ -4194,3 +4194,24 @@ the second allocation, which names the stage — and the pids — instead of lea
 corpse for forensics. Until that prints, the mechanism is: representational
 mismatch at a shared pba, reached within one second of an up-mode ack following a
 drop-mode lie.
+
+### Two checker facts found while reading that artifact (2026-11-27)
+
+Both are about the TOOLS, not the engine, and both are false-green shapes:
+
+1. **Without `--deep`, `invf-verify` says the volume is fine.** On the artifact above:
+   `invf-verify <img>` → `OK: … is a valid InvariantFS volume`; the tear appears only
+   under `--deep` (`CORRUPT: s12.bin`) or in `invf-fsck`'s
+   `live recipes: 1 UNREADABLE of 34`. A shallow verify validating structure only is
+   defensible; printing `OK` without a word about "did not read the files" is not.
+2. **`invf-fsck` prints `DAMAGED` and exits 0.** Measured on that image, report mode,
+   no flags: verdict `DAMAGED`, `exit=0`. The comment in `src/cli/fsck.c` says the
+   opposite ("The exit code is 3 whenever damage was found, REPAIRED or not"), and
+   the code returns `crep.nuncut ? 3 : 0` on the content path — so `nuncut` did not
+   count the unreadable recipe the same run had just named. `invf-fsck img && echo
+   healthy` therefore prints "healthy" on a volume with an unreadable file, which is
+   the exact class of lie the WP503 gate exists to stop. It is also why the soak
+   parses text (`\nOK`) instead of trusting the status: a workaround, not a fix.
+
+Neither is a leg5 cause; both are release-checklist items because a checker that
+cannot fail by exit code is a checker that will be scripted wrong.
