@@ -1688,3 +1688,23 @@ Measured on a 128 MiB / 1 KiB image: reserved bytes 10 782 600 -> 16 550 792
 (+4 MiB journal, + the resize inode's written extents), the journal's first block
 moves cls 1 -> cls 0, and the suite reports "0 garbage block(s) held non-zero bytes
 in the source, dropped".
+
+### Retracted: "recipe blobs are never reclaimed" (measured 2026-11-27)
+
+Two workload shapes, rewrite through the public write path (`invf-cp`), allocated
+blocks read from `invf-verify` after every rewrite:
+
+| shape | why it matters | allocated |
+|---|---|---|
+| 4 MiB file, 10 rewrites | recipe ~2 KiB, may be stored inside the record | 10021 → 10024, then **flat** |
+| 32 MiB file (512 spans), 7 rewrites | recipe ~16 KiB, MUST be a separate blob | 21052 → 21072 once, then **flat** |
+| the same with `INVFS_LAZY_RECLAIM=0` | the eager-free path | **flat** (21072) |
+
+So the old recipe blob does come back on rewrite, in both the inline and the
+out-of-line case, with lazy reclaim on and off. What grows after a `invf-sweep`
+(21072 → 29770 on the 32 MiB volume) is the sweep's own re-encoding, not a leak.
+
+Not covered by this measurement, and therefore still unproven either way: a
+rewrite **through the mounted FUSE path** (needs root to mount), and rewrite-heavy
+workloads where the retiring version is superseded by a *different* inode.
+Recorded so the next reader does not re-open the claim without adding those.
