@@ -359,6 +359,7 @@ CLI_MAINS := verify fsck cp cat ls why dedupe_sim arctest blkio_test resize \
              spn_walk_tear_test spn_broken_extent_test \
              reclaim_reader_epoch_test dedupe_symlink_test dirs_free_before_publish_test \
              stat_counts_test acl_eio_test acl_inherit_test meta_clobber_test spn_skip_recipe_test \
+             touched_domain_test \
              walk_status_test walk_status_fuse_test sweep_refuse_fuse_test no_v2_surface_test \
              heat_walk_test no_ckp0_surface_test noautopack_test \
 table_sync_evict_test write_create_path_test tz_registry_test \
@@ -1245,6 +1246,12 @@ test-shard-3: $(TEST_SHARD_DEPS) test-shard-check
 # expectation pinned to a literal would only encode today's count. Needs
 # invf-mkfs, invf-ls and invf-stat on disk (the `all` prerequisite).
 	$(TESTENV) $(TESTISO) $(OUT)/invf-stat_counts_test /tmp
+# WP-touched-domain: the ENOSPC precheck asks touched[] in the child domain
+# it lives in. Asserted on the COUNT, not on a refusal: a wrong count only
+# changes a decision when the volume's headroom sits inside a 17*N-block
+# window, and a test built around that window would pass for the wrong
+# reason (measured 2026-11-28 while trying to build exactly that volume).
+	$(TESTENV) $(TESTISO) $(OUT)/invf-touched_domain_test
 # WP xattr-enodata-vs-eio: vol_get_xattr returned -1 for BOTH "no such
 # xattr" and "the row could not be read", and perm_check_cred used that
 # to decide "this inode has no ACL" -- so a read error on the inode row

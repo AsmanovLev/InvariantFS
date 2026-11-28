@@ -13,6 +13,44 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
+## FIXED — the ENOSPC precheck read a per-child bitmap with an absolute index
+
+  **Date:** Nov 28, 2026
+  **Severity:** Medium (a write that under-reserves can start writing, then fail
+  on allocation -- the exact thing the precheck's "refuse before touching
+  anything" comment promises cannot happen; bounded by child_segs slots)
+  **Status:** **FIXED and measured.** `wsess_fresh_segments()` asks the question
+  in the domain the bitmap lives in; `src/cli/touched_domain_test.c` asserts the
+  count and fails on the old expression.
+
+  `touched[]` is the ranged-write session's ownership map: `abort` frees exactly
+  the segments the session wrote itself and leaves aliased ones to the commit's
+  retire. It is **per child** (`touched[j % child_segs]`, memset on a child
+  switch), while the precheck indexed it with the absolute `j`.
+
+  Measured on a `child_segs=2` file after the session wrote segment 7 (child 3,
+  relative slot 1), with the slot state printed next to the count:
+
+  ```
+  [touch] range 1..1 fresh=0 ref=1   (seg 1: child 0 rel 1)
+  [touch]   seg 1: touched[1]=1 ents[1].pba=10261 cap=4 n_ents=2
+  ```
+
+  `touched[1]` means segment 7; it was read as segment 1. Under-reserves 17
+  blocks for a segment that needs a slot, and over-reserves in the mirror case.
+  With the default `child_segs=65536` a file under 4 GiB is a single child, the
+  domains coincide, and every call agreed -- which is why this never showed.
+
+  The test is about the **count**, not about a refusal, and that choice is part
+  of the fix: an experiment was built to force the late refusal (fill a volume
+  until the headroom sits inside a 17*N-block window) and it bracketed the window
+  from both sides without landing inside, because the session's own seed writes
+  need the same space. A test built that way would pass or fail for reasons that
+  have nothing to do with the domain.
+
+  Red control: with the shipped expression the same test reports
+  `fresh(1,1)=0`, `fresh(7,7)=1`, `fresh(4,7)=4` against 1, 0, 2.
+
 ## FIXED — the TSan gate excluded the FUSE suites on a failure that was a missing probe
 
   **Date:** Nov 28, 2026

@@ -821,6 +821,45 @@ static int wsession_load_old(invfs_wsession *s)
 }
 
 
+/* How many of [first,last] still need a slot of their own.
+ *
+ * touched[] is PER CHILD: wsession_write_seg_n sets touched[j % child_segs] after
+ * wsession_switch_child, and the switch memsets the array. s->ents[] is per child
+ * for the same reason. So the question "is absolute segment j already
+ * materialized" can only be answered by (a) checking that j belongs to the child
+ * the session is on, and (b) then indexing the bitmap by the RELATIVE slot.
+ *
+ * This used to be written inline as `!(j < touched_cap && touched[j])`, which
+ * asks a per-child bitmap with an absolute index. It is only right while
+ * [first,last] sits inside the current child -- a whole file under 4 GiB with the
+ * default child_segs of 65536 -- and wrong on both sides of a boundary, measured
+ * 2026-11-28 on a session sitting in child 3 of a child_segs=2 file:
+ *
+ *   range 1..1 (child 0) : the count read child 3's slot 1 (segment 7) and
+ *                         reported 0 fresh instead of 1 -- UNDER-reserves
+ *   range 7..7 (child 3) : 1 fresh where the segment was already mine --
+ *                         over-reserves 17 blocks (the safe direction)
+ *
+ * Exposed (not static) so src/cli/touched_domain_test.c can assert the domain
+ * directly: a wrong count is invisible until it crosses a specially-sized
+ * volume's headroom, and a test that has to build one cannot fail for the right
+ * reason. */
+uint64_t wsess_fresh_segments(const invfs_wsession *s, uint32_t first, uint32_t last)
+{
+    uint32_t cur = (uint32_t)s->cur_child;
+    uint32_t j;
+    uint64_t fresh = 0;
+    for (j = first; j <= last; j++) {
+        uint32_t child = (uint32_t)(j / s->child_segs);
+        uint32_t rel = (uint32_t)(j % s->child_segs);
+        int materialized = (child == cur && rel < s->touched_cap &&
+                            s->touched[rel] && s->ents[rel].pba);
+        if (!materialized) fresh++;
+    }
+    return fresh;
+}
+
+
 
 int vol_write_range(invfs_wsession *ws, uint64_t offset,
                     const uint8_t *data, size_t len)
@@ -862,10 +901,17 @@ int vol_write_range(invfs_wsession *ws, uint64_t offset,
      * reserve. */
     {
         uint32_t filled = wsession_filled(s);
-        uint64_t fresh = 0, need;
+        uint64_t fresh = wsess_fresh_segments(s, first, last);
+        uint64_t need;
         if (first > filled) fresh += first - filled;
-        for (j = first; j <= last; j++)
-            if (!(j < s->touched_cap && s->touched[j])) fresh++;
+        if (getenv("INVFS_TOUCH_TRACE") && getenv("INVFS_TOUCH_TRACE")[0] != '0')
+            fprintf(stderr, "[touch] range %u..%u filled=%u child_segs=%u "
+                    "cur_child=%u fresh=%llu need=%llu free=%llu\n",
+                    (unsigned)first, (unsigned)last, (unsigned)filled,
+                    (unsigned)s->child_segs, (unsigned)s->cur_child,
+                    (unsigned long long)fresh,
+                    (unsigned long long)(fresh * (SEGMENT_SIZE / INVFS_BLOCK_SIZE + 1)),
+                    (unsigned long long)s->v->free_blocks);
         need = fresh * (SEGMENT_SIZE / INVFS_BLOCK_SIZE + 1);
         if (s->v->free_blocks <= s->v->sb.reserved_blocks +
                                  s->v->sb.hard_min_blocks + need)

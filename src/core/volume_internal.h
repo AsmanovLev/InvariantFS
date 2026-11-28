@@ -1788,6 +1788,13 @@ int write_segment_blocks(invfs_volume *v, uint64_t pba, uint8_t *buf,
  * sweep path would free blocks the aliases still name. */
 int vol_write_active_name(invfs_volume *v, const char *name);
 int vol_write_active_id(invfs_volume *v, uint64_t inode_id);
+/* How many segments of [first,last] the session still has to allocate for: the
+ * ENOSPC precheck's number. Per-CHILD by construction (touched[] and ents[] are
+ * indexed by j % child_segs and reset on a child switch), so this answers only
+ * for the segment range it is given. Not static because a wrong answer is
+ * invisible except on a volume sized to the exact headroom -- see
+ * src/cli/touched_domain_test.c. */
+uint64_t wsess_fresh_segments(const invfs_wsession *s, uint32_t first, uint32_t last);
 
 /* Parse + validate an EXER payload. Disk input, never trusted: magic, part
  * count (1..EXE_MAX_MEDIA), ascending non-overlapping ranges inside

@@ -1017,6 +1017,53 @@ was fixed indirectly; if it is ever seen again, the blind-map suspect
 (`vol_reclaim.c` frees metadata pages, the pin guard lives only in `volume.c`,
 `v->retain_release=1` is a deliberate bypass) still stands.
 
+## RESOLVED (WP-touched-domain) -- the ENOSPC precheck asked a per-child bitmap with an absolute index
+
+`touched[]` is a write-session ownership map: `touched[i]` says "this session wrote
+segment i itself", so `abort` can free exactly those pbas and leave the **aliased**
+ones alone (they belong to the old record until the commit's retire).
+
+It is **per child**: `wsession_write_seg_n` stores it at `j % child_segs`, and
+`wsession_switch_child` memsets it. The atomic ENOSPC precheck counted
+`!(j < touched_cap && touched[j])` with the ABSOLUTE index -- three domains in one
+expression (`rel_j` from the bitmap, absolute `j` from the loop, absolute `filled`).
+
+**Measured 2026-11-28** on a `child_segs=2` file after the session wrote segment 7
+(child 3, relative slot 1), with the slot state printed alongside:
+
+```
+[touch] range 7..7 filled=8 cur_child=3 fresh=1 ref=0   (seg 7: child 3 rel 1)
+[touch]   seg 7: touched[1]=1 ents[1].pba=10260 cap=4 n_ents=2
+[touch] range 1..1 filled=8 cur_child=3 fresh=0 ref=1   (seg 1: child 0 rel 1)
+[touch]   seg 1: touched[1]=1 ents[1].pba=10261 cap=4 n_ents=2
+```
+
+`touched[1]` means **segment 7** and is being read as if it meant **segment 1**:
+the precheck reports "already materialized" for a segment that needs a slot
+(**under-reserves**, 0 instead of 17 blocks) and "fresh" for a segment that is
+materialized (over-reserves 17 blocks -- the safe direction).
+
+Control: with the default `child_segs=65536` a file under 4 GiB is one child, the
+domains coincide, and the two numbers agree on every call -- which is why this was
+invisible in production.
+
+**Fix** (`wsess_fresh_segments()`): a segment is materialized only if it belongs to
+the child the session is on AND its relative slot is touched with a live pba;
+anything in another child counts as fresh unless it is below `filled`.
+
+**Test** (`src/cli/touched_domain_test.c`, shard 3): asserts the **count** on a
+`child_segs=2` fixture, not a refusal. A refusal-based test needs a volume whose
+headroom sits inside a 17*N-block window above a ~500-block reserve; that was
+tried here and bracketed from both sides without landing inside, and a test built
+that way passes or fails for reasons that have nothing to do with the domain.
+Red control: with the shipped expression the test reports `fresh(1,1) = 0`,
+`fresh(7,7) = 1`, `fresh(4,7) = 4` against 1, 0, 2 -- three failures.
+
+The earlier agent patch below (`rel_j` alone) was **not** sufficient even though
+its acceptance gate was about the test: it drops the `child == cur` term, so on any
+child other than the current one it reads the current child's slot under a relative
+index -- the same confusion with a different arithmetic.
+
 ## Agent C (`touched[]`): the fix is correct, but the test does NOT prove the defect -- rejected
 
 An agent in worktree `/var/tmp/wtC` proposed a fix correct in substance:
