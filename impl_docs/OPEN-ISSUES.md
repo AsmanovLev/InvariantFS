@@ -1185,8 +1185,9 @@ after:  build_file_table: total=10.299s (walk=10.209s, qsort=0.090s)
 
 -78% on the exact number that was timing out the initramfs, and with the mount
 itself unchanged (vol_open 0.037 s, fold 0.000 s). The warmup/walk contention was
-the whole of it. `test-writepath`'s 29 TSan reports are still open (FUSE daemon),
-so the lazy table is not needed yet.
+the whole of it. `test-writepath`'s 29 TSan reports are resolved and the suite is in
+that gate as of 2026-11-28 (the `vol_close` destroy order and the root-cache races
+were the cause; see the RESOLVED section below).
 
 Tooling left behind: `make PROF=1 OUT=bin-prof OBJ=build/obj-prof` builds with
 `-pg` for `gprof`, because "the walk is slow" is not an answer.
