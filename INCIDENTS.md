@@ -50,7 +50,8 @@
     looked like an `-O1`-vs-`-O2` on-disk format split. A full 3x3 matrix of freshly
     built `-O1` / `-O2` / default builds reads every volume bit-exactly.
   * one more trap for whoever reuses a clone: the CI tsan job copies
-    `build/obj-tsan/core_objs.txt` over `build/core_objs.txt`, which is fine in a
+    the TSan object list (core_objs.txt under build/obj-tsan) over the ordinary
+    one (build/core_objs.txt), which is fine in a
     throwaway workspace and poisons a reusable one -- the next plain run's helper
     link then fails on `undefined reference to __tsan_func_entry`, or worse, links
     instrumented objects into an uninstrumented suite. Restore it with

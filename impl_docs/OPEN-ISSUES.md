@@ -1251,7 +1251,7 @@ were not about instrumentation. Retracting the 2026-11-25 reading above:
   bound measures shadow memory, so it names the condition and skips, and the
   ordinary build still checks it.
 
-Measured on a clean tree, `build/core_objs.txt` pointing at `build/obj-tsan` (CI
+Measured on a clean tree, the core object list pointing at build/obj-tsan (CI
 does the same copy): `WRITEPATH E2E: PASS`, `DYNZONE E2E: PASS`, zero reports.
 
 Two mechanical guards so this cannot recur:
