@@ -420,6 +420,12 @@ jobs:
       - name: build with ThreadSanitizer
         run: |
           make -j"$(nproc)" TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan
+          # meta_probe is not part of `all` (it is a debug probe, not a user tool),
+          # and the two FUSE suites assert through it. Without it class_of() returns
+          # "" and test-writepath reports "swept.txt not TEXT post-sweep" -- a policy
+          # divergence that never happened. Measured 2026-11-28: with the probe built,
+          # both suites pass under TSan with zero reports.
+          make -j"$(nproc)" TSAN=1 OUT=bin-tsan OBJ=build/obj-tsan meta_probe
           # A TSan build writes its object list next to its objects (build/
           # core_objs.txt stays the ordinary build's -- see the CORE_OBJS_FILE
           # comment in the Makefile). Suites that compile their own helper read
@@ -460,25 +466,31 @@ jobs:
           # measured 2026-11-25. Suites honour INVFS_TEST_CFLAGS for exactly this.
           export INVFS_TEST_CFLAGS="-fsanitize=thread"
           FAIL=0
-          # The two FUSE suites are NOT in the gate, and this is the measured
-          # reason rather than a preference. Putting them back (runs 45728625737
-          # and 45730271818) produced ZERO ThreadSanitizer reports in either --
-          # the 29 and 89 from before were the vol_close destroy order and the
-          # root-cache races, and they are fixed. What they produced instead were
-          # two failures about the suites themselves:
+          # The two FUSE suites are IN the gate as of 2026-11-28, and the reason they
+          # were out is now known to have been wrong twice over:
           #
-          #   test-writepath  "daemon RSS grew 65MB on a 300MB stream" -- shadow
-          #                   memory lives in the same RSS (that leg now skips by
-          #                   name under a sanitizer, which is why the next run got
-          #                   past it) and then "swept.txt not TEXT post-sweep",
-          #                   a sweep-POLICY assertion that the ordinary build
-          #                   checks and that a sanitizer run perturbs.
-          #   test-dynzone    rc=127: its own helper build and timing.
+          #   * test-writepath failed at "swept.txt not TEXT post-sweep" because
+          #     meta_probe was never built for bin-tsan. class_of() runs it with
+          #     2>/dev/null, so the missing binary came back as an empty string and
+          #     the comparison failed as if the sweep had changed policy. It had not.
+          #   * test-dynzone failed at rc=127 for the same missing probe, which the
+          #     earlier note recorded as "its own helper build".
           #
-          # So: for race detection the offline suites carry the gate, and the FUSE
-          # behaviour stays covered by e2e-full, which runs these suites uninstrumented
-          # on every full tier. Recorded in impl_docs/OPEN-ISSUES.md.
-          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback; do
+          # Measured from a clean tree, with the instrumented object list copied:
+          # WRITEPATH E2E: PASS and DYNZONE E2E: PASS, zero ThreadSanitizer reports,
+          # one NAMED skip (test-writepath's RSS bound, which measures shadow memory
+          # under a sanitizer and belongs to the ordinary build -- that skip was
+          # already there and is legitimate).
+          #
+          # Both suites now fail loudly if any $B/<tool> they name is absent, deriving
+          # the list from themselves, so this particular fabrication cannot recur.
+          #
+          # Locally (WSL2 kernel 6.6) TSan refuses to start with "FATAL: ThreadSanitizer:
+          # unexpected memory mapping" and the suite then exits 66 with ZERO reports --
+          # which reads exactly like a clean run and is not one. Run suites under
+          # `setarch $(uname -m) -R` there. CI runners do not need it.
+          for s in test-put-failure test-sweep-lane-retire test-sweep-publish-rollback \
+                   test-writepath test-dynzone; do
             log="/tmp/tsan-$s.log"
             echo "::group::$s"
             rc=0

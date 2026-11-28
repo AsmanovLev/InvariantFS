@@ -872,6 +872,11 @@ $(OUT)/meta_probe: $(OBJ)/meta_probe.o $(CORE_O)
 	$(CC) $(CFLAGS) -Itools -o $@ $< $(CORE_O) $(LDLIBS)
 $(OBJ)/meta_probe.o: tools/meta_probe.c | $(OBJ)
 	$(CC) $(CFLAGS) -c -o $@ $<
+# Phony alias: the rule above is `$(OUT)/meta_probe`, so `make meta_probe` was
+# "No rule to make target" -- and a suite telling you to build the probe that way
+# is worse than no message. Suites derive their tool list from themselves and name
+# this target in the failure, so it has to exist.
+meta_probe: $(OUT)/meta_probe
 
 clean:
 	rm -rf $(OBJ) $(CORE_OBJS_FILE) $(TOOLS:%=$(OUT)/%) $(OUT)/invf-codec_test \

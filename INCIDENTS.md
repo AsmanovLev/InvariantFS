@@ -13,6 +13,52 @@
 > a path that cannot be pointed at in the tree — a name you cannot follow is
 > rot whether or not it once existed.
 
+## FIXED — the TSan gate excluded the FUSE suites on a failure that was a missing probe
+
+  **Date:** Nov 28, 2026
+  **Severity:** Medium (a gate reported a *policy divergence* that never happened, and
+  the two suites with the most threads were out of the race gate for three days)
+  **Status:** **FIXED and the claim retracted.** Both suites are in the `tsan` job
+  now: `WRITEPATH E2E: PASS`, `DYNZONE E2E: PASS`, zero reports.
+
+  The recorded reason for excluding them (impl_docs/OPEN-ISSUES.md, 2026-11-25) was
+  that `test-writepath` failed `swept.txt not TEXT post-sweep` -- "a sweep POLICY
+  assertion that a sanitizer run perturbs" -- and that `test-dynzone` failed `rc=127`
+  in "its own helper build". Both were **`meta_probe` not being built for `bin-tsan`**.
+
+  Why it read as a policy bug: `class_of()` calls `meta_probe ... 2>/dev/null`, so a
+  missing binary produced an empty string, and `[ "" = "7" ]` failed exactly like a
+  wrong class would. The theory about timing-dependent text classification was
+  invented to explain a shell error nobody could see.
+
+  Fixed mechanically, not by remembering:
+  * each suite is now its own
+    tool list -- `grep -o '\$B/[a-z][a-z0-9_-]*' "$SELF"` -- and fails naming the
+    missing path and how to build it. `$SELF` is absolute and captured before the
+    suite `cd`s into `/dev/shm`; the first version used a relative `$0` and silently
+    checked nothing.
+  * the guard fails when the list is empty. A checker that cannot fail is what let
+    this sit for three days; the same rule as the red controls in
+    `tools/check-literal-lengths.py` and `tools/bench-opt.sh`.
+  * `make meta_probe` is a phony alias (the rule is `$(OUT)/meta_probe`), because the
+    guard's advice must be a command that works.
+
+  Two more artefacts lied during the investigation, both recorded because the pattern
+  is now the most expensive one in this repo:
+  * the clone's `bin/` and `build/` were from **Nov 23** while the tree was current, so
+    a volume written by a fresh build came back `EIO` from a three-day-old reader and
+    looked like an `-O1`-vs-`-O2` on-disk format split. A full 3x3 matrix of freshly
+    built `-O1` / `-O2` / default builds reads every volume bit-exactly.
+  * one more trap for whoever reuses a clone: the CI tsan job copies
+    `build/obj-tsan/core_objs.txt` over `build/core_objs.txt`, which is fine in a
+    throwaway workspace and poisons a reusable one -- the next plain run's helper
+    link then fails on `undefined reference to __tsan_func_entry`, or worse, links
+    instrumented objects into an uninstrumented suite. Restore it with
+    `rm build/core_objs.txt && make`, or use a separate clone per build flavour.
+  * on the WSL2 6.6 kernel TSan dies with `FATAL: ThreadSanitizer: unexpected memory
+    mapping` and the suite exits **66 with zero reports**, which looks like success.
+    `setarch $(uname -m) -R` is required there.
+
 ## FIXED (WP630) — a FUSE root cannot complete systemd's shutdown: `invf-fuse` is killed with no shutdown path
 
   **Date:** Oct 19, 2026

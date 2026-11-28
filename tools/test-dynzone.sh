@@ -43,6 +43,10 @@ set -e
 set -o pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
+# Absolute self path, captured BEFORE the suite cd's into /dev/shm: the tool
+# guard greps this file, and a relative $0 stops resolving after the cd (the
+# first version of the guard silently checked nothing because of that).
+SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 # INVFS_BIN lets a sanitizer build (bin-tsan) be exercised without
 # replacing the binaries the normal runs use.
 B=${INVFS_BIN:-$REPO/bin}
@@ -55,6 +59,25 @@ cd /dev/shm
 rm -f "$IMG1" "$IMG2"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# Every $B/<tool> this script names must exist before it runs. Derived from the
+# script itself, not hand-listed, so a new tool cannot be forgotten -- and loud,
+# because the failure it prevents is silent: with meta_probe absent, the zone
+# helpers return nothing and the legs die with rc=127 (the shell's "command not
+# found"), which the 2026-11-25 TSan record read as "its own helper build".
+TOOLS=$(grep -o '\$B/[a-z][a-z0-9_-]*' "$SELF" | sed 's|\$B/||' | sort -u)
+# A guard that finds no tools must fail: an empty list is a broken grep, not
+# a clean tree, and this one already failed open once.
+[ -n "$TOOLS" ] || fail "tool guard found nothing to check in $SELF -- the grep is broken"
+for t in $TOOLS; do
+    if [ ! -x "$B/$t" ]; then
+        case "$B" in
+            "$REPO/bin") how="make $t" ;;
+            *) how="make TSAN=1 OUT=$B OBJ=build/obj-$(basename "$B") $t" ;;
+        esac
+        fail "missing $B/$t -- build it first: $how"
+    fi
+done
 
 cleanup() {
     fusermount3 -u "$MNT" 2>/dev/null || true

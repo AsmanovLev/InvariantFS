@@ -1233,28 +1233,49 @@ countdown and armed string (no synchronisation at all), `blkio`'s I/O counters
 an hour later), and `invf-fsck`'s warmup (it re-reads the RT30 descriptor while a
 walker reads `v->rt`).
 
-## Under TSan the FUSE suites fail on their own assertions, not on races (2026-11-25)
+## RESOLVED: the FUSE suites under TSan were failing on a missing probe (2026-11-28)
 
-`test-writepath` and `test-dynzone` were put back into the `tsan` gate twice, on the
-theory that their earlier 29 and 89 reports were just the `vol_close` destroy order
-and the root-cache races. Both times the answer was the same: **zero ThreadSanitizer
-reports** in either suite. What failed instead:
+Both FUSE suites are in the `tsan` gate now, and the two failures that kept them out
+were not about instrumentation. Retracting the 2026-11-25 reading above:
 
-* `test-writepath` first: `daemon RSS grew 65MB on a 300MB stream`. ThreadSanitizer
-  keeps shadow memory and per-thread metadata in the same RSS, so the bound was
-  measuring the sanitizer. That leg now names the condition and skips under one.
-  Then: `swept.txt not TEXT post-sweep` -- a sweep POLICY assertion, which the
-  ordinary build checks and a sanitizer run perturbs (the sweep's text decision
-  depends on what it sees while the file is being written, and an instrumented run
-  changes that timing).
-* `test-dynzone`: `rc=127`, its own helper build.
+* `test-writepath`'s `swept.txt not TEXT post-sweep` came from **`meta_probe` never
+  being built for `bin-tsan`**. `class_of()` invokes it with `2>/dev/null`, so a
+  missing binary returned an empty string and the `= "7"` comparison failed as if
+  the sweep had chosen a different class. The sweep had not: with the probe built,
+  the same assertion passes under TSan. The old note's theory -- "a policy that
+  depends on timing rather than on content" -- was invented to explain a shell
+  error that had been silenced. There is no such open question.
+* `test-dynzone`'s `rc=127`, recorded as "its own helper build", was the same
+  missing probe reaching the zone helpers.
+* The RSS skip is the only real sanitizer interaction, and it is legitimate: the
+  bound measures shadow memory, so it names the condition and skips, and the
+  ordinary build still checks it.
 
-So the gate keeps the three offline suites, where races are found and the
-assertions are about the engine; the FUSE paths stay covered by `e2e-full`, which
-runs these suites uninstrumented on every full tier. The open question worth a
-look sometime is the sweep classification one: if a slower write path can make a
-text file stop being TEXT, that is a policy that depends on timing rather than on
-content, and it deserves a measurement of its own.
+Measured on a clean tree, `build/core_objs.txt` pointing at `build/obj-tsan` (CI
+does the same copy): `WRITEPATH E2E: PASS`, `DYNZONE E2E: PASS`, zero reports.
+
+Two mechanical guards so this cannot recur:
+
+* both suites derive the tool list **from themselves** (`grep -o '\$B/[a-z]...'` on
+  the absolute `$SELF`, captured before the suite `cd`s away) and fail with the
+  missing path and the build command. The guard also fails when it finds *nothing*,
+  because the first version of it silently checked zero tools -- a checker that had
+  never been able to fail.
+* `make meta_probe` exists as a phony alias, because the rule was `$(OUT)/meta_probe`
+  and the guard's advice would otherwise have been "No rule to make target".
+
+One trap worth recording for local runs: on the WSL2 6.6 kernel, ThreadSanitizer
+refuses to start with `FATAL: ThreadSanitizer: unexpected memory mapping`, the suite
+exits **66 with zero reports**, and that is indistinguishable from a clean run unless
+you know it. Run under `setarch $(uname -m) -R`. CI runners do not need it.
+
+A third artefact bit during this investigation: the clone's `bin/` and `build/` were
+from **2026-11-23** while the tree was current, so a fresh `-O1` build's volume came
+back `EIO` from a three-day-old reader and looked like an `-O1`-vs-`-O2` format
+split. Freshly built `-O1`, `-O2` and default builds read each other's volumes
+bit-exactly in a full 3x3 matrix. Same rule as AGENTS.md 1.8: name the artefact.
+
+## CDC vs fixed 4 KiB, measured on mixed user data rather than on VM images (2026-11-25)
 
 ## CDC vs fixed 4 KiB, measured on mixed user data rather than on VM images (2026-11-25)
 
