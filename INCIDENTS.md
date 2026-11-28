@@ -4636,43 +4636,22 @@ Rule that would have caught both: **anything executed by path in a test or a too
 be built by that run**, and a pack binary committed to a working tree is a stale
 binary waiting to be believed.
 
-## absorb commit: byte-exact under the default reclaim policy, wrong under lazy_reclaim=0
+## absorb commit is byte-exact under BOTH reclaim policies (retraction)
 
-The in-place adoption works end to end on a 128 MiB ext4 fixture — `commit` runs,
-`old.ext4` is 134217728 bytes, **sha256 identical to the source**, `e2fsck -fn` exits
-0, and the extracted image mounts and reads (§ the WP-ABSORB work). That is measured
-with the default reclaim policy.
+An earlier entry said the published image differed under `INVFS_LAZY_RECLAIM=0` and let
+e2fsck refuse it. That was wrong, and the mechanism was already on the page: those runs
+produced a **4-range** reserve list, not 8, because the pack binary in the tree was from
+11-23 and predated the reserved-inode fix. The reclaim policy was never the variable.
 
-With `INVFS_LAZY_RECLAIM=0` — the policy every e2e suite runs under — the same fixture
-produces a **different** image, and e2fsck says `journal superblock is corrupt`. So the
-published bytes depend on a reclaim knob, which they must not: this is the same class
-as the retire double-charge, and it is OPEN.
+Measured on the same fixture, alternating only the policy, with a current pack:
 
-What is known so far, and it is not much: the damage is not in the prefix (that comes
-from the saved copy) but somewhere in the reserved ranges, and the check-then-write
-order inside `absorb_copy_range` is the first place to look — with eager reclaim each
-chunk's commit can free blocks that a later chunk then reallocates, which is harmless
-for a *new* file and fatal for one that is being assembled over a device whose other
-half is the reference.
+    INVFS_LAZY_RECLAIM=1   commit rc=0  8 ranges  sha 34994b7b…  IDENTICAL  e2fsck rc=0
+    INVFS_LAZY_RECLAIM=0   commit rc=0  8 ranges  sha 34994b7b…  IDENTICAL  e2fsck rc=0
 
-`tools/test-absorb-commit.sh` therefore unsets `INVFS_LAZY_RECLAIM` and prints why: the
-leg tests the claim that holds, and the divergence is named here instead of producing a
-red suite with no explanation. When the divergence is fixed, the `unset` goes away and
-the leg runs under both policies.
+So `tools/test-absorb-commit.sh` no longer unsets the variable: the leg runs under
+whatever the harness sets, and it passes. A guard that is no longer needed is a claim
+about the system that has stopped being true.
 
-### Correction: the stale pack binary was LOCAL, and `all` is not supposed to fix it
-
-An earlier version of this section blamed the build system for not rebuilding pack CLI
-binaries. That was wrong: a generated `HELPER_RULE` covers every pack in `CPACKS`,
-`HELPERS` depends on them, and `helpers` builds them. CI runs `make -j6 && make helpers`.
-
-What actually happened is duller: this box ran `make` and not `make helpers`, so
-`tools/codecpacks/ext4fs.codecpack/bin/ext4fs` stayed at 11-23, predating the
-reserved-inode fix. Proof it was that binary and nothing else: with a current pack the
-same fixture produces a **reserve list of 8 ranges instead of 4** (the journal and the
-resize inode reappear), `old.ext4` comes out byte-identical, and `e2fsck -fn` exits 0.
-
-The tool now says so instead of producing a confident wrong answer:
-`invf-absorb: WARNING: <bin> is older than <src> ... Run 'make helpers'.` And
-`tools/test-absorb-commit.sh` runs `make helpers` itself, the way the other suites
-build the driver they need -- a test that depends on a build product must ask for it.
+This is the fourth retraction of the day (recipe blobs, convert hardlinks, fsck exit
+codes, now this), and three of the four have the same root: a measurement taken against
+a binary or an environment that was not the one under test.

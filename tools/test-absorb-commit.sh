@@ -52,19 +52,6 @@ command -v e2fsck >/dev/null || { echo "SKIP (loud): e2fsck is not installed"; e
 # their driver.
 make -C "$REPO" helpers >/dev/null 2>&1     || echo "  note: 'make helpers' failed; the pack binary in the tree may be stale"
 
-# LAZY RECLAIM OFF IS A NAMED EXCLUSION, with the measurement behind it: with
-# INVFS_LAZY_RECLAIM=0 the published image is NOT byte-identical (e2fsck: "journal
-# superblock is corrupt"), while the default policy gives an identical image and
-# e2fsck rc=0 on the same fixture. That divergence is an OPEN defect in the publish
-# path, recorded in INCIDENTS.md; this leg runs under the default policy and says so,
-# rather than running under the disabled policy and being red for an unstated reason.
-if [ -n "${INVFS_LAZY_RECLAIM:-}" ]; then
-    echo "  note: unsetting INVFS_LAZY_RECLAIM ($INVFS_LAZY_RECLAIM) for this leg -- the"
-    echo "        publish path is only byte-exact under the default policy; that"
-    echo "        divergence is a recorded open defect, not a reason to skip."
-    unset INVFS_LAZY_RECLAIM
-fi
-
 rm -rf "$W"; mkdir -p "$W/mnt" "$W/chk" || { echo "FAIL: cannot create $W"; exit 1; }
 # 128 MiB source + 128 MiB staging + 128 MiB published, with slack.
 AVAIL_KB=$(df -Pk "$W" | awk 'NR==2 {print $4}')
