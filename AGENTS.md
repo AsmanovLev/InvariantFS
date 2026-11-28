@@ -283,6 +283,15 @@ for that prose (`git log --diff-filter=D --name-only -- src/doc/`).
 - Touching `INCIDENTS.md` / `impl_docs/AUDIT.md` without updating the
   status fields — these files are the source of truth for what's been
   fixed and what hasn't.
+- **Measuring against an artefact that is not the one under test.** Four
+  "known defects" were retracted in one day (2026-11-27) and three had the same
+  root: a stale `bin/invf-orphan_test` from five days earlier, a stale
+  `bin/ext4fs` pack binary that predated the reserved-inode fix, and a `$?` eaten
+  by this box's shell. Every measurement must name the artefact it ran —
+  path, mtime or commit — and every tool that execs a binary out of the tree
+  (`invf-absorb`, `invf-convert` via `absorb_pack_pick`) checks its mtime
+  against its source and says "run `make helpers`" instead of answering
+  confidently. A number without its artefact is a rumour.
 
 ---
 
