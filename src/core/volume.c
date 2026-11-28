@@ -1905,22 +1905,12 @@ static invfs_volume *vol_open_inner(const char *path, int *err_out)
         }
     }
 
-    /* WP19: INVFS_HEAT_INIT seeds the read-heat of entries created from
-     * now on (import/mkfs-time friendliness: pre-warm files you already
-     * know are hot). u16, default 0; the ARC_BYTES complaint convention. */
-    {
-        const char *hi = getenv("INVFS_HEAT_INIT");
-        if (hi && *hi) {
-            char *endp = NULL;
-            unsigned long want = strtoul(hi, &endp, 10);
-            if (endp == hi || *endp != '\0' || want > 0xFFFFul) {
-                fprintf(stderr, "[vol] INVFS_HEAT_INIT=\"%s\" is not a u16; "
-                                "using 0\n", hi);
-            } else {
-                v->heat_init = (uint16_t)want;
-            }
-        }
-    }
+    /* INVFS_HEAT_INIT was removed 2026-11-28: it parsed into v->heat_init and
+     * nothing ever read that field. Seeding read-heat on create needs the INO2
+     * ext blob, which the v1 inode row does not have -- the same reason
+     * heat_ext_merge() had no callers. A knob that silently does nothing is
+     * worse than no knob: tools/test-heat.sh's leg 2 was written around it and
+     * then had to skip. */
     /* WP22c test hook: see sync_fail_at (volume_internal.h). Parsed once
      * here like the other env knobs; fires once per process. */
     {
@@ -2067,6 +2057,13 @@ invfs_volume *vol_open(const char *path, int *err)
 void vol_close(invfs_volume *v)
 {
     if (v) {
+        /* How much of the promotion actually paid off: reads served from a
+         * dev0 acceleration copy. Printed on request because the number a
+         * workload produces lives in the workload's own processes, not in
+         * the sweep that copied the blocks (INVFS_TIER_STATS=1). */
+        if (v->tier_read_hits && getenv("INVFS_TIER_STATS"))
+            fprintf(stderr, "[tier] reads served from dev0 copies: %llu\n",
+                    (unsigned long long)v->tier_read_hits);
         /* Stop the worker HERE, but destroy its mutexes and the root-cache mutex
          * at the END of this function. Close work below still reads the volume:
          * vol_retire_drain_all -> dl_retire_free_list -> pba_ref_ensure ->

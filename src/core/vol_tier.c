@@ -854,10 +854,14 @@ out:
     free(hm.t);
     if (!invfs_sweep_ui_active() &&
         (v->tier_promoted || v->tier_demoted || v->tier_n))
+        /* tier_read_hits is cumulative since open, the rest are this run's.
+         * Printing both is the point: "copied N segments" without "served K
+         * reads from them" cannot say whether the promotion paid for itself. */
         printf("tier: %llu hot segment(s) copied to dev0 (%llu blocks), "
-               "%llu demoted; %zu copies live\n",
+               "%llu demoted; %zu copies live; dev0 copies served %llu read(s)\n",
                (unsigned long long)v->tier_promoted,
                (unsigned long long)v->tier_blocks,
-               (unsigned long long)v->tier_demoted, v->tier_n);
+               (unsigned long long)v->tier_demoted, v->tier_n,
+               (unsigned long long)v->tier_read_hits);
     return rc;
 }

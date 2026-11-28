@@ -157,98 +157,18 @@ $B/invf-fsck "$IMG" | tee "$WORK/fsck1.log"
 fsck_require_clean "$WORK/fsck1.log" "leg1" || exit 1
 
 echo
-# Leg 2 covers the two heat counters that metadata store CANNOT store: the create-time
-# read-heat seeding (INVFS_HEAT_INIT) and the write-heat carry on a rewrite
-# both go through heat_ext_merge(), which builds the INO2 ext blob -- and
-# invfs_inode_row has no ext field (WP-M7 kept only the fixed 114-byte row
-# plus xattr bytes), so on a v3 volume the value is computed and then dropped. Read heat
-# survives because WP78 moved it to the invfs.heat named xattr, which is why
-# leg 1 runs here. Until the write path persists heat through the xattr too,
-# this leg can only assert anything on a v2 volume -- so say so loudly instead
-# of failing on a feature the format does not have.
-# The format probe. This grepped fsck's output for "format:       v0", the
-# spelling of the generation BEFORE the metadata store; fsck has printed
-# "format:       v1 (metadata base tree)" for a long time, so the probe answered
-# "not meta" for every volume, leg 2 ran, and it failed on a feature the format
-# deliberately does not have (e2e-full 2026-11-24: `INVFS_HEAT_INIT did not
-# seed (rheat=0)`). Match the format fsck actually names, not the one it used to.
-vol_is_meta() { $B/invf-fsck "$1" 2>/dev/null | grep -q "format:.*metadata"; }
-if vol_is_meta "$IMG"; then
-    echo "== leg 2: SKIP (v3) -- write-heat + INVFS_HEAT_INIT are not persisted =="
-    echo "   both are carried in the INO2 ext blob; the v3 inode row has no ext"
-    echo "   field, so the value is dropped at commit. Read heat (leg 1) works:"
-    echo "   WP78 moved it to the invfs.heat xattr. Gap tracked for a v3 fix."
-    SKIP_LEG2=1
-else
-    SKIP_LEG2=0
-fi
-[ "$SKIP_LEG2" = 1 ] || {
-python3 - <<'PY'
-import os, random
-random.seed(2929)
-d = "/dev/shm/wp19heat/orig2"
-os.makedirs(d, exist_ok=True)
-WORDS = ("alpha beta gamma delta epsilon zeta eta theta iota kappa\n").split()
-def tf(name, size):
-    n, out = 0, []
-    while n < size:
-        w = random.choice(WORDS)
-        out.append(w); n += len(w) + 1
-    open(os.path.join(d, name), "w").write(" ".join(out)[:size])
-tf("w.txt", 5000); tf("c.txt", 5000); tf("init.txt", 3000)
-PY
-$B/invf-mkfs "$IMG2" 0.5 >/dev/null
-mkdir -p "$WORK/orig2"
-for f in w.txt c.txt; do
-    $B/invf-cp "$IMG2" "$WORK/orig2/$f" "$f" >/dev/null
-done
-INVFS_HEAT_INIT=7 $B/invf-cp "$IMG2" "$WORK/orig2/init.txt" init.txt >/dev/null
-RI=$(heat_max "$IMG2" init.txt rheat)
-WI=$(heat_max "$IMG2" init.txt wheat)
-echo "init.txt after HEAT_INIT=7 import: rheat=$RI wheat=$WI"
-[ "$RI" = "7" ] || { echo "FAIL: INVFS_HEAT_INIT did not seed (rheat=$RI)"; exit 1; }
-[ "$WI" = "1" ] || { echo "FAIL: create wheat=$WI != 1"; exit 1; }
-$B/invf-sweep "$IMG2" > "$WORK/s2sweep1.log" 2>&1 || { cat "$WORK/s2sweep1.log"; exit 1; }
-cls "$IMG2" w.txt | grep -q "^class=7" || { echo "FAIL: w.txt not batched"; exit 1; }
-cls "$IMG2" c.txt | grep -q "^class=7" || { echo "FAIL: c.txt not batched"; exit 1; }
-# rewrite w.txt 3x: wheat carries old+1 across every rewrite (rheat resets)
-for i in 1 2 3; do
-    python3 -c "
-import random
-random.seed($i)
-WORDS='alpha beta gamma delta epsilon zeta eta theta iota kappa\n'.split()
-out=[]; n=0
-while n < 5000:
-    w=random.choice(WORDS); out.append(w); n+=len(w)+1
-open('$WORK/orig2/w.txt','w').write(' '.join(out)[:5000])"
-    $B/invf-cp "$IMG2" "$WORK/orig2/w.txt" w.txt >/dev/null
-done
-W=$(heat_max "$IMG2" w.txt wheat)
-echo "w.txt wheat after 3 rewrites: $W"
-[ "$W" = "3" ] || { echo "FAIL: wheat $W != 3 after 3 rewrites"; exit 1; }
-$B/invf-sweep "$IMG2" > "$WORK/s2sweep2.log" 2>&1 || { cat "$WORK/s2sweep2.log"; exit 1; }
-cls "$IMG2" w.txt | grep -q "^class=4 algo=1" || {
-    echo "FAIL: write-hot w.txt did not take the generic floor: $(cls "$IMG2" w.txt)"; exit 1; }
-ast0 "$IMG2" w.txt | grep -q "zone=2 algo=1" || {
-    echo "FAIL: w.txt not per-segment ZSTD BINARY: $(ast0 "$IMG2" w.txt)"; exit 1; }
-cls "$IMG2" c.txt | grep -q "^class=7" || {
-    echo "FAIL: control c.txt lost its batch: $(cls "$IMG2" c.txt)"; exit 1; }
-echo "write-hot file took the generic floor (skips heavy codecs); control still TEXT"
-$B/invf-cat "$IMG2" w.txt "$WORK/out/w.txt" >/dev/null
-cmp -s "$WORK/orig2/w.txt" "$WORK/out/w.txt" || { echo "FAIL: w.txt not bit-exact"; exit 1; }
-$B/invf-cat "$IMG2" c.txt "$WORK/out/c.txt" >/dev/null
-cmp -s "$WORK/orig2/c.txt" "$WORK/out/c.txt" || { echo "FAIL: c.txt not bit-exact"; exit 1; }
-# WP22d: frees made by a non-arming process while a checkpoint was live are
-# held (never reused) but unregistered -- they sit as allocated orphans until
-# the checkpoint resolves AND fsck -f reclaims them. Close the lifecycle
-# explicitly here: realize the checkpoint, reclaim, then assert clean.
-$B/invf-sweep "$IMG2" --realize >/dev/null 2>&1 || true
-$B/invf-fsck "$IMG2" -f >/dev/null 2>&1 || true
-$B/invf-fsck "$IMG2" | tee "$WORK/fsck2.log"
-fsck_require_clean "$WORK/fsck2.log" "leg2" || exit 1
-
-echo "leg 2 assertions passed (v2 volume: write-heat and HEAT_INIT persist)"
-}
+echo "== leg 2: SKIP (named) -- write-heat and INVFS_HEAT_INIT no longer exist =="
+echo "   This leg asserted two write-path heat behaviours that needed the INO2"
+echo "   ext blob: create-time read-heat seeding (INVFS_HEAT_INIT) and the"
+echo "   write-heat carry on a rewrite. The v1 inode row has no ext field, so"
+echo "   heat_ext_merge() had zero callers and INVFS_HEAT_INIT parsed into a"
+echo "   field nothing read -- both removed 2026-11-28. What is left of heat is"
+echo "   READ heat, which lives in the invfs.heat named xattr and is asserted by"
+echo "   leg 1 above and by test-multidev's tier leg."
+echo "   Measured before deleting it (2026-11-28): a v1 volume rewritten 3x"
+echo "   reports heat=absent for wheat, and the file stays class=7 after the"
+echo "   sweep -- the carry the leg asserted cannot happen on this format."
+echo "   (leg 2 skipped by name; legs 1 and 3 run and assert)"
 
 echo
 echo "== leg 3: profile ladder =="

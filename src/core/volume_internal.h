@@ -402,9 +402,8 @@ typedef struct invfs_volume {
      * (invfs_profile_zstd_level); the effective name is also published back
      * to the environment so pack subprocesses inherit it. */
     uint8_t profile;
-    /* WP27: heat (the "invfs.heat" INO2-ext TLV, see invarifs.h).
-     * heat_init seeds the read-heat of newly created records
-     * (INVFS_HEAT_INIT, default 0). heat_any_rhot/whot are "some file sits
+    /* WP27: heat (the "invfs.heat" named xattr since WP78, see invarifs.h).
+     * heat_any_rhot/whot are "some file sits
      * at/above the hot threshold" summaries -- they let the sweep skip the
      * promotion walk / write-hot scans on cold volumes. heat_tab is the
      * session's per-inode accrued read counts (see the typedef note).
@@ -431,7 +430,9 @@ typedef struct invfs_volume {
      * one. Read the summary flags through heat_any_rhot()/heat_any_whot(),
      * never directly. */
     pthread_mutex_t heat_mu;
-    uint16_t heat_init;
+    /* heat_init was removed 2026-11-28: INVFS_HEAT_INIT parsed into it and
+     * nothing ever read it (the seeding it promised needed the INO2 ext,
+     * which the v1 row does not have). */
     int heat_any_rhot, heat_any_whot;
     uint64_t (*heat_tab)[2];       /* [0]=inode (0=empty), [1]=accrued reads */
     size_t heat_tab_mask, heat_tab_n;
@@ -616,6 +617,11 @@ typedef struct invfs_volume {
     uint64_t tier_owner_ext, rawm_owner_ext;
     /* last vol_tier_migrate run's counters (the sweep driver prints) */
     uint64_t tier_promoted, tier_demoted, tier_blocks;
+    /* WP-heat: how often a dev0 acceleration copy was actually SERVED.
+     * The promotion counters say what was copied; this one says whether the
+     * copy earned its bytes. Cumulative since open (not per sweep), so a
+     * workload can compare promotions with hits on the same run. */
+    uint64_t tier_read_hits;
     /* WP30: dynamic metadata extent state */
     invfs_met0 met0;                /* MET0 descriptor (loaded from disk) */
     int met0_present;               /* MET0 was present at open */
@@ -1751,13 +1757,6 @@ uint8_t heat_file_maxw(invfs_volume *v, uint64_t inode);
 /* persist a write-heat value on the file's live record (the rewrite
  * carry); no-op when the value is unchanged */
 void heat_file_setw(invfs_volume *v, uint64_t inode, uint8_t w);
-/* build the INO2 ext blob for a fresh/rewritten record: old ext carried
- * verbatim with the heat TLV inserted/replaced. Returns malloc'd blob
- * (NULL = keep no ext), *len_out its length. When old_ext is NULL a
- * minimal defaults ext is fabricated ONLY when there is heat to store. */
-uint8_t *heat_ext_merge(const invfs_volume *v, const uint8_t *old_ext,
-                        uint32_t old_len, int is_dir, uint16_t rheat,
-                        uint8_t wheat, uint32_t *len_out);
 /* fold the session's accrued reads into the records (vol_close / the
  * sweep's decay pass); marks the volume dirty when anything changed */
 void heat_fold(invfs_volume *v);

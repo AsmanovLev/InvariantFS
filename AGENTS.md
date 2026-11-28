@@ -292,6 +292,14 @@ for that prose (`git log --diff-filter=D --name-only -- src/doc/`).
   (`invf-absorb`, `invf-convert` via `absorb_pack_pick`) checks its mtime
   against its source and says "run `make helpers`" instead of answering
   confidently. A number without its artefact is a rumour.
+  Two more instances, both 2026-11-28, both in the same shape: a clone's
+  `bin/`+`build/` were six days behind its source, so a fresh writer's volume
+  came back EIO from an old reader and looked like an on-disk format split;
+  and `bin/invf-stat_counts_test` (mtime 2026-11-22) reported RED against
+  fresh tools while the same test at the base commit was GREEN. Unit binaries
+  under `bin/` are build products `make all` does NOT build: run them through
+  `make test-shard-N` (which owns the prerequisites), never the binary alone
+  in a long-lived tree.
 
 ---
 

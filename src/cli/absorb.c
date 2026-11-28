@@ -837,7 +837,9 @@ static int absorb_stage(const char *target, const char *reserve_list,
 {
     FILE *in, *out;
     char line[256];
-    unsigned char buf[1 << 20];
+    /* No 1 MiB stack buffer: it was declared here and never used -- a megabyte of
+     * stack in a function that copies through the framed path with its own
+     * buffer. -Wunused-variable named it (2026-11-28). */
     int rc = 0;
 
     in = fopen(target, "rb");

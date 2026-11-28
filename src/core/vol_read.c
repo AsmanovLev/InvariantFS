@@ -91,8 +91,10 @@ int seg_read_checked(invfs_volume *v, uint64_t pba, uint64_t plen,
         uint64_t dpba = 0, dlen = 0;
         if (wp25_tier_lookup(v, pba, &dpba, &dlen) == 0) {
             if (seg_read_once(v, dpba, dlen, min_csize, csize_out,
-                              blob_out, &bad) == 0)
+                              blob_out, &bad) == 0) {
+                v->tier_read_hits++;
                 return 0;
+            }
             if (getenv("INVFS_DEBUG"))
                 fprintf(stderr, "[tier] dev0 copy of pba %llu failed; "
                         "reading canonical\n", (unsigned long long)pba);

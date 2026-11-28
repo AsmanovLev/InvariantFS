@@ -970,7 +970,7 @@ already confirmed it is pre-existing. Analysis: `WP-SPT0-PARTIAL-RECLAIM.md`.
 |---|---|
 | **`test-resize`** | **rc=139 (SIGSEGV)** — a crash, highest priority |
 | `test-writeback-stall` | "gate-on: the drain never ran after the write path went quiet (21s) — a deferral that never ends is a leak, not a yield" |
-| `test-heat` | `INVFS_HEAT_INIT did not seed (rheat=0)` |
+| `test-heat` | ~~`INVFS_HEAT_INIT did not seed (rheat=0)`~~ — obsolete: the knob and `heat_ext_merge()` were removed as dead code on 2026-11-28 (see `impl_docs/BENCH-HEAT-TIER.md`); leg 2 is now a named skip |
 | `test-multidev` | `no demotion under pressure` |
 | `test-pngflac` | `palette.png: unexpected stamp cls=8 algo=1 gen=1` |
 | `test-dedupe` (see D) | possibly related to `touched[]`/accounting |
