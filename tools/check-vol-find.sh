@@ -139,19 +139,19 @@ src/core/vol_cpack.c:6197:SKIP   # rebuild layout probe: absent blob means per-m
 src/core/vol_cpack.c:6240:ACTS   # member rebuild: miss aborts with error
 src/core/vol_cpack.c:5742:SKIP   # member commit (streamed): the member inode is looked up after vol_write_commit(), which does not hand its id back, so a miss means the commit failed and the container is abandoned
 src/core/vol_exer.c:267:ACTS
-src/core/vol_heat.c:799:SKIP
+src/core/vol_heat.c:687:SKIP
 src/core/vol_png.c:1247:SKIP
-src/core/vol_read.c:491:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
-src/core/vol_read.c:506:SKIP
-src/core/vol_read.c:980:SKIP
-src/core/vol_read.c:997:SKIP
-src/core/vol_read.c:1057:SKIP
-src/core/vol_read.c:1132:SKIP
-src/core/vol_read.c:1331:SKIP
-src/core/vol_read.c:1369:ACTS
-src/core/vol_read.c:1582:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
-src/core/vol_read.c:1589:SKIP
-src/core/vol_read.c:1782:ACTS
+src/core/vol_read.c:493:SKIP   # WP620 pngr_lane_pixels (NBLI half): a missing "name!nbli" reads EIO upstream, same shape as the :503 jxl twin -- the sibling a lane minted must exist
+src/core/vol_read.c:508:SKIP
+src/core/vol_read.c:982:SKIP
+src/core/vol_read.c:999:SKIP
+src/core/vol_read.c:1059:SKIP
+src/core/vol_read.c:1134:SKIP
+src/core/vol_read.c:1333:SKIP
+src/core/vol_read.c:1371:ACTS
+src/core/vol_read.c:1584:ACTS   # vol_read_named: the EXACT name decides. Found -> those are the bytes returned with status 0; absent -> the name is walked as a container path instead
+src/core/vol_read.c:1591:SKIP
+src/core/vol_read.c:1784:ACTS
 src/core/vol_sweep.c:280:SKIP
 src/core/vol_sweep.c:612:ACTS
 src/core/vol_sweep.c:631:ACTS
